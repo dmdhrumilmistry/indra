@@ -475,6 +475,40 @@ env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN =
 For runners other than Claude Code, set `model_args` (e.g. `["--model", "{model}"]`) to let a
 profile choose the model; permission modes and tool rules are Claude Code's.
 
+### Secrets
+
+Agents need tokens (a tracker's API, a cloud account, a model key). They never go in
+`indra.toml`; a profile refers to one by name:
+
+```toml
+[[profile]]
+name = "board-worker"
+runner = "claude"
+env  = { JIRA_TOKEN = "secret:jira" }
+```
+
+Set the value in **Settings > Secrets**, or on a machine without a browser:
+
+```bash
+printf '%s' "$TOKEN" | indra secret set jira --description "Jira API" --profile board-worker
+indra secret list          # names, scopes and use; never values
+indra secret rm jira
+```
+
+- **Encrypted at rest** in the indra data directory (`secrets/vault.json`, XChaCha20-Poly1305).
+  The key is `INDRA_SECRETS_KEY` (64 hex characters) when set, so it can live off the disk;
+  otherwise a random key in `secrets/vault.key`, readable only by you. Anyone who can read your
+  files as you can read both; the encryption protects copies of the vault file (backups, synced
+  folders), not your account.
+- **Write-only.** The console, the API and the CLI show names, descriptions, scopes and use counts,
+  never a value.
+- **Scoped.** A secret can be limited to some profiles and some nodes. A launch outside its scope,
+  or one that needs a secret that is not set, is refused before anything starts.
+- **Delivered at launch, in memory.** The value goes into the agent's environment; to a remote
+  node it travels inside the job over SSH and is never written to disk there.
+- **Redacted.** The agent's live feed and log show `[secret:jira]` instead of the value.
+- **Audited.** Each delivery is appended to `secrets/audit.log` (secret, profile, node, process).
+
 ### Pivot
 
 On a process page, **Pivot this agent** gives it a new instruction without losing its work:

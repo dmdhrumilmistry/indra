@@ -263,6 +263,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
   (manual, acceptEdits, auto, plan, ...) and models while it runs, interrupt it, or send it a
   follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
   plan and the model you pick (or a local one through Ollama) does the work.
+- **Secrets:** tokens agents need live in an encrypted store, are referenced from profiles
+  (`JIRA_TOKEN = "secret:jira"`), are scoped to profiles and machines, reach the agent only in
+  memory at launch, and are redacted from everything it prints.
 - **Settings:** configure everything from the browser: runners, remote nodes, workflows,
   presets, harnesses, capacity, or the raw `indra.toml`. Each save is checked and applies at
   once, and your comments in the file are kept.

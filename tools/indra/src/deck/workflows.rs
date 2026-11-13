@@ -287,6 +287,7 @@ impl Engine {
         };
         let start = crate::deck::procs::StartOpts {
             agent,
+            profile: t.profile.clone(),
             ..Default::default()
         };
         if t.node == LOCAL {

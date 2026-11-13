@@ -148,6 +148,9 @@ pub struct Proc {
     tx: broadcast::Sender<Event>,
     stop: Mutex<Option<oneshot::Sender<()>>>,
     opts: AgentOpts,
+    profile: Option<String>,
+    /// Secret values this agent was given, and their names, for redaction.
+    redact: Vec<(String, String)>,
     /// Lines for an interactive agent's stdin (local) or the node (remote).
     ctl: Mutex<Option<mpsc::UnboundedSender<Ctl>>>,
 }
@@ -168,7 +171,17 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 impl Proc {
+    /// `text` with the secret values this agent was given replaced by names.
+    fn redacted(&self, text: &str) -> String {
+        if self.redact.is_empty() {
+            text.to_string()
+        } else {
+            crate::deck::secrets::redact(text, &self.redact)
+        }
+    }
+
     fn push(&self, kind: &str, text: String, agent: Option<String>) {
+        let text = self.redacted(&text);
         let ev = {
             let mut st = self.state.lock().unwrap();
             st.seq += 1;
@@ -229,6 +242,10 @@ impl Proc {
 
     pub fn opts(&self) -> &AgentOpts {
         &self.opts
+    }
+
+    pub fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
     }
 
     fn send(&self, c: Ctl) -> Result<(), String> {
@@ -740,6 +757,8 @@ pub struct Procs {
     procs: Mutex<BTreeMap<u64, Arc<Proc>>>,
     next: AtomicU64,
     log_dir: PathBuf,
+    /// Secrets that profiles reference (`secret:<name>`), next to the logs.
+    vault: Arc<crate::deck::secrets::Vault>,
 }
 
 /// Extra launch options: a pivot's session and parent, and the agent options.
@@ -748,7 +767,10 @@ pub struct StartOpts {
     pub resume: Option<Resume>,
     pub parent: Option<u64>,
     /// Model, permission mode, tools and environment (from a profile).
+    /// Environment values may be `secret:<name>` references.
     pub agent: AgentOpts,
+    /// The profile it came from, for secret scopes.
+    pub profile: Option<String>,
 }
 
 /// Where and what to launch.
@@ -772,11 +794,21 @@ pub enum Launch<'a> {
 
 impl Procs {
     pub fn new(log_dir: PathBuf) -> Arc<Procs> {
+        let secrets = log_dir
+            .parent()
+            .map(|d| d.join("secrets"))
+            .unwrap_or_else(|| log_dir.join("secrets"));
         Arc::new(Procs {
             procs: Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(1),
             log_dir,
+            vault: Arc::new(crate::deck::secrets::Vault::open(secrets)),
         })
+    }
+
+    /// The secret store agents' profiles draw from.
+    pub fn vault(&self) -> &crate::deck::secrets::Vault {
+        &self.vault
     }
 
     pub fn list(&self) -> Vec<ProcView> {
@@ -863,6 +895,19 @@ impl Procs {
             remote: bool,
             can_resume: bool,
         }
+        // Secrets: resolved now, for this profile on this node, or the launch
+        // fails before anything starts. The process keeps the references; the
+        // values go only to the agent, and are redacted from what it prints.
+        let node_name = match &l {
+            Launch::Local { .. } => crate::deck::nodes::LOCAL.to_string(),
+            Launch::Remote { node, .. } => node.name.clone(),
+        };
+        let (env, redact) =
+            self.vault
+                .resolve(&opts.agent.env, opts.profile.as_deref(), &node_name)?;
+        let shown = opts.agent.clone();
+        let mut opts = opts;
+        opts.agent.env = env;
         let plan = match l {
             Launch::Local {
                 runner,
@@ -1006,9 +1051,14 @@ impl Procs {
             }),
             tx,
             stop: Mutex::new(Some(stop_tx)),
-            opts: opts.agent.clone(),
+            opts: shown,
+            profile: opts.profile.clone(),
+            redact: redact.clone(),
             ctl: Mutex::new((plan.job.is_some() || interactive).then(|| ctl_tx.clone())),
         });
+        let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
+        self.vault
+            .record_use(&used, opts.profile.as_deref(), &node_name, id);
         self.procs.lock().unwrap().insert(id, proc.clone());
         proc.push(
             "system",
@@ -1047,7 +1097,7 @@ impl Procs {
             let mut lines = BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(f) = lf1.lock().unwrap().as_mut() {
-                    let _ = writeln!(f, "{}", line);
+                    let _ = writeln!(f, "{}", p1.redacted(&line));
                 }
                 if remote {
                     p1.node_line(&line);
@@ -1062,7 +1112,7 @@ impl Procs {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(f) = lf2.lock().unwrap().as_mut() {
-                    let _ = writeln!(f, "[stderr] {}", line);
+                    let _ = writeln!(f, "[stderr] {}", p2.redacted(&line));
                 }
                 if !line.trim().is_empty() {
                     p2.push("stderr", line, None);
@@ -1414,6 +1464,8 @@ mod tests {
             tx,
             stop: Mutex::new(None),
             opts: AgentOpts::default(),
+            profile: None,
+            redact: Vec::new(),
             ctl: Mutex::new(None),
         };
         for l in [

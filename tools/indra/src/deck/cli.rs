@@ -637,3 +637,100 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
         NodeCmd::Exec => nodes::cmd_exec(&load(opts, None, false)?),
     }
 }
+
+#[derive(Args)]
+pub struct SecretArgs {
+    #[command(subcommand)]
+    cmd: SecretCmd,
+}
+
+#[derive(Subcommand)]
+pub enum SecretCmd {
+    /// Set a secret; the value is read from stdin (never from an argument)
+    Set {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        /// Only these profiles may receive it (repeatable; default: any)
+        #[arg(long = "profile")]
+        profiles: Vec<String>,
+        /// Only these nodes may receive it (repeatable; default: any)
+        #[arg(long = "node")]
+        nodes: Vec<String>,
+    },
+    /// List secrets: names, scopes and use, never values
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a secret
+    Rm { name: String },
+}
+
+pub fn run_secret(a: SecretArgs) -> Result<ExitCode, String> {
+    let vault = crate::deck::secrets::Vault::open(config::data_dir().join("secrets"));
+    match a.cmd {
+        SecretCmd::Set {
+            name,
+            description,
+            profiles,
+            nodes,
+        } => {
+            use std::io::Read;
+            let mut value = String::new();
+            std::io::stdin()
+                .read_to_string(&mut value)
+                .map_err(|e| e.to_string())?;
+            let value = value.trim_end_matches(['\n', '\r']).to_string();
+            vault.set(
+                &name,
+                crate::deck::secrets::Change {
+                    value: (!value.is_empty()).then_some(value),
+                    description,
+                    profiles: (!profiles.is_empty()).then_some(profiles),
+                    nodes: (!nodes.is_empty()).then_some(nodes),
+                },
+            )?;
+            println!(
+                "secret '{}' saved; reference it as secret:{} in a profile's env",
+                name, name
+            );
+        }
+        SecretCmd::List { json } => {
+            let list = vault.list()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?
+                );
+            } else if list.is_empty() {
+                println!("no secrets");
+            } else {
+                for s in list {
+                    let scope = |v: &Vec<String>| {
+                        if v.is_empty() {
+                            "any".to_string()
+                        } else {
+                            v.join(",")
+                        }
+                    };
+                    println!(
+                        "{:<24} profiles: {:<16} nodes: {:<16} used {} times  {}",
+                        s.name,
+                        scope(&s.profiles),
+                        scope(&s.nodes),
+                        s.uses,
+                        s.description
+                    );
+                }
+            }
+        }
+        SecretCmd::Rm { name } => {
+            if !vault.remove(&name)? {
+                return Err(format!("no secret named '{}'", name));
+            }
+            println!("deleted '{}'", name);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
