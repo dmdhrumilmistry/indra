@@ -14,7 +14,8 @@
 //!   when they resolve inside a run directory; runners come from config only;
 //! - a strict Content-Security-Policy: no inline script, no third parties.
 
-use crate::deck::config::{Harness, Settings};
+use crate::deck::confedit;
+use crate::deck::config::{self, Harness, Settings};
 use crate::deck::discover::{self, Def};
 use crate::deck::nodes::{self, NodeInfo, Resume, RunsSpec, LOCAL};
 use crate::deck::procs::{Launch, Procs, StartOpts};
@@ -39,7 +40,7 @@ use std::sync::Mutex;
 pub type NodeProbe = (u64, Result<NodeInfo, String>);
 
 pub struct App {
-    pub settings: Arc<Settings>,
+    settings: config::Shared,
     pub token: String,
     pub procs: Arc<Procs>,
     pub engine: Arc<Engine>,
@@ -47,21 +48,52 @@ pub struct App {
     pub loopback: bool,
     /// Remote node facts, cached briefly: (checked at, result).
     pub node_cache: Mutex<HashMap<String, NodeProbe>>,
+    /// Editing the config file from the console (None: not offered).
+    pub config: Option<ConfigAccess>,
+}
+
+/// What the console needs to edit the config file and apply the result.
+pub struct ConfigAccess {
+    /// How the settings were loaded, to load them again after an edit.
+    pub opts: config::LoadOptions,
+    /// The file edits are written to (it may not exist yet).
+    pub path: std::path::PathBuf,
+    /// Why editing is turned off, if it is.
+    pub locked: Option<String>,
+    /// One save at a time.
+    pub saving: Mutex<()>,
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(settings: Settings, token: String, loopback: bool) -> Arc<App> {
-        let settings = Arc::new(settings);
+        App::with_config(settings, token, loopback, None)
+    }
+
+    pub fn with_config(
+        settings: Settings,
+        token: String,
+        loopback: bool,
+        config: Option<ConfigAccess>,
+    ) -> Arc<App> {
         let procs = Procs::new(settings.data_dir.join("logs"));
-        let engine = Engine::new(procs.clone(), settings.clone());
+        let shared = config::Shared::new(settings);
+        let engine = Engine::new(procs.clone(), shared.clone());
         Arc::new(App {
-            settings,
+            settings: shared,
             token,
             procs,
             engine,
             loopback,
             node_cache: Mutex::new(HashMap::new()),
+            config,
         })
+    }
+
+    /// The settings now. Take one snapshot per request: an edit in the
+    /// console replaces them.
+    pub fn settings(&self) -> Arc<Settings> {
+        self.settings.get()
     }
 }
 
@@ -91,6 +123,9 @@ fn not_found(msg: impl Into<String>) -> ApiError {
 }
 fn forbidden(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::FORBIDDEN, msg.into())
+}
+fn internal(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg.into())
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -224,18 +259,19 @@ struct HQ {
 }
 
 impl App {
-    fn harness(&self, name: Option<&str>) -> ApiResult<&Harness> {
+    fn harness(&self, name: Option<&str>) -> ApiResult<Harness> {
+        let s = self.settings();
         match name.filter(|n| !n.is_empty()) {
-            Some(n) => self
-                .settings
+            Some(n) => s
                 .harnesses
                 .iter()
                 .find(|h| h.name == n)
+                .cloned()
                 .ok_or_else(|| not_found(format!("no harness named '{}'", n))),
-            None => self
-                .settings
+            None => s
                 .harnesses
                 .first()
+                .cloned()
                 .ok_or_else(|| not_found("no harness configured; see `indra init`")),
         }
     }
@@ -276,7 +312,7 @@ fn harness_json(h: &Harness) -> Value {
 // ---- handlers ------------------------------------------------------------------
 
 async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
-    let s = &app.settings;
+    let s = &app.settings();
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "read_only": s.read_only,
@@ -290,14 +326,17 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         })).collect::<Vec<_>>(),
         "presets": s.presets,
         "procs": app.procs.list(),
-        "nodes": std::iter::once(LOCAL.to_string()).chain(app.settings.nodes.iter().map(|n| n.name.clone())).collect::<Vec<_>>(),
-        "workflows": app.settings.workflows.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
+        "nodes": std::iter::once(LOCAL.to_string()).chain(s.nodes.iter().map(|n| n.name.clone())).collect::<Vec<_>>(),
+        "workflows": s.workflows.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
         "running": app.procs.running(),
+        "settings": app.config.as_ref().map(|c| json!({
+            "path": c.path.display().to_string(), "editable": c.locked.is_none(), "locked": c.locked,
+        })),
     }))
 }
 
 async fn defs(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     Ok(Json(json!(discover::discover(h))))
 }
 
@@ -308,7 +347,7 @@ struct DefQ {
 }
 
 async fn def_get(State(app): State<Arc<App>>, Query(q): Query<DefQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let d = def_by_id(h, &q.id)?;
     let content = discover::read_body(&d).map_err(|e| not_found(e.to_string()))?;
     let defs = discover::discover(h);
@@ -346,13 +385,13 @@ struct SaveReq {
 }
 
 async fn def_put(State(app): State<Arc<App>>, Json(r): Json<SaveReq>) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     if r.content.len() > 1_000_000 {
         return Err(bad("content is larger than 1 MB"));
     }
-    let h = app.harness(r.h.as_deref())?;
+    let h = &app.harness(r.h.as_deref())?;
     let d = def_by_id(h, &r.id)?;
     let current = discover::read_body(&d).map_err(|e| not_found(e.to_string()))?;
     if fingerprint(&current) != r.hash {
@@ -369,13 +408,13 @@ async fn def_put(State(app): State<Arc<App>>, Json(r): Json<SaveReq>) -> ApiResu
 }
 
 async fn graph(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let defs = discover::discover(h);
     Ok(Json(json!(discover::graph(h, &defs))))
 }
 
 async fn memory(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let list: Vec<Value> = h
         .memory_paths()
         .iter()
@@ -404,7 +443,7 @@ async fn memory_graph(
     State(app): State<Arc<App>>,
     Query(q): Query<MemQ>,
 ) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let p = h
         .memory_paths()
         .get(q.i)
@@ -416,7 +455,7 @@ async fn memory_graph(
 }
 
 async fn runs_list(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     Ok(Json(json!(runs::list(h, 200))))
 }
 
@@ -429,13 +468,13 @@ struct RunQ {
 }
 
 async fn run_get(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let dir = runs::find(h, &q.key).ok_or_else(|| not_found("no such run"))?;
     Ok(Json(json!(runs::summarize(h, &q.key, &dir, true))))
 }
 
 async fn run_file(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let dir = runs::find(h, &q.key).ok_or_else(|| not_found("no such run"))?;
     let rel = q.rel.ok_or_else(|| bad("rel is required"))?;
     let p = runs::confined(&dir, &rel)
@@ -464,7 +503,7 @@ fn node_targets(app: &App, h: &Harness, node: &str) -> ApiResult<Vec<String>> {
     if node == LOCAL {
         return Ok(h.targets.iter().map(|t| t.display().to_string()).collect());
     }
-    app.settings
+    app.settings()
         .node(node)
         .map(|n| n.targets.clone())
         .ok_or_else(|| bad(format!("unknown node '{}'", node)))
@@ -482,17 +521,17 @@ async fn proc_start(
     State(app): State<Arc<App>>,
     Json(r): Json<LaunchReq>,
 ) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     let prompt = check_prompt(&r.prompt)?;
-    let h = app.harness(r.h.as_deref())?;
+    let h = &app.harness(r.h.as_deref())?;
     let node = r.node.as_deref().unwrap_or(LOCAL);
     let targets = node_targets(&app, h, node)?;
     let target = targets.get(r.target).ok_or_else(|| bad("unknown target"))?;
     let id = if node == LOCAL {
-        let runner = app
-            .settings
+        let settings = app.settings();
+        let runner = settings
             .runners
             .iter()
             .find(|x| x.name == r.runner)
@@ -505,7 +544,8 @@ async fn proc_start(
             target: &target,
         })
     } else {
-        let n = app.settings.node(node).ok_or_else(|| bad("unknown node"))?;
+        let settings = app.settings();
+        let n = settings.node(node).ok_or_else(|| bad("unknown node"))?;
         nodes::validate_name(&r.runner).map_err(bad)?;
         app.procs.start(Launch::Remote {
             node: n,
@@ -538,7 +578,7 @@ async fn proc_stop(
     State(app): State<Arc<App>>,
     UrlPath(id): UrlPath<u64>,
 ) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     let p = app
@@ -606,7 +646,7 @@ async fn proc_pivot(
     UrlPath(id): UrlPath<u64>,
     Json(r): Json<PivotReq>,
 ) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     let prompt = check_prompt(&r.prompt)?;
@@ -634,14 +674,14 @@ async fn proc_pivot(
     }
     if p.node_name() == LOCAL {
         if !app
-            .settings
+            .settings()
             .runners
             .iter()
             .any(|x| x.name == p.runner_name())
         {
             return Err(bad("its runner is no longer configured"));
         }
-    } else if app.settings.node(p.node_name()).is_none() {
+    } else if app.settings().node(p.node_name()).is_none() {
         return Err(bad("its node is no longer configured"));
     }
     let was_running = p.is_running();
@@ -677,8 +717,8 @@ async fn proc_pivot(
     };
     let harness = p.harness_name().to_string();
     let new = if p.node_name() == LOCAL {
-        let runner = app
-            .settings
+        let settings = app.settings();
+        let runner = settings
             .runners
             .iter()
             .find(|x| x.name == p.runner_name())
@@ -694,8 +734,8 @@ async fn proc_pivot(
             opts,
         )
     } else {
-        let node = app
-            .settings
+        let settings = app.settings();
+        let node = settings
             .node(p.node_name())
             .ok_or_else(|| bad("its node is no longer configured"))?;
         app.procs.start_with(
@@ -732,11 +772,11 @@ async fn nodes_list(
     State(app): State<Arc<App>>,
     Query(q): Query<NodesQ>,
 ) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     let now = runs::now();
     // Probe stale remote nodes in parallel.
     let mut set = tokio::task::JoinSet::new();
-    for n in app.settings.nodes.iter().cloned() {
+    for n in app.settings().nodes.iter().cloned() {
         let fresh = q.refresh.is_none()
             && app
                 .node_cache
@@ -757,12 +797,12 @@ async fn nodes_list(
     }
     let local = json!({
         "name": LOCAL, "kind": "local", "description": "This machine",
-        "max_parallel": app.settings.local_max_parallel, "running": app.procs.running_on(LOCAL),
-        "targets": node_targets(&app, h, LOCAL)?, "info": nodes::local_info(&app.settings), "error": null, "checked": now,
+        "max_parallel": app.settings().local_max_parallel, "running": app.procs.running_on(LOCAL),
+        "targets": node_targets(&app, h, LOCAL)?, "info": nodes::local_info(&app.settings()), "error": null, "checked": now,
     });
     let cache = app.node_cache.lock().unwrap();
     let mut out = vec![local];
-    for n in &app.settings.nodes {
+    for n in &app.settings().nodes {
         let (checked, info, error) = match cache.get(&n.name) {
             Some((t, Ok(i))) => (*t, json!(i), Value::Null),
             Some((t, Err(e))) => (*t, Value::Null, json!(e)),
@@ -787,12 +827,12 @@ async fn node_runs(
     State(app): State<Arc<App>>,
     Query(q): Query<NodeRunsQ>,
 ) -> ApiResult<Json<Value>> {
-    let h = app.harness(q.h.as_deref())?;
+    let h = &app.harness(q.h.as_deref())?;
     if q.node == LOCAL {
         return Ok(Json(json!(runs::list(h, 100))));
     }
-    let n = app
-        .settings
+    let settings = app.settings();
+    let n = settings
         .node(&q.node)
         .ok_or_else(|| not_found("unknown node"))?;
     let Some(spec) = RunsSpec::for_node(h, &n.targets) else {
@@ -807,7 +847,7 @@ async fn node_runs(
 // ---- workflows -------------------------------------------------------------------
 
 async fn workflows_list(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(json!({ "defs": app.settings.workflows, "runs": app.engine.list() }))
+    Json(json!({ "defs": app.settings().workflows, "runs": app.engine.list() }))
 }
 
 #[derive(Deserialize)]
@@ -819,7 +859,7 @@ async fn workflow_run(
     State(app): State<Arc<App>>,
     Json(r): Json<RunWfReq>,
 ) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     let id = app.engine.start_named(&r.name).map_err(bad)?;
@@ -844,7 +884,7 @@ async fn workflow_fanout(
     State(app): State<Arc<App>>,
     Json(r): Json<FanOutReq>,
 ) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     let prompt = check_prompt(&r.prompt)?;
@@ -852,7 +892,7 @@ async fn workflow_fanout(
     if r.targets.is_empty() || r.targets.len() > 100 {
         return Err(bad("pick 1 to 100 targets"));
     }
-    let h = app.harness(r.h.as_deref())?;
+    let h = &app.harness(r.h.as_deref())?;
     let mut pairs = Vec::new();
     for t in &r.targets {
         let list = node_targets(&app, h, &t.node)?;
@@ -881,13 +921,157 @@ async fn workflow_cancel(
     State(app): State<Arc<App>>,
     UrlPath(id): UrlPath<u64>,
 ) -> ApiResult<Json<Value>> {
-    if app.settings.read_only {
+    if app.settings().read_only {
         return Err(forbidden("indra is running read-only"));
     }
     if !app.engine.cancel(id) {
         return Err(not_found("no such workflow run"));
     }
     Ok(Json(json!({ "cancelling": true })))
+}
+
+// ---- settings (the config file) ------------------------------------------------
+
+fn config_access(app: &App) -> ApiResult<&ConfigAccess> {
+    app.config
+        .as_ref()
+        .ok_or_else(|| not_found("settings cannot be edited from this console"))
+}
+
+/// A built-in harness as config, for "customize": a [[harness]] with the
+/// same name replaces the built-in one.
+fn harness_cfg(h: &Harness) -> config::HarnessCfg {
+    config::HarnessCfg {
+        name: h.name.clone(),
+        description: h.description.clone(),
+        root: h.root.display().to_string(),
+        agents: h.agents.clone(),
+        skills: h.skills.clone(),
+        prompts: h.prompts.clone(),
+        memory: h.memory.clone(),
+        targets: h.targets.iter().map(|t| t.display().to_string()).collect(),
+        runs: h.runs.clone(),
+        findings: h.findings.clone(),
+        group_by: h.group_by.clone(),
+        stages: h.stages.clone(),
+    }
+}
+
+fn config_payload(app: &App) -> ApiResult<Value> {
+    let c = config_access(app)?;
+    let (text, exists) = confedit::read(&c.path).map_err(internal)?;
+    let (parsed, error) = match confedit::parse(&text) {
+        Ok(cf) => (json!(cf), Value::Null),
+        Err(e) => (Value::Null, json!(e)),
+    };
+    let s = app.settings();
+    Ok(json!({
+        "path": c.path.display().to_string(),
+        "dir": c.path.parent().map(|d| d.display().to_string()),
+        "exists": exists,
+        "editable": c.locked.is_none(),
+        "locked": c.locked,
+        "version": confedit::version(&text),
+        "text": text,
+        "config": parsed,
+        "error": error,
+        "builtin": {
+            "runners": config::default_runners(),
+            "presets": config::default_presets(),
+            "harnesses": s.harnesses.iter().filter(|h| h.builtin).map(harness_cfg).collect::<Vec<_>>(),
+        },
+        "installed": s.runners.iter().map(|r| json!({
+            "name": r.name, "available": r.program.is_some(),
+            "program": r.program.as_ref().map(|p| p.display().to_string()),
+        })).collect::<Vec<_>>(),
+        "startup": {
+            "bind": s.bind, "read_only": s.read_only,
+            "targets": c.opts.targets.iter().map(|t| t.display().to_string()).collect::<Vec<_>>(),
+        },
+    }))
+}
+
+/// Load `text` exactly as `indra serve` would, without writing anything.
+fn check_config(app: &App, c: &ConfigAccess, text: &str) -> ApiResult<Settings> {
+    let file = confedit::parse(text).map_err(|e| bad(format!("not saved: {}", e)))?;
+    let mut s = config::build_settings(&c.opts, Some(c.path.clone()), &file)
+        .map_err(|e| bad(format!("not saved: {}", e)))?;
+    // Where the console listens and whether it is read-only are fixed at start.
+    let now = app.settings();
+    s.bind = now.bind.clone();
+    s.read_only = now.read_only;
+    s.data_dir = now.data_dir.clone();
+    Ok(s)
+}
+
+async fn config_get(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
+    Ok(Json(config_payload(&app)?))
+}
+
+#[derive(Deserialize)]
+struct ConfigEdit {
+    /// The `version` the page loaded; a save over a newer file is refused.
+    version: String,
+    /// Replace one section (`runner`, `node`, ...) with `value`...
+    section: Option<String>,
+    #[serde(default)]
+    value: Value,
+    /// ...or the whole file with `text`.
+    text: Option<String>,
+}
+
+async fn config_put(
+    State(app): State<Arc<App>>,
+    Json(r): Json<ConfigEdit>,
+) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    if let Some(why) = &c.locked {
+        return Err(forbidden(why.clone()));
+    }
+    {
+        let _one_at_a_time = c.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let (current, _) = confedit::read(&c.path).map_err(internal)?;
+        if confedit::version(&current) != r.version {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "the config file changed since this page loaded it; reload to see the new version"
+                    .into(),
+            ));
+        }
+        let next = match (r.section, r.text) {
+            (Some(section), None) => {
+                confedit::set_section(&current, &section, &r.value).map_err(bad)?
+            }
+            (None, Some(text)) => text,
+            _ => return Err(bad("send a section and its value, or the whole text")),
+        };
+        let settings = check_config(&app, c, &next)?;
+        confedit::write_atomic(&c.path, &next).map_err(internal)?;
+        app.settings.set(settings);
+        app.node_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+    Ok(Json(config_payload(&app)?))
+}
+
+#[derive(Deserialize)]
+struct ConfigCheck {
+    text: String,
+}
+
+async fn config_check(
+    State(app): State<Arc<App>>,
+    Json(r): Json<ConfigCheck>,
+) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    let s = check_config(&app, c, &r.text)?;
+    Ok(Json(json!({
+        "ok": true,
+        "harnesses": s.harnesses.len(), "runners": s.runners.len(), "presets": s.presets.len(),
+        "nodes": s.nodes.len(), "workflows": s.workflows.len(),
+    })))
 }
 
 pub fn router(app: Arc<App>) -> Router {
@@ -906,6 +1090,8 @@ pub fn router(app: Arc<App>) -> Router {
             get(|| async { asset("image/svg+xml", FAVICON) }),
         )
         .route("/api/overview", get(overview))
+        .route("/api/config", get(config_get).put(config_put))
+        .route("/api/config/check", post(config_check))
         .route("/api/defs", get(defs))
         .route("/api/def", get(def_get).put(def_put))
         .route("/api/graph", get(graph))
@@ -1250,6 +1436,194 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// The Settings page: edits keep the file's comments, apply at once, and
+    /// a bad, stale or locked edit writes nothing.
+    #[tokio::test]
+    async fn settings_are_edited_checked_and_applied() {
+        let dir = std::env::temp_dir().join(format!("indra-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let path = dir.join("indra.toml");
+        let original = "# my comment\nbuiltins = false\n\n[[harness]]\nname = \"h\"\nroot = \".\"\ntargets = [\"work\"]\n\n# runners\n[[runner]]\nname = \"say\"\ncommand = \"echo\"\nargs = [\"{prompt}\"]\n";
+        std::fs::write(&path, original).unwrap();
+        let opts = config::LoadOptions {
+            config: Some(path.clone()),
+            targets: vec![],
+            bind: None,
+            read_only: false,
+            cwd: dir.clone(),
+        };
+        let mk = |locked: Option<String>| {
+            let s = config::load(opts.clone()).unwrap();
+            App::with_config(
+                s,
+                TOKEN.into(),
+                true,
+                Some(ConfigAccess {
+                    opts: opts.clone(),
+                    path: path.clone(),
+                    locked,
+                    saving: Mutex::new(()),
+                }),
+            )
+        };
+        let app = mk(None);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let get = |app: Arc<App>| async move {
+            let (s, _, body) = call(&app, "GET", "/api/config", &[AUTH], None).await;
+            assert_eq!(s, StatusCode::OK, "{}", body);
+            serde_json::from_str::<Value>(&body).unwrap()
+        };
+        let c = get(app.clone()).await;
+        assert_eq!(c["editable"], true);
+        assert_eq!(c["config"]["runner"][0]["name"], "say");
+        let v1 = c["version"].as_str().unwrap().to_string();
+
+        // Add a runner and a workflow that uses it: both apply without a restart.
+        let (s, _, body) = call(&app, "PUT", "/api/config", &[AUTH, origin], Some(json!({
+            "version": v1, "section": "runner",
+            "value": [{ "name": "say", "command": "echo", "args": ["{prompt}"] }, { "name": "shout", "command": "echo", "args": ["LOUD {prompt}"] }]
+        }))).await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let c: Value = serde_json::from_str(&body).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# my comment") && text.contains("# runners"),
+            "comments kept:\n{}",
+            text
+        );
+        assert!(
+            app.settings().runners.iter().any(|r| r.name == "shout"),
+            "applied at once"
+        );
+        let (s, _, body) = call(&app, "PUT", "/api/config", &[AUTH, origin], Some(json!({
+            "version": c["version"], "section": "workflow",
+            "value": [{ "name": "hello", "task": [{ "id": "one", "target": "work", "runner": "shout", "prompt": "hi" }] }]
+        }))).await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let c: Value = serde_json::from_str(&body).unwrap();
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/workflows",
+            &[AUTH, origin],
+            Some(json!({ "name": "hello" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "the new workflow runs: {}", body);
+        let wf = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let mut status = String::new();
+        for _ in 0..200 {
+            status = app.engine.get(wf).unwrap().status.to_string();
+            if status != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(status, "succeeded");
+
+        // A stale page cannot overwrite a newer file.
+        let (s, _, _) = call(
+            &app,
+            "PUT",
+            "/api/config",
+            &[AUTH, origin],
+            Some(json!({ "version": v1, "section": "preset", "value": [] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        // A change that would not load is refused, and nothing is written.
+        let before = std::fs::read_to_string(&path).unwrap();
+        let (s, _, body) = call(&app, "PUT", "/api/config", &[AUTH, origin], Some(json!({
+            "version": c["version"], "section": "runner", "value": [{ "name": "x", "command": "echo", "args": ["no prompt"] }]
+        }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(body.contains("{prompt}"), "{}", body);
+        let (s, _, body) = call(&app, "PUT", "/api/config", &[AUTH, origin], Some(json!({
+            "version": c["version"], "section": "preset", "value": [{ "name": "p", "prompt": "a" }, { "name": "p", "prompt": "b" }]
+        }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "names must be unique: {}", body);
+        assert!(body.contains("used twice"), "{}", body);
+        let (s, _, _) = call(
+            &app,
+            "PUT",
+            "/api/config",
+            &[AUTH, origin],
+            Some(json!({ "version": c["version"], "text": "[[runner]\n" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _, _) = call(&app, "PUT", "/api/config", &[AUTH, origin], Some(json!({
+            "version": c["version"], "section": "workflow", "value": [{ "name": "loop", "task": [
+                { "id": "a", "target": ".", "prompt": "x", "needs": ["b"] }, { "id": "b", "target": ".", "prompt": "x", "needs": ["a"] }] }]
+        }))).await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "a dependency cycle is caught before saving"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // Check without saving.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/config/check",
+            &[AUTH, origin],
+            Some(json!({ "text": before })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        assert!(body.contains("\"workflows\":1"), "{}", body);
+        // The whole text can be replaced too.
+        let edited = before.replace("LOUD", "QUIET");
+        let (s, _, body) = call(
+            &app,
+            "PUT",
+            "/api/config",
+            &[AUTH, origin],
+            Some(json!({ "version": c["version"], "text": edited })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        assert!(app
+            .settings()
+            .runners
+            .iter()
+            .any(|r| r.args.iter().any(|a| a.contains("QUIET"))));
+        // A cross-site page cannot do any of this.
+        let (s, _, _) = call(
+            &app,
+            "PUT",
+            "/api/config",
+            &[AUTH, ("origin", "http://evil.test")],
+            Some(json!({ "version": "x", "text": "" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+
+        // Locked (read-only, --lock-config, or a non-loopback bind): reads only.
+        let locked = mk(Some("locked for the test".into()));
+        let c = get(locked.clone()).await;
+        assert_eq!(c["editable"], false);
+        let (s, _, _) = call(
+            &locked,
+            "PUT",
+            "/api/config",
+            &[AUTH, origin],
+            Some(json!({ "version": c["version"], "section": "preset", "value": [] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // Without a config file to edit, the API says so.
+        let (plain, plain_dir) = fixture("cfg-none", false);
+        let (s, _, _) = call(&plain, "GET", "/api/config", &[AUTH], None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(plain_dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn launch_stream_and_validation() {
         let (app, dir) = fixture("procs", false);
@@ -1466,7 +1840,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut settings = (*base.settings).clone();
+        let mut settings = (*base.settings()).clone();
         settings.runners.push(Runner {
             name: "fake".into(),
             command: script.display().to_string(),
@@ -1600,7 +1974,7 @@ mod tests {
             fork_args: vec![],
             program: crate::deck::config::which("sleep"),
         };
-        let h = &app.settings.harnesses[0];
+        let h = &app.settings().harnesses[0];
         let id = app
             .procs
             .start(Launch::Local {
@@ -1642,7 +2016,7 @@ mod tests {
             fork_args: vec![],
             program: crate::deck::config::which("sleep"),
         };
-        let h = &app.settings.harnesses[0];
+        let h = &app.settings().harnesses[0];
         let id = app
             .procs
             .start(Launch::Local {

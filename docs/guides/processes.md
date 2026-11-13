@@ -85,7 +85,8 @@ indra does not rotate or delete logs; remove old ones yourself when you no longe
 
 ## Capacity
 
-`max_parallel` (under `[local]`, default 4, and on each `[[node]]`, default 2) is how many agents a node
+`max_parallel` (**Settings > General** for this machine, **Settings > Nodes** for each node;
+in `indra.toml`, under `[local]`, default 4, and on each `[[node]]`, default 2) is how many agents a node
 runs at once *for workflows and fan-out*: a task waits until its node has room, counting every
 agent there, including ones you launched by hand. A manual Launch is never queued: it starts
 right away, so you can always run one more on purpose. The Nodes page shows `running / max`
@@ -128,7 +129,7 @@ a service manager (systemd, launchd, tmux), rather than leaving a terminal open.
 | `failed` immediately, "No such file or directory" | the runner's `command` is not on `PATH` for the user running indra; set an absolute path in `[[runner]]` |
 | a remote process `failed` with "Host key verification failed" | indra uses `BatchMode=yes` and never accepts an unknown key: `ssh <host>` once by hand to trust it |
 | "Permission denied (publickey)" | the hub's user needs key or agent access to the node; check with `ssh -o BatchMode=yes <dest> true` |
-| "unknown runner" on a node | the runner is not in *that node's* config: `indra nodes` lists what each node offers |
+| "unknown runner" on a node | the runner is not in *that node's* config: `indra nodes` lists what each node offers (a remote node's runners are set in its own `indra.toml`, on that machine) |
 | no tool calls or cost in the live view | the runner's `format` is `text`; use `format = "claude-stream-json"` with Claude Code's `--output-format stream-json --verbose` |
-| a task waits forever in a workflow | its node is at `max_parallel`; stop something there or raise the limit |
+| a task waits forever in a workflow | its node is at `max_parallel`; stop something there or raise the limit in Settings |
 | Stop seems to do nothing | something in the tree ignored SIGTERM; the whole group is killed 5 s later. A remote agent is ended by its node once its SSH session closes |

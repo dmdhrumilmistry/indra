@@ -2,6 +2,7 @@
 //! runs AI agent harnesses (the security harness by default).
 
 pub mod cli;
+pub mod confedit;
 pub mod config;
 pub mod discover;
 pub mod nodes;

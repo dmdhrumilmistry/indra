@@ -259,6 +259,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
   watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
   final cost. Stop stops the whole process tree.
+- **Settings:** configure everything from the browser: runners, remote nodes, workflows,
+  presets, harnesses, capacity, or the raw `indra.toml`. Each save is checked and applies at
+  once, and your comments in the file are kept.
 - **Pivot:** redirect an agent mid-run. *Continue* resumes its own session with your new
   instruction, so it keeps everything it learned; *Fresh* starts a new agent briefed with what
   the first one was asked and found. Keep the original running to try two directions at once.
@@ -298,6 +301,8 @@ capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md), and
 [knowledge base and integrations](docs/guides/knowledge-base.md).
 
 <p align="center"><img src="assets/screenshots/pivot.png" alt="Pivoting an agent: continue its session with a new instruction" width="720"></p>
+
+<p align="center"><img src="assets/screenshots/settings.png" alt="The Settings page: editing a workflow and its tasks in the browser" width="720"></p>
 
 The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
 `.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.
