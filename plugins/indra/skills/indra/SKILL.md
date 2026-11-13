@@ -11,7 +11,7 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
 
 ## Routing table
 
-| The user wants… | Route to |
+| The user wants... | Route to |
 |---|---|
 | To review a **pull request** (a GitHub PR link, "review PR 42", "check this PR", "review these changes before merge") | Invoke the **`sh-pr-review`** skill. Pass the PR **link** verbatim if the user gave one, else the number; with neither it uses the PR for the current branch. |
 | A full security review / audit / pentest of a codebase | Invoke the **`sh-security-review`** skill (all stages). Pass the target path and any class filters. |
@@ -20,6 +20,7 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
 | Just to learn how a class is detected/exploited, or to hand a hunter its knowledge | Invoke the matching **`sh-kb-<class>`** skill directly (no pipeline). |
 | To map/understand a codebase only (no vuln hunt) | Invoke `sh-security-review` with `stage:recon`. |
 | To recall or record what reviews have learned ("what do we know about X", "remember this", "show the knowledge graph", "forget/skip memory") | Invoke the **`sh-memory`** skill. For "don't use memory" on a review, pass `memory:off` to `sh-security-review`. |
+| To put findings where the team works ("file these in Jira", "open GitHub issues", "put the report in Confluence/Notion") | Invoke the **`sh-publish`** skill. It asks before creating anything and never sends evidence or payloads. |
 
 ## Class slug map (route free-text to the right sh-kb-* skill / class filter)
 

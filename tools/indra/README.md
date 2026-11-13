@@ -172,6 +172,7 @@ Every command accepts `--vault DIR` and `--json`.
 | `check [--strict]` | lint: unresolved links, ambiguous names (exit 1), orphans |
 | `export [-f html\|json\|dot\|mermaid] [-o FILE] [--no-body]` | export the graph |
 | `rm NOTE` | delete a note and report the links it leaves unresolved |
+| `import DIR [--from obsidian\|notion\|github-wiki\|markdown] [--folder F] [--tag T] [--overwrite] [--dry-run]` | copy notes from an Obsidian vault, a Notion export, a GitHub wiki or any Markdown folder, converting links to wikilinks (see [the guide](../../docs/guides/knowledge-base.md)) |
 
 Text can be read from stdin with `-`: `git log -1 --format=%B | indra mem add "Release notes" -b -`.
 
@@ -380,7 +381,25 @@ The console can start programs and rewrite prompts, so it is built like a remote
 - **No injected markup.** The UI renders every string with `textContent`, under a strict
   `Content-Security-Policy` with nothing third-party.
 
-Processes are tracked while `indra serve` runs; their logs stay on disk after it exits.
+Processes are tracked while `indra serve` runs. When it exits (Ctrl-C, SIGTERM, SIGHUP) it
+stops every agent it started first; their logs stay on disk. See
+[Handling agent processes](../../docs/guides/processes.md).
+
+### Pivot
+
+On a process page, **Pivot this agent** gives it a new instruction without losing its work:
+
+- **Continue** resumes the agent's own session (Claude Code `--resume`), so the new
+  instruction lands in the same conversation, with everything it has read and found.
+- **Fresh** starts a new session whose prompt carries a brief of the first agent: what it was
+  asked, how it ended, and what it reported.
+
+The original is stopped first unless you tick **Keep this agent running**, in which case a
+Continue forks the session (`--fork-session`) and both go on. The pivot runs on the same node,
+target and runner, and the two processes link to each other. API:
+`POST /api/procs/{id}/pivot` with `{"prompt": "...", "mode": "continue"|"fresh", "keep_running": false}`.
+A custom runner can continue sessions with `resume_args = ["--resume", "{session}"]` (and
+`fork_args`). See [Pivoting agents](../../docs/guides/pivoting.md).
 
 ## Nodes and orchestration
 

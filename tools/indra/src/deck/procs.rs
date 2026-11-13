@@ -8,7 +8,7 @@
 //! show which agents a run started and what each one is doing.
 
 use crate::deck::config::Runner;
-use crate::deck::nodes::Node;
+use crate::deck::nodes::{Node, Resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -59,6 +59,14 @@ pub struct ProcView {
     pub command: Vec<String>,
     /// Remote host name, once the node reports it.
     pub host: Option<String>,
+    /// The agent's own session id, when its runner reports one (Claude Code does).
+    pub session: Option<String>,
+    /// The process this one was pivoted from.
+    pub parent: Option<u64>,
+    /// The session this process continued, when it was a "continue" pivot.
+    pub resumed: Option<String>,
+    /// Whether its runner can continue a session (a "continue" pivot).
+    pub can_resume: bool,
     pub started: u64,
     pub ended: Option<u64>,
     /// running | exited | failed | stopped
@@ -84,11 +92,15 @@ struct State {
     /// Output format of the agent itself (for remote jobs, learnt from the node).
     format: String,
     host: Option<String>,
+    session: Option<String>,
 }
 
 pub struct Proc {
     id: u64,
     node: String,
+    parent: Option<u64>,
+    resumed: Option<String>,
+    can_resume: bool,
     runner: String,
     harness: String,
     prompt: String,
@@ -148,6 +160,10 @@ impl Proc {
             cwd: self.cwd.clone(),
             command: self.command.clone(),
             host: st.host.clone(),
+            session: st.session.clone(),
+            parent: self.parent,
+            resumed: self.resumed.clone(),
+            can_resume: self.can_resume,
             started: self.started,
             ended: st.ended,
             status: st.status.clone(),
@@ -230,6 +246,45 @@ impl Proc {
         }
     }
 
+    /// What the agent concluded: its final result, else its last messages.
+    pub fn outcome(&self) -> String {
+        let st = self.state.lock().unwrap();
+        if let Some(r) = st.events.iter().rev().find(|e| e.kind == "result") {
+            return clip(&r.text, 6000);
+        }
+        let mut texts: Vec<&str> = st
+            .events
+            .iter()
+            .rev()
+            .filter(|e| e.kind == "text")
+            .take(8)
+            .map(|e| e.text.as_str())
+            .collect();
+        texts.reverse();
+        clip(&texts.join("\n\n"), 6000)
+    }
+
+    pub fn runner_name(&self) -> &str {
+        &self.runner
+    }
+
+    pub fn node_name(&self) -> &str {
+        &self.node
+    }
+
+    pub fn harness_name(&self) -> &str {
+        &self.harness
+    }
+
+    /// The directory it runs in (a path on its node).
+    pub fn target(&self) -> &str {
+        &self.cwd
+    }
+
+    pub fn can_resume(&self) -> bool {
+        self.can_resume
+    }
+
     pub fn is_running(&self) -> bool {
         self.state.lock().unwrap().status == "running"
     }
@@ -259,6 +314,13 @@ impl Proc {
                 .map(|a| a.kind.clone())
         });
         let s = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        // Claude Code tags its stream messages with the session id; keep the
+        // latest so the agent can be continued (pivoted) later.
+        if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
+            if crate::deck::nodes::validate_session(sid).is_ok() {
+                self.state.lock().unwrap().session = Some(sid.to_string());
+            }
+        }
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
             "system" if s(&v, "subtype") == "init" => {
                 let model = s(&v, "model");
@@ -416,6 +478,13 @@ pub struct Procs {
     log_dir: PathBuf,
 }
 
+/// Extra launch options for pivots.
+#[derive(Debug, Clone, Default)]
+pub struct StartOpts {
+    pub resume: Option<Resume>,
+    pub parent: Option<u64>,
+}
+
 /// Where and what to launch.
 pub enum Launch<'a> {
     /// A runner from this machine's config, in a local directory.
@@ -470,6 +539,28 @@ impl Procs {
     }
 
     /// Agents running on one node.
+    /// Stop every running process and wait for them to end: each gets
+    /// SIGTERM to its whole tree, then SIGKILL after 5 s. Used when the
+    /// console exits, so no agent outlives the hub that started it.
+    pub async fn stop_all(&self) {
+        let running: Vec<Arc<Proc>> = self
+            .procs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.is_running())
+            .cloned()
+            .collect();
+        for p in &running {
+            p.request_stop();
+        }
+        // Remote stops wait up to 5 s for the node, then 5 s more locally.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        while running.iter().any(|p| p.is_running()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     pub fn running_on(&self, node: &str) -> usize {
         self.procs
             .lock()
@@ -479,16 +570,13 @@ impl Procs {
             .count()
     }
 
-    /// The exact argument vector a local launch would execute (also used by tests).
-    pub fn command_for(
-        runner: &Runner,
-        prompt: &str,
-        target: &Path,
-    ) -> Result<(PathBuf, Vec<String>), String> {
-        crate::deck::nodes::runner_argv(runner, prompt, target)
+    pub fn start(self: &Arc<Self>, l: Launch) -> Result<u64, String> {
+        self.start_with(l, StartOpts::default())
     }
 
-    pub fn start(self: &Arc<Self>, l: Launch) -> Result<u64, String> {
+    /// Start, optionally continuing an earlier session (a pivot) and
+    /// recording the process it came from.
+    pub fn start_with(self: &Arc<Self>, l: Launch, opts: StartOpts) -> Result<u64, String> {
         // Resolve the launch into a program, its arguments, and what the UI shows.
         struct Plan {
             program: PathBuf,
@@ -502,6 +590,7 @@ impl Procs {
             target: String,
             format: String,
             remote: bool,
+            can_resume: bool,
         }
         let plan = match l {
             Launch::Local {
@@ -510,7 +599,12 @@ impl Procs {
                 prompt,
                 target,
             } => {
-                let (program, args) = Self::command_for(runner, prompt, target)?;
+                let (program, args) = crate::deck::nodes::runner_argv_with(
+                    runner,
+                    prompt,
+                    target,
+                    opts.resume.as_ref(),
+                )?;
                 if !target.is_dir() {
                     return Err(format!("target is not a directory: {}", target.display()));
                 }
@@ -526,6 +620,7 @@ impl Procs {
                     target: target.display().to_string(),
                     format: runner.format.clone(),
                     remote: false,
+                    can_resume: !runner.resume_args.is_empty(),
                 }
             }
             Launch::Remote {
@@ -540,6 +635,7 @@ impl Procs {
                     runner: runner.into(),
                     prompt: prompt.replace("{node}", &node.name),
                     target: target.into(),
+                    resume: opts.resume.clone(),
                 };
                 Plan {
                     program,
@@ -553,6 +649,8 @@ impl Procs {
                     target: target.into(),
                     format: String::new(),
                     remote: true,
+                    // The node decides; it refuses if its runner cannot resume.
+                    can_resume: true,
                 }
             }
         };
@@ -593,6 +691,9 @@ impl Procs {
         let proc = Arc::new(Proc {
             id,
             node: plan.node.clone(),
+            parent: opts.parent,
+            resumed: opts.resume.as_ref().map(|r| r.session.clone()),
+            can_resume: plan.can_resume,
             runner: plan.runner.clone(),
             harness: plan.harness.clone(),
             prompt: plan.prompt.clone(),
@@ -613,6 +714,7 @@ impl Procs {
                 cost_usd: None,
                 format: plan.format.clone(),
                 host: None,
+                session: None,
             }),
             tx,
             stop: Mutex::new(Some(stop_tx)),
@@ -620,13 +722,25 @@ impl Procs {
         self.procs.lock().unwrap().insert(id, proc.clone());
         proc.push(
             "system",
-            if plan.remote {
-                format!(
-                    "started {} on node {} in {}",
-                    plan.runner, plan.node, plan.target
-                )
-            } else {
-                format!("started {} in {}", plan.runner, plan.target)
+            {
+                let mut m = if plan.remote {
+                    format!(
+                        "started {} on node {} in {}",
+                        plan.runner, plan.node, plan.target
+                    )
+                } else {
+                    format!("started {} in {}", plan.runner, plan.target)
+                };
+                if let Some(parent) = opts.parent {
+                    m.push_str(&match &opts.resume {
+                        Some(r) if r.fork => {
+                            format!(", branching the session of process #{}", parent)
+                        }
+                        Some(_) => format!(", continuing the session of process #{}", parent),
+                        None => format!(", pivoted from process #{}", parent),
+                    });
+                }
+                m
             },
             None,
         );
@@ -690,14 +804,7 @@ impl Procs {
                     if remote {
                         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
                     }
-                    terminate_tree(pid);
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
-                        Ok(s) => s,
-                        Err(_) => {
-                            let _ = child.start_kill();
-                            child.wait().await
-                        }
-                    }
+                    stop_tree(&mut child, pid).await
                 }
             };
             let _ = t_out.await;
@@ -765,6 +872,54 @@ pub(crate) fn terminate_tree(pid: Option<u32>) {
     }
 }
 
+/// Stop a runner and everything it started: SIGTERM to its process group,
+/// up to 5 s for the group to exit, then SIGKILL to whatever is left. The
+/// group matters, not just the runner: a child that ignores SIGTERM would
+/// otherwise outlive it and keep its output pipe open.
+pub(crate) async fn stop_tree(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+) -> std::io::Result<std::process::ExitStatus> {
+    terminate_tree(pid);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = tokio::time::timeout_at(deadline, child.wait()).await.ok();
+    while group_alive(pid) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    kill_tree(pid);
+    match status {
+        Some(s) => s,
+        None => {
+            let _ = child.start_kill();
+            child.wait().await
+        }
+    }
+}
+
+/// Whether any process in the runner's group is still alive.
+fn group_alive(pid: Option<u32>) -> bool {
+    #[cfg(unix)]
+    if let Some(pgid) = pid.and_then(|p| i32::try_from(p).ok()) {
+        // SAFETY: signal 0 only checks that the group exists.
+        return unsafe { libc::kill(-pgid, 0) == 0 };
+    }
+    let _ = pid;
+    false
+}
+
+/// SIGKILL the whole process group (a no-op once it is empty).
+fn kill_tree(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pgid) = pid.and_then(|p| i32::try_from(p).ok()) {
+        // SAFETY: kill(2) takes plain integers and has no memory effects.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    // Windows: terminate_tree already ended the tree with taskkill /F.
+    let _ = pid;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,20 +930,89 @@ mod tests {
             command: "r".into(),
             args: vec!["-p".into(), "{prompt}".into(), "--cwd={target}".into()],
             format: format.into(),
+            resume_args: vec![],
+            fork_args: vec![],
             program,
         }
+    }
+
+    /// A child that ignores SIGTERM must not outlive Stop (or the console).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_kills_children_that_ignore_sigterm() {
+        let dir = std::env::temp_dir().join(format!("indra-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("child.pid");
+        let r = Runner {
+            name: "stubborn".into(),
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "sh -c 'trap \"\" TERM; echo $$ > \"$0\"; exec sleep 600' \"$0\" & wait".into(),
+                "{prompt}".into(),
+            ],
+            format: "text".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            program: crate::deck::config::which("sh"),
+        };
+        let procs = Procs::new(dir.join("logs"));
+        let id = procs
+            .start(Launch::Local {
+                runner: &r,
+                harness: "h",
+                prompt: pidfile.to_str().unwrap(),
+                target: &dir,
+            })
+            .unwrap();
+        let mut child = None;
+        for _ in 0..200 {
+            child = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok());
+            if child.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let child = child.expect("the child never started");
+        // Alive, and not a zombie: a killed orphan stays a zombie until
+        // something reaps it, and a container's PID 1 often never does.
+        let alive = |pid: i32| {
+            // SAFETY: signal 0 only checks that the process exists.
+            let exists = unsafe { libc::kill(pid, 0) == 0 };
+            let zombie = std::fs::read_to_string(format!("/proc/{}/stat", pid))
+                .ok()
+                .and_then(|s| s.rsplit_once(") ").map(|(_, r)| r.starts_with('Z')))
+                .unwrap_or(false);
+            exists && !zombie
+        };
+        assert!(alive(child));
+
+        procs.stop_all().await;
+        assert_eq!(procs.get(id).unwrap().view().status, "stopped");
+        assert!(!alive(child), "a child that ignored SIGTERM survived Stop");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn prompt_is_one_argument_and_never_re_expanded() {
         let r = runner("text", Some(PathBuf::from("/bin/r")));
-        let (_, args) =
-            Procs::command_for(&r, "review {target}; rm -rf / {prompt}", Path::new("/t")).unwrap();
+        let (_, args) = crate::deck::nodes::runner_argv_with(
+            &r,
+            "review {target}; rm -rf / {prompt}",
+            Path::new("/t"),
+            None,
+        )
+        .unwrap();
         assert_eq!(args, vec!["-p", "review /t; rm -rf / {prompt}", "--cwd=/t"]);
         let r = runner("text", None);
-        assert!(Procs::command_for(&r, "x", Path::new("/t"))
-            .unwrap_err()
-            .contains("not installed"));
+        assert!(
+            crate::deck::nodes::runner_argv_with(&r, "x", Path::new("/t"), None)
+                .unwrap_err()
+                .contains("not installed")
+        );
     }
 
     #[test]
@@ -797,6 +1021,9 @@ mod tests {
         let p = Proc {
             id: 1,
             node: "local".into(),
+            parent: None,
+            resumed: None,
+            can_resume: true,
             runner: "claude".into(),
             harness: "h".into(),
             prompt: "p".into(),
@@ -815,12 +1042,13 @@ mod tests {
                 cost_usd: None,
                 format: "claude-stream-json".into(),
                 host: None,
+                session: None,
             }),
             tx,
             stop: Mutex::new(None),
         };
         for l in [
-            r#"{"type":"system","subtype":"init","model":"m1","tools":[]}"#,
+            r#"{"type":"system","subtype":"init","model":"m1","tools":[],"session_id":"4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Planning"},{"type":"tool_use","id":"t1","name":"Task","input":{"subagent_type":"sh-hunter","description":"hunt sqli"}}]}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t9","name":"Task","input":{"subagent_type":"sh-hunter","description":"hunt xss"}}]}}"#,
             r#"{"type":"assistant","parent_tool_use_id":"t1","message":{"content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"pattern":"cursor.execute"}}]}}"#,
@@ -858,6 +1086,14 @@ mod tests {
         );
         assert_eq!(v.tools["Grep"], 1);
         assert_eq!(v.cost_usd, Some(0.0123));
+        assert_eq!(
+            v.session.as_deref(),
+            Some("4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10")
+        );
+        assert!(
+            p.outcome().contains("All good"),
+            "the result is the outcome"
+        );
         assert!(p.state.lock().unwrap().events[7].text.contains("$0.0123"));
     }
 }

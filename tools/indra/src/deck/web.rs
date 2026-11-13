@@ -16,8 +16,8 @@
 
 use crate::deck::config::{Harness, Settings};
 use crate::deck::discover::{self, Def};
-use crate::deck::nodes::{self, NodeInfo, RunsSpec, LOCAL};
-use crate::deck::procs::{Launch, Procs};
+use crate::deck::nodes::{self, NodeInfo, Resume, RunsSpec, LOCAL};
+use crate::deck::procs::{Launch, Procs, StartOpts};
 use crate::deck::runs;
 use crate::deck::workflows::{self, Engine};
 use axum::extract::{Path as UrlPath, Query, Request, State};
@@ -585,6 +585,139 @@ async fn proc_events(
     Ok(Sse::new(first.chain(live)).keep_alive(KeepAlive::default()))
 }
 
+// ---- pivot -----------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PivotReq {
+    prompt: String,
+    /// "continue" (default): resume the agent's own session with the new
+    /// direction. "fresh": a new agent, given the old one's outcome as context.
+    mode: Option<String>,
+    /// Leave the current agent running; a continue pivot then branches the session.
+    #[serde(default)]
+    keep_running: bool,
+}
+
+/// Give an agent a new direction. It runs on the same node, in the same
+/// target, with the same runner: an agent session lives on the machine where
+/// it ran.
+async fn proc_pivot(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<PivotReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings.read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let prompt = check_prompt(&r.prompt)?;
+    let p = app
+        .procs
+        .get(id)
+        .ok_or_else(|| not_found("no such process"))?;
+    let cont = match r.mode.as_deref().unwrap_or("continue") {
+        "continue" => true,
+        "fresh" => false,
+        _ => return Err(bad("mode must be 'continue' or 'fresh'")),
+    };
+    let view = p.view();
+    // Check everything that can fail before touching the running agent.
+    if cont && !p.can_resume() {
+        return Err(bad(format!(
+            "runner '{}' cannot continue a session; pivot with a fresh start",
+            p.runner_name()
+        )));
+    }
+    if cont && view.session.is_none() {
+        return Err(bad(
+            "this agent has not reported a session to continue (only Claude Code does); pivot with a fresh start",
+        ));
+    }
+    if p.node_name() == LOCAL {
+        if !app
+            .settings
+            .runners
+            .iter()
+            .any(|x| x.name == p.runner_name())
+        {
+            return Err(bad("its runner is no longer configured"));
+        }
+    } else if app.settings.node(p.node_name()).is_none() {
+        return Err(bad("its node is no longer configured"));
+    }
+    let was_running = p.is_running();
+    let mut fork = cont && was_running && r.keep_running;
+    if was_running && !r.keep_running {
+        p.request_stop();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while p.is_running() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Never let two agents write to one session.
+        fork |= cont && p.is_running();
+    }
+    let new_prompt = if cont {
+        prompt.to_string()
+    } else {
+        format!(
+            "{}\n\nContext: this continues the work of an earlier agent (process #{}, which {}). It was asked:\n{}\n\nWhat it reported:\n{}",
+            prompt,
+            id,
+            view.status,
+            crate::mem::search::truncate(&view.prompt, 2000),
+            p.outcome()
+        )
+    };
+    let opts = StartOpts {
+        resume: if cont {
+            view.session.clone().map(|session| Resume { session, fork })
+        } else {
+            None
+        },
+        parent: Some(id),
+    };
+    let harness = p.harness_name().to_string();
+    let new = if p.node_name() == LOCAL {
+        let runner = app
+            .settings
+            .runners
+            .iter()
+            .find(|x| x.name == p.runner_name())
+            .ok_or_else(|| bad("its runner is no longer configured"))?;
+        let target = std::path::PathBuf::from(p.target());
+        app.procs.start_with(
+            Launch::Local {
+                runner,
+                harness: &harness,
+                prompt: &new_prompt,
+                target: &target,
+            },
+            opts,
+        )
+    } else {
+        let node = app
+            .settings
+            .node(p.node_name())
+            .ok_or_else(|| bad("its node is no longer configured"))?;
+        app.procs.start_with(
+            Launch::Remote {
+                node,
+                runner: p.runner_name(),
+                harness: &harness,
+                prompt: &new_prompt,
+                target: p.target(),
+            },
+            opts,
+        )
+    }
+    .map_err(bad)?;
+    Ok(Json(json!({
+        "id": new,
+        "mode": if cont { "continue" } else { "fresh" },
+        "forked": fork,
+        "stopped_previous": was_running && !p.is_running(),
+    })))
+}
+
 // ---- nodes ---------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -790,6 +923,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/workflows/{id}/cancel", post(workflow_cancel))
         .route("/api/procs/{id}", get(proc_get))
         .route("/api/procs/{id}/stop", post(proc_stop))
+        .route("/api/procs/{id}/pivot", post(proc_pivot))
         .route("/api/procs/{id}/events", get(proc_events))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
@@ -854,6 +988,8 @@ mod tests {
             command: "echo".into(),
             args: vec!["{prompt}".into()],
             format: "text".into(),
+            resume_args: vec![],
+            fork_args: vec![],
             program: crate::deck::config::which("echo"),
         };
         let settings = Settings {
@@ -1298,6 +1434,200 @@ mod tests {
         let _ = std::fs::remove_dir_all(ro_dir);
     }
 
+    async fn wait_done(app: &Arc<App>, id: u64) -> Value {
+        for _ in 0..100 {
+            let (_, _, body) = call(app, "GET", &format!("/api/procs/{}", id), &[AUTH], None).await;
+            let v: Value = serde_json::from_str(&body).unwrap();
+            if v["status"] != "running" {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        panic!("process {} did not finish", id);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pivot_continues_the_session_or_starts_fresh_with_context() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, dir) = fixture("pivot", false);
+        // A stand-in for Claude Code: records its argv, reports a session and a result.
+        let script = dir.join("fake-claude");
+        let argv = dir.join("argv.log");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '--call--' \"$@\" >> '{}'\n\
+                 echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",\"session_id\":\"sess-123\"}}'\n\
+                 echo '{{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":1,\"duration_ms\":5,\"result\":\"found 2 issues in auth\"}}'\n",
+                argv.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut settings = (*base.settings).clone();
+        settings.runners.push(Runner {
+            name: "fake".into(),
+            command: script.display().to_string(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            format: "claude-stream-json".into(),
+            resume_args: vec!["--resume".into(), "{session}".into()],
+            fork_args: vec!["--fork-session".into()],
+            program: Some(script.clone()),
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "fake", "prompt": "review it", "target": 0 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let first = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let v = wait_done(&app, first).await;
+        assert_eq!(v["session"], "sess-123");
+
+        // Continue: same session, new direction.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", first),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "now focus on the JWT code" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let r: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(r["mode"], "continue");
+        let second = r["id"].as_u64().unwrap();
+        let v = wait_done(&app, second).await;
+        assert_eq!(v["parent"], first);
+        assert_eq!(v["resumed"], "sess-123");
+        let log = std::fs::read_to_string(&argv).unwrap();
+        assert!(
+            log.contains("--call--\n-p\nnow focus on the JWT code\n--resume\nsess-123\n"),
+            "{}",
+            log
+        );
+
+        // Fresh: a new session, given the previous outcome as context.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", first),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "write the fix plan", "mode": "fresh" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let third = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let v = wait_done(&app, third).await;
+        assert!(v["resumed"].is_null());
+        let log = std::fs::read_to_string(&argv).unwrap();
+        let last = log.rsplit("--call--").next().unwrap();
+        assert!(
+            last.contains("write the fix plan")
+                && last.contains("found 2 issues in auth")
+                && last.contains("review it"),
+            "{}",
+            last
+        );
+        assert!(!last.contains("--resume"));
+
+        // Refusals.
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", first),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "x", "mode": "sideways" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (_, _, body) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "echo", "prompt": "plain", "target": 0 })),
+        )
+        .await;
+        let plain = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        wait_done(&app, plain).await;
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", plain),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "x" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(body.contains("fresh start"), "{}", body);
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            "/api/procs/999/pivot",
+            &[AUTH, origin],
+            Some(json!({ "prompt": "x" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_pivot_leaves_the_agent_running() {
+        let (app, dir) = fixture("pivot-refused", false);
+        let sleep = Runner {
+            name: "sleep".into(),
+            command: "sleep".into(),
+            args: vec!["{prompt}".into()],
+            format: "text".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            program: crate::deck::config::which("sleep"),
+        };
+        let h = &app.settings.harnesses[0];
+        let id = app
+            .procs
+            .start(Launch::Local {
+                runner: &sleep,
+                harness: "t",
+                prompt: "30",
+                target: &h.targets[0],
+            })
+            .unwrap();
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", id),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "new direction" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(body.contains("cannot continue a session"), "{}", body);
+        assert!(
+            app.procs.get(id).unwrap().is_running(),
+            "checks happen before the agent is stopped"
+        );
+        app.procs.get(id).unwrap().request_stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_kills_a_running_process() {
@@ -1307,6 +1637,8 @@ mod tests {
             command: "sleep".into(),
             args: vec!["{prompt}".into()],
             format: "text".into(),
+            resume_args: vec![],
+            fork_args: vec![],
             program: crate::deck::config::which("sleep"),
         };
         let h = &app.settings.harnesses[0];
