@@ -1,4 +1,4 @@
-# security-harness
+# indra
 
 Context file for the Gemini CLI extension. Loaded at session start.
 
@@ -9,7 +9,7 @@ demand rather than loaded here, so this file stays short.
 ## When to activate a skill
 
 - Any request to **security review, audit, or pentest a codebase**, or to find
-  vulnerabilities in it: activate `sh-router`. It interprets the request and
+  vulnerabilities in it: activate `indra`. It interprets the request and
   points at the right pipeline stage or knowledge base.
 - A request naming **one vulnerability class** (SQLi, XSS, IDOR, SSRF, CSRF,
   XXE, SSTI, path traversal, deserialization, secrets, crypto, race conditions,
@@ -28,8 +28,8 @@ demand rather than loaded here, so this file stays short.
 `recall` and `remember` are the optional long-term memory steps (`sh-memory`).
 
 Each stage has a matching sub-agent definition under
-`plugins/security-harness/agents/` and shared reference material under
-`plugins/security-harness/references/`. Read those when you need the detail of a
+`plugins/indra/agents/` and shared reference material under
+`plugins/indra/references/`. Read those when you need the detail of a
 stage rather than guessing at it.
 
 ## Scope and safety

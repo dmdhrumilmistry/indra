@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>indra - security review agents that remember</title>
+<meta name="description" content="indra is a multi-agent application-security review harness for Claude Code and other AI agents, with a graph memory and a web console to run and watch your agents.">
+<meta property="og:title" content="indra - security review agents that remember">
+<meta property="og:description" content="Multi-agent security review, graph memory, and an agent console. Open source, one small binary.">
+<meta property="og:image" content="https://dmdhrumilmistry.github.io/indra/assets/social.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><img src="assets/logo.svg" alt="" width="30" height="30"><span>indra</span></a>
+    <nav aria-label="Sections">
+      <a href="#pipeline">Pipeline</a>
+      <a href="#memory">Memory</a>
+      <a href="#console">Console</a>
+      <a href="#install">Install</a>
+      <a class="gh" href="https://github.com/dmdhrumilmistry/indra">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="net" aria-hidden="true"></div>
+    <div class="wrap hero-in">
+      <div class="hero-copy">
+        <p class="eyebrow">Open source &middot; MIT &middot; Claude Code, Codex, Gemini CLI</p>
+        <h1>Security review agents<br><span>that remember.</span></h1>
+        <p class="lede">indra maps a codebase, hunts vulnerabilities with a team of specialist agents, chains
+          findings into real attack paths, verifies impact, and reports. Every run teaches the next one, and a
+          local console lets you watch every agent at work.</p>
+        <div class="cta">
+          <a class="btn primary" href="#install">Get started</a>
+          <a class="btn" href="https://github.com/dmdhrumilmistry/indra">View on GitHub</a>
+        </div>
+        <div class="term" role="group" aria-label="Quick start">
+          <div class="term-bar"><i></i><i></i><i></i><span>Claude Code</span></div>
+          <pre><code><span class="c">/plugin marketplace add</span> dmdhrumilmistry/indra
+<span class="c">/plugin install</span> indra@indra
+<span class="c">/indra</span> full security review of ./api</code></pre>
+          <button class="copy" type="button" data-copy="/plugin marketplace add dmdhrumilmistry/indra
+/plugin install indra@indra
+/indra full security review of ./api">Copy</button>
+        </div>
+      </div>
+      <div class="hero-art"><img src="assets/logo.svg" alt="The indra logo: a net of sky-blue jewels around a golden centre stone" width="360" height="360"></div>
+    </div>
+  </section>
+
+  <section class="wrap band" id="pipeline">
+    <h2>A review team, not a single prompt</h2>
+    <p class="sub">One <code>/indra</code> request runs a pipeline of agents, each on the model its job needs. They coordinate through files, so every step is inspectable.</p>
+    <ol class="steps">
+      <li><b>Recon</b><span>Builds a code graph, the SBOM and known CVEs, and maps every entry point and trust boundary.</span></li>
+      <li><b>Hunt</b><span>One hunter per vulnerability class, in parallel, each loading its own knowledge base of 15.</span></li>
+      <li><b>Chain</b><span>Combines findings into escalations: an SSRF plus cloud metadata becomes credential theft.</span></li>
+      <li><b>Verify</b><span>Refutes first, then proves exploitability from evidence, with a PoC, CVSS and a fix.</span></li>
+      <li><b>Report</b><span>README, JSON, SARIF for code scanning, HTML and PDF.</span></li>
+      <li><b>Remember</b><span>Records verified findings and false positives, so the next run starts ahead.</span></li>
+    </ol>
+    <div class="classes" aria-label="Vulnerability classes">
+      <span>access control</span><span>SQLi</span><span>XSS</span><span>SSRF</span><span>injection</span><span>auth &amp; JWT</span><span>deserialization</span><span>path traversal</span><span>secrets</span><span>CSRF</span><span>XXE</span><span>open redirect</span><span>crypto</span><span>race conditions</span><span>file upload</span>
+    </div>
+  </section>
+
+  <section class="wrap band split" id="memory">
+    <div>
+      <p class="eyebrow">indra mem</p>
+      <h2>Memory as a net of linked notes</h2>
+      <p>Indra's net is an endless net with a jewel at every knot, each reflecting all the others. indra's memory works the same way: small Markdown notes joined by typed links like <code>mitigated-by</code> and <code>instance-of</code>.</p>
+      <ul class="ticks">
+        <li><b>Recall that follows links.</b> Search finds a note; the graph brings in its mitigation, its false positives and its siblings, and says why.</li>
+        <li><b>Plain files.</b> A vault is a folder that opens as-is in Obsidian and diffs cleanly in git.</li>
+        <li><b>Safe by design.</b> Findings are remembered without evidence, payloads or secrets.</li>
+      </ul>
+      <div class="term small">
+        <pre><code><span class="c">$</span> indra mem recall "django raw sql"
+<span class="c">$</span> indra mem tree sqli
+<span class="c">$</span> indra mem path "SSRF" "cloud credentials"</code></pre>
+      </div>
+    </div>
+    <figure class="shot"><img src="assets/screenshots/memory.png" alt="The memory graph in the indra console: findings, false positives, vulnerability classes and files, linked by typed relations" loading="lazy" width="1280" height="780"></figure>
+  </section>
+
+  <section class="wrap band" id="console">
+    <p class="eyebrow">indra serve</p>
+    <h2>Watch every agent at work</h2>
+    <p class="sub">A local web console for indra and for any other agent harness. Launch a review and see each subagent it spawns, every tool call it makes, the permissions it was refused, and what it cost.</p>
+    <figure class="shot wide"><img src="assets/screenshots/live-agents.png" alt="A live agent process in the console: subagents sh-recon and two sh-hunters, their tool calls, and a refused permission" width="1280" height="780"></figure>
+    <div class="grid3">
+      <figure class="shot"><img src="assets/screenshots/graph-map.png" alt="The graph map: stages run agents, agents spawn agents and load skills" loading="lazy" width="1280" height="780"><figcaption><b>Graph map.</b> How stages, agents, skills and prompts connect.</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/run.png" alt="A run being monitored: stage progress and findings per class" loading="lazy" width="1280" height="780"><figcaption><b>Runs.</b> Stage progress and findings per class, live.</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/overview.png" alt="The overview page listing harnesses, the pipeline and runners" loading="lazy" width="1280" height="780"><figcaption><b>Any harness.</b> indra, Claude Code projects, or your own in a few lines of TOML.</figcaption></figure>
+    </div>
+    <div class="secure">
+      <h3>Locked down like a remote shell</h3>
+      <p>Loopback only by default, a token on every call, DNS-rebinding and CSRF checks, no shell (the prompt is one argument), file access confined to the harness, and a strict Content-Security-Policy.</p>
+    </div>
+  </section>
+
+  <section class="wrap band" id="install">
+    <h2>Install</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>Claude Code</h3>
+        <pre><code>/plugin marketplace add dmdhrumilmistry/indra
+/plugin install indra@indra</code></pre>
+        <p>Then ask: <code>/indra find SQLi and IDOR in src/</code></p>
+      </div>
+      <div class="card">
+        <h3>Gemini CLI</h3>
+        <pre><code>gemini extensions install \
+  https://github.com/dmdhrumilmistry/indra</code></pre>
+        <p>Codex and opencode: see <a href="https://github.com/dmdhrumilmistry/indra#install">the README</a>.</p>
+      </div>
+      <div class="card">
+        <h3>The indra CLI</h3>
+        <pre><code>cargo install --locked --git \
+  https://github.com/dmdhrumilmistry/indra indra
+indra serve --target ~/code/my-api</code></pre>
+        <p>One ~2.5 MB binary for Linux, macOS and Windows. Optional: reviews run without it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="myth">
+    <div class="wrap">
+      <img src="assets/logo.svg" alt="" width="72" height="72">
+      <blockquote>Over the palace of Indra hangs a net that stretches without end. At every knot sits a jewel, and every jewel reflects all the others.</blockquote>
+      <p>A finding is never alone: it reflects the class it belongs to, the file it lives in, the fix that stops it and the chain it enables. indra is built around that idea.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <span class="brand"><img src="assets/logo.svg" alt="" width="22" height="22"><span>indra</span></span>
+    <span>MIT licensed &middot; static analysis of code you are authorized to review</span>
+    <a href="https://github.com/dmdhrumilmistry/indra">github.com/dmdhrumilmistry/indra</a>
+  </div>
+</footer>
+<script src="main.js"></script>
+</body>
+</html>

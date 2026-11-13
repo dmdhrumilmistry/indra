@@ -1,17 +1,17 @@
 {
-  "name": "security-harness",
+  "name": "indra",
   "owner": {
     "name": "Dhrumil Mistry",
     "url": "https://github.com/dmdhrumilmistry"
   },
   "metadata": {
-    "description": "Multi-agent application-security review harness for Claude Code and other AI agents.",
+    "description": "indra: a multi-agent application-security review harness for Claude Code and other AI agents.",
     "version": "0.2.0"
   },
   "plugins": [
     {
-      "name": "security-harness",
-      "description": "An offensive-security pipeline: map a codebase with Graft, hunt vulnerabilities with a per-class knowledge base, chain findings for escalation, verify real impact, and report (README/JSON/SARIF/doc/PDF).",
+      "name": "indra",
+      "description": "Multi-agent application-security review. An offensive-security pipeline: map a codebase with Graft, hunt vulnerabilities with a per-class knowledge base, chain findings for escalation, verify real impact, and report (README/JSON/SARIF/doc/PDF).",
       "author": {
         "name": "Dhrumil Mistry",
         "url": "https://github.com/dmdhrumilmistry"
@@ -27,7 +27,7 @@
         "sarif",
         "multi-agent"
       ],
-      "source": "./plugins/security-harness",
+      "source": "./plugins/indra",
       "version": "0.2.0",
       "license": "MIT",
       "repository": "https://github.com/dmdhrumilmistry/indra",

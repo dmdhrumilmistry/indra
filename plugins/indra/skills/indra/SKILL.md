@@ -1,10 +1,10 @@
 ---
-name: sh-router
-description: "Entry point / dispatcher for the security-harness. Use when the user asks for any application-security work - 'security review', 'audit this codebase', 'pentest', 'find vulnerabilities', 'check for SQLi/XSS/IDOR/SSRF', 'generate a security report/SARIF'. Interprets the request and routes it to the full sh-security-review pipeline, a single stage, or a single vulnerability-class knowledge base."
+name: indra
+description: "indra - the entry point for application-security work. Dispatcher for the indra security harness. Use when the user asks for any application-security work - 'security review', 'audit this codebase', 'pentest', 'find vulnerabilities', 'check for SQLi/XSS/IDOR/SSRF', 'generate a security report/SARIF'. Interprets the request and routes it to the full sh-security-review pipeline, a single stage, or a single vulnerability-class knowledge base."
 argument-hint: "[what to do - e.g. 'full security review of ./api' or 'find SQLi and IDOR in src/']"
 ---
 
-# Security Harness - Router
+# indra - Router
 
 You are the front door. Read the user's request, decide the smallest flow that satisfies it, and hand off.
 Prefer routing over doing the work inline - the specialized skills/agents carry the knowledge and contracts.

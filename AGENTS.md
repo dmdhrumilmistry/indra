@@ -48,14 +48,16 @@ PY
 
 ```
 .claude-plugin/marketplace.json     # Claude Code marketplace manifest
-plugins/security-harness/           # the plugin itself
+plugins/indra/                      # the plugin itself
   agents/                           # sh-recon, sh-hunter, sh-chainer, sh-verifier, sh-reporter
-  skills/                           # CANONICAL skills: sh-router, sh-security-review, sh-pr-review, sh-memory, sh-kb-* (15)
+  skills/                           # CANONICAL skills: indra, sh-security-review, sh-pr-review, sh-memory, sh-kb-* (15)
   references/                       # shared reference docs
 gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file
 skills/                             # GENERATED mirror of the canonical skills
 scripts/sync-agent-skills.py        # regenerates that mirror
+site/                               # the GitHub Pages website (deployed by .github/workflows/pages.yml)
+assets/                             # logo, banner, social image and screenshots (README, site, console icon)
 tools/indra/                        # indra: one Rust CLI - graph memory (indra mem) and agent web console (indra serve)
 docs/DISTRIBUTION.md                # packaging and public-listing steps
 .github/actions/ai-agent/           # pluggable agent runner (claude | codex | gemini | custom)
@@ -64,7 +66,7 @@ docs/DISTRIBUTION.md                # packaging and public-listing steps
 ```
 
 **`skills/` at the repo root is generated. Never edit it.** Edit
-`plugins/security-harness/skills/` and run:
+`plugins/indra/skills/` and run:
 
 ```bash
 python3 scripts/sync-agent-skills.py           # regenerate
@@ -111,4 +113,4 @@ If you change the generator's `WebFetch(domain:...)` allowlist, change
   automated KB run. The reviewer rejects those diffs by design.
 - Do not commit secrets. CI reads `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, and `GEMINI_API_KEY` from repository secrets.
-- Knowledge-base edits belong in `plugins/security-harness/skills/sh-kb-*/`.
+- Knowledge-base edits belong in `plugins/indra/skills/sh-kb-*/`.

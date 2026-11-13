@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mirror the canonical skills into the layouts other agents discover.
 
-Canonical source of truth:  plugins/security-harness/skills/
+Canonical source of truth:  plugins/indra/skills/
   (that path is fixed by the Claude Code plugin format)
 
 Generated mirrors:
@@ -31,11 +31,11 @@ import shutil
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOURCE = os.path.join(REPO, "plugins", "security-harness", "skills")
+SOURCE = os.path.join(REPO, "plugins", "indra", "skills")
 MIRROR = os.path.join(REPO, "skills")
 
 BANNER = (
-    "<!-- GENERATED FILE. Edit the copy under plugins/security-harness/skills/ "
+    "<!-- GENERATED FILE. Edit the copy under plugins/indra/skills/ "
     "and run scripts/sync-agent-skills.py. -->\n"
 )
 
