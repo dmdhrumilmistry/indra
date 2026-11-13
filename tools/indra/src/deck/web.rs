@@ -1434,6 +1434,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(ro_dir);
     }
 
+    #[cfg(unix)]
     async fn wait_done(app: &Arc<App>, id: u64) -> Value {
         for _ in 0..100 {
             let (_, _, body) = call(app, "GET", &format!("/api/procs/{}", id), &[AUTH], None).await;
