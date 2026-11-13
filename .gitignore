@@ -5,3 +5,6 @@ __pycache__/
 
 # Review run trees
 .security-harness/
+
+# Rust build output
+tools/memex/target/

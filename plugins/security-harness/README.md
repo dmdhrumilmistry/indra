@@ -39,6 +39,15 @@ pentest this codebase and give me SARIF
 review PR 42
 ```
 
+## Long-term memory
+
+With the [`memex`](https://github.com/dmdhrumilmistry/security-harness/tree/main/tools/memex)
+CLI installed, reviews remember. Before hunting, each hunter gets what earlier runs learned
+about its class (past findings, known guards, confirmed false positives). After the report,
+the run's results and a few learnings are recorded as a graph of Obsidian-compatible
+Markdown notes in `<target>/.security-harness/memory/`. Without memex, or with `memory:off`,
+nothing changes. Ask `what do we know about SSRF here` to query it directly.
+
 ## Pull request review
 
 `sh-pr-review` reviews one pull request instead of a whole codebase. Run it on your own

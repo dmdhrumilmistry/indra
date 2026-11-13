@@ -1,0 +1,30 @@
+[package]
+name = "memex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A lightweight, graph-based memory for people and AI agents. Plain Markdown notes with [[wikilinks]] and typed relations, Obsidian-compatible."
+license = "MIT"
+repository = "https://github.com/dmdhrumilmistry/security-harness"
+readme = "README.md"
+keywords = ["knowledge-graph", "memory", "obsidian", "zettelkasten", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "memex"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dev-dependencies]
+serde_json = "1"

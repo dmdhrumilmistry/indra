@@ -19,6 +19,7 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
 | To re-run one stage on an existing run ("re-verify", "regenerate the report", "re-scan deps") | Invoke **`sh-security-review`** with `stage:<recon\|hunt\|chain\|verify\|report>`. |
 | Just to learn how a class is detected/exploited, or to hand a hunter its knowledge | Invoke the matching **`sh-kb-<class>`** skill directly (no pipeline). |
 | To map/understand a codebase only (no vuln hunt) | Invoke `sh-security-review` with `stage:recon`. |
+| To recall or record what reviews have learned ("what do we know about X", "remember this", "show the knowledge graph", "forget/skip memory") | Invoke the **`sh-memory`** skill. For "don't use memory" on a review, pass `memory:off` to `sh-security-review`. |
 
 ## Class slug map (route free-text to the right sh-kb-* skill / class filter)
 

@@ -50,12 +50,13 @@ PY
 .claude-plugin/marketplace.json     # Claude Code marketplace manifest
 plugins/security-harness/           # the plugin itself
   agents/                           # sh-recon, sh-hunter, sh-chainer, sh-verifier, sh-reporter
-  skills/                           # CANONICAL skills: sh-router, sh-security-review, sh-pr-review, sh-kb-* (15)
+  skills/                           # CANONICAL skills: sh-router, sh-security-review, sh-pr-review, sh-memory, sh-kb-* (15)
   references/                       # shared reference docs
 gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file
 skills/                             # GENERATED mirror of the canonical skills
 scripts/sync-agent-skills.py        # regenerates that mirror
+tools/memex/                        # memex: Rust CLI for the graph-based memory (sh-memory skill)
 docs/DISTRIBUTION.md                # packaging and public-listing steps
 .github/actions/ai-agent/           # pluggable agent runner (claude | codex | gemini | custom)
 .github/workflows/                  # KB stage 1 (open PR), stage 2 (review and merge)
@@ -72,6 +73,20 @@ python3 scripts/sync-agent-skills.py --check   # verify it is current
 
 It exists because Gemini CLI loads an extension's skills from the extension root,
 while the Claude Code plugin format fixes them under the plugin directory.
+
+## memex (Rust)
+
+`tools/memex` is a standalone Rust crate. Before committing a change there, run:
+
+```bash
+cd tools/memex
+cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+Keep it dependency-light (`clap`, `serde`, `serde_json` today) and cross-platform: no
+Unix-only APIs, paths built with `Path`, and tests that pass on Windows. Its notes must
+stay readable by Obsidian. `.github/workflows/memex.yml` tests it on all three OSes and
+publishes binaries on a `memex-v*` tag.
 
 ## CI: the two-stage knowledge-base updater
 
