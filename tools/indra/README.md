@@ -426,6 +426,55 @@ Processes are tracked while `indra serve` runs. When it exits (Ctrl-C, SIGTERM, 
 stops every agent it started first; their logs stay on disk. See
 [Handling agent processes](../../docs/guides/processes.md).
 
+### Agent control
+
+An agent started through a Claude Code runner (`format = "claude-stream-json"`) is driven over
+Claude Code's control channel, the one the Agent SDK uses, so from its process page you can:
+
+- **Approve or deny tool requests.** When the agent wants to run a tool its permission mode does
+  not allow, the request appears under **Waiting for you** (and as a badge on Processes) with
+  **Allow**, **Allow always** (adds Claude Code's suggested rule for the rest of the session) and
+  **Deny** (with a reason the agent sees).
+- **Change its permission mode**: `manual` (ask for everything), `acceptEdits`, `auto`, `plan`
+  (read and plan only), `dontAsk` (deny whatever would ask) or `bypassPermissions`.
+- **Change its model** for the turns that follow.
+- **Interrupt** the current turn without ending the session.
+- **Send a follow-up** message, answered after the current turn.
+
+The prompt goes to the agent over stdin, and indra closes stdin after the last turn's result, so
+the agent still exits when its work is done. Remote agents get the same controls: the hub forwards
+them to the node. API: `POST /api/procs/{id}/permission`, `/control` and `/message`.
+
+### Profiles
+
+A profile is a named way to run an agent: a runner with a model, permission mode, effort, tool
+rules and environment. Launch, presets, workflow tasks and fan-outs pick one, and model and mode
+can still be changed per launch or while the agent runs. **Settings > Profiles** has templates.
+
+```toml
+[[profile]]
+name            = "planner"
+runner          = "claude"
+model           = "opus"
+permission_mode = "plan"
+
+[[profile]]
+name            = "worker"
+runner          = "claude"
+model           = "sonnet"
+permission_mode = "acceptEdits"
+allowed_tools   = ["Read", "Grep", "Glob", "Edit", "Bash(git diff:*)"]
+
+[[profile]]
+name   = "local"                     # Claude Code on a local model, through Ollama (0.14+)
+runner = "claude"
+model  = "qwen3-coder"
+env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+```
+
+For runners other than Claude Code, set `model_args` (e.g. `["--model", "{model}"]`) to let a
+profile choose the model; permission modes and tool rules are Claude Code's.
+
 ### Pivot
 
 On a process page, **Pivot this agent** gives it a new instruction without losing its work:

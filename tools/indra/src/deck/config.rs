@@ -21,6 +21,7 @@ pub struct ConfigFile {
     pub harness: Vec<HarnessCfg>,
     pub runner: Vec<RunnerCfg>,
     pub preset: Vec<PresetCfg>,
+    pub profile: Vec<ProfileCfg>,
     /// This machine as an agent node.
     pub local: LocalCfg,
     /// Remote machines reached over SSH.
@@ -90,6 +91,9 @@ pub struct TaskCfg {
     pub target: String,
     #[serde(default = "claude_runner")]
     pub runner: String,
+    /// Profile to run with; its runner, if it names one, replaces `runner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// `{target}` and `{node}` are filled in.
     pub prompt: String,
     /// Task ids that must succeed first.
@@ -187,6 +191,10 @@ pub struct RunnerCfg {
     /// in place, used when the original agent keeps running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fork_args: Vec<String>,
+    /// For runners other than Claude Code: arguments that choose a model,
+    /// with `{model}`, e.g. ["--model", "{model}"]. Lets profiles pick one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -198,6 +206,52 @@ pub struct PresetCfg {
     pub harness: Option<String>,
     #[serde(default)]
     pub runner: Option<String>,
+    /// Profile to launch with (model, permission mode, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// A named way to run an agent: a runner with a model, permission mode,
+/// effort, tool rules and environment. Launches, presets, workflow tasks and
+/// board items pick one, so "plan with Opus, build with Sonnet, try it on a
+/// local model" is three profiles.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileCfg {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Runner (default: the one chosen at launch, else "claude").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// manual | acceptEdits | auto | plan | dontAsk | bypassPermissions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// low | medium | high | xhigh | max
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
+    /// Environment for the agent, e.g. ANTHROPIC_BASE_URL for a local model.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl ProfileCfg {
+    pub fn opts(&self) -> crate::deck::nodes::AgentOpts {
+        crate::deck::nodes::AgentOpts {
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.clone(),
+            effort: self.effort.clone(),
+            allowed_tools: self.allowed_tools.clone(),
+            disallowed_tools: self.disallowed_tools.clone(),
+            env: self.env.clone(),
+        }
+    }
 }
 
 fn dot() -> String {
@@ -254,6 +308,7 @@ pub struct Runner {
     pub format: String,
     pub resume_args: Vec<String>,
     pub fork_args: Vec<String>,
+    pub model_args: Vec<String>,
     /// Where the program was found on PATH; None means it is not installed.
     pub program: Option<PathBuf>,
 }
@@ -263,6 +318,7 @@ pub struct Settings {
     pub harnesses: Vec<Harness>,
     pub runners: Vec<Runner>,
     pub presets: Vec<PresetCfg>,
+    pub profiles: Vec<ProfileCfg>,
     pub bind: String,
     pub read_only: bool,
     pub config_path: Option<PathBuf>,
@@ -292,6 +348,10 @@ impl Shared {
 }
 
 impl Settings {
+    pub fn profile(&self, name: &str) -> Option<&ProfileCfg> {
+        self.profiles.iter().find(|p| p.name == name)
+    }
+
     pub fn node(&self, name: &str) -> Option<&crate::deck::nodes::Node> {
         self.nodes.iter().find(|n| n.name == name)
     }
@@ -538,6 +598,7 @@ pub fn default_runners() -> Vec<RunnerCfg> {
         format: Some(format.into()),
         resume_args: Vec::new(),
         fork_args: Vec::new(),
+        model_args: Vec::new(),
     };
     let mut claude = r(
         "claude",
@@ -566,6 +627,7 @@ pub fn default_presets() -> Vec<PresetCfg> {
         prompt: prompt.into(),
         harness: Some("indra".into()),
         runner: Some("claude".into()),
+        profile: None,
     };
     vec![
         p("Full security review", "/sh-security-review {target}"),
@@ -746,6 +808,12 @@ pub fn build_settings(
         } else {
             (r.resume_args.clone(), r.fork_args.clone())
         };
+        if !r.model_args.is_empty() && !r.model_args.iter().any(|a| a.contains("{model}")) {
+            return Err(format!(
+                "runner '{}': model_args must contain {{model}}",
+                r.name
+            ));
+        }
         if !resume_args.is_empty() && !resume_args.iter().any(|a| a.contains("{session}")) {
             return Err(format!(
                 "runner '{}': resume_args must contain {{session}}",
@@ -760,9 +828,40 @@ pub fn build_settings(
             format,
             resume_args,
             fork_args,
+            model_args: r.model_args,
         });
     }
 
+    unique("profile", file.profile.iter().map(|p| p.name.as_str()))?;
+    for p in &file.profile {
+        p.opts()
+            .validate()
+            .map_err(|e| format!("profile '{}': {}", p.name, e))?;
+        if let Some(r) = &p.runner {
+            crate::deck::nodes::validate_name(r)
+                .map_err(|e| format!("profile '{}': {}", p.name, e))?;
+        }
+    }
+    let known = |p: &Option<String>, what: &str| -> Result<()> {
+        match p {
+            Some(n) if !file.profile.iter().any(|x| &x.name == n) => Err(format!(
+                "{} uses profile '{}', which is not defined",
+                what, n
+            )),
+            _ => Ok(()),
+        }
+    };
+    for p in &file.preset {
+        known(&p.profile, &format!("preset '{}'", p.name))?;
+    }
+    for w in &file.workflow {
+        for t in &w.tasks {
+            known(
+                &t.profile,
+                &format!("workflow '{}' task '{}'", w.name, t.id),
+            )?;
+        }
+    }
     let mut presets = file.preset.clone();
     for d in default_presets() {
         if !presets.iter().any(|p| p.name == d.name) {
@@ -815,6 +914,7 @@ pub fn build_settings(
         harnesses,
         runners,
         presets,
+        profiles: file.profile.clone(),
         local_max_parallel: file.local.max_parallel.unwrap_or(4).max(1),
         nodes,
         workflows,

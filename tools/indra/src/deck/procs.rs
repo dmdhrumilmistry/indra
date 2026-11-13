@@ -8,7 +8,7 @@
 //! show which agents a run started and what each one is doing.
 
 use crate::deck::config::Runner;
-use crate::deck::nodes::{Node, Resume};
+use crate::deck::nodes::{AgentOpts, Node, Resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 const MAX_EVENTS: usize = 5000;
 const MAX_TEXT: usize = 4000;
@@ -78,6 +78,34 @@ pub struct ProcView {
     pub cost_usd: Option<f64>,
     pub log: String,
     pub last: Option<String>,
+    /// Model, permission mode and the rest it was started with.
+    pub opts: AgentOpts,
+    /// Driven over Claude Code's control channel: approvals, mode, model.
+    pub interactive: bool,
+    /// Its input is still open: it can take a message or a control.
+    pub open: bool,
+    /// Current permission mode and model, as the agent reports them.
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    /// Tool requests waiting for an answer.
+    pub pending: Vec<Approval>,
+}
+
+/// A tool request the agent is waiting on.
+#[derive(Debug, Clone, Serialize)]
+pub struct Approval {
+    pub request_id: String,
+    pub tool: String,
+    pub input: Value,
+    /// Rules Claude Code suggests for "always allow".
+    pub suggestions: Value,
+    pub ts: u64,
+}
+
+/// What the console sends to an interactive agent.
+enum Ctl {
+    Line(String),
+    Close,
 }
 
 struct State {
@@ -93,6 +121,14 @@ struct State {
     format: String,
     host: Option<String>,
     session: Option<String>,
+    interactive: bool,
+    open: bool,
+    /// User turns sent and not yet answered by a result.
+    turns: u32,
+    mode: Option<String>,
+    model: Option<String>,
+    pending: Vec<Approval>,
+    next_request: u64,
 }
 
 pub struct Proc {
@@ -111,6 +147,9 @@ pub struct Proc {
     state: Mutex<State>,
     tx: broadcast::Sender<Event>,
     stop: Mutex<Option<oneshot::Sender<()>>>,
+    opts: AgentOpts,
+    /// Lines for an interactive agent's stdin (local) or the node (remote).
+    ctl: Mutex<Option<mpsc::UnboundedSender<Ctl>>>,
 }
 
 fn now() -> u64 {
@@ -179,6 +218,142 @@ impl Proc {
                 .rev()
                 .find(|e| e.kind != "stderr")
                 .map(|e| clip(&e.text, 160)),
+            opts: self.opts.clone(),
+            interactive: st.interactive,
+            open: st.open && st.status == "running",
+            mode: st.mode.clone(),
+            model: st.model.clone(),
+            pending: st.pending.clone(),
+        }
+    }
+
+    pub fn opts(&self) -> &AgentOpts {
+        &self.opts
+    }
+
+    fn send(&self, c: Ctl) -> Result<(), String> {
+        match self.ctl.lock().unwrap().as_ref() {
+            Some(tx) => tx
+                .send(c)
+                .map_err(|_| "the agent's input is closed".to_string()),
+            None => Err("this agent does not take input (only Claude Code runners do)".into()),
+        }
+    }
+
+    fn check_open(&self) -> Result<(), String> {
+        let st = self.state.lock().unwrap();
+        if st.status != "running" {
+            return Err("the agent is not running".into());
+        }
+        if !st.interactive || !st.open {
+            return Err(if st.interactive {
+                "the agent has finished its work; use Pivot > Continue to give it more".into()
+            } else {
+                "this agent is not driven interactively (only Claude Code runners are)".into()
+            });
+        }
+        Ok(())
+    }
+
+    /// Answer a tool request: allow (once, or always for this session, with
+    /// the rule Claude Code suggested) or deny with a reason.
+    pub fn answer(
+        &self,
+        request_id: &str,
+        allow: bool,
+        always: bool,
+        message: Option<&str>,
+    ) -> Result<(), String> {
+        self.check_open()?;
+        let a = {
+            let mut st = self.state.lock().unwrap();
+            let i = st
+                .pending
+                .iter()
+                .position(|a| a.request_id == request_id)
+                .ok_or("no such pending request (already answered?)")?;
+            st.pending.remove(i)
+        };
+        let response = if allow {
+            let mut r = serde_json::json!({ "behavior": "allow", "updatedInput": a.input });
+            if always
+                && a.suggestions
+                    .as_array()
+                    .map(|x| !x.is_empty())
+                    .unwrap_or(false)
+            {
+                r["updatedPermissions"] = a.suggestions.clone();
+            }
+            r
+        } else {
+            serde_json::json!({ "behavior": "deny", "message": message.filter(|m| !m.trim().is_empty()).unwrap_or("Denied in the indra console.") })
+        };
+        let line = serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": a.request_id, "response": response } });
+        self.send(Ctl::Line(line.to_string()))?;
+        self.push(
+            "permission",
+            format!(
+                "{} {}{}",
+                if allow { "allowed" } else { "denied" },
+                a.tool,
+                if allow && always {
+                    " (always, for this session)"
+                } else {
+                    ""
+                }
+            ),
+            None,
+        );
+        Ok(())
+    }
+
+    /// Ask the agent to change: `set_permission_mode`, `set_model` or `interrupt`.
+    pub fn control(&self, subtype: &str, extra: Value) -> Result<(), String> {
+        self.check_open()?;
+        let id = {
+            let mut st = self.state.lock().unwrap();
+            st.next_request += 1;
+            format!("indra-{}", st.next_request)
+        };
+        let mut req = serde_json::json!({ "subtype": subtype });
+        if let (Some(r), Some(e)) = (req.as_object_mut(), extra.as_object()) {
+            r.extend(e.clone());
+        }
+        let line =
+            serde_json::json!({ "type": "control_request", "request_id": id, "request": req });
+        self.send(Ctl::Line(line.to_string()))?;
+        self.push(
+            "system",
+            format!("asked the agent to {}", subtype.replace('_', " ")),
+            None,
+        );
+        Ok(())
+    }
+
+    /// A follow-up message, in the same session, answered after the current turn.
+    pub fn say(&self, text: &str) -> Result<(), String> {
+        self.check_open()?;
+        self.send(Ctl::Line(crate::deck::nodes::user_message(text)))?;
+        self.state.lock().unwrap().turns += 1;
+        self.push("user", text.to_string(), None);
+        Ok(())
+    }
+
+    /// A turn ended: close the agent's input once nothing more is queued,
+    /// so it finishes and exits as a one-shot agent would.
+    fn turn_done(&self) {
+        let close = {
+            let mut st = self.state.lock().unwrap();
+            st.turns = st.turns.saturating_sub(1);
+            let close = st.interactive && st.open && st.turns == 0;
+            if close {
+                st.open = false;
+                st.pending.clear();
+            }
+            close
+        };
+        if close {
+            let _ = self.send(Ctl::Close);
         }
     }
 
@@ -222,6 +397,14 @@ impl Proc {
                     let mut st = self.state.lock().unwrap();
                     st.format = s("format");
                     st.host = Some(s("host")).filter(|h| !h.is_empty());
+                    if v.get("interactive")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        st.interactive = true;
+                        st.open = true;
+                        st.turns = 1;
+                    }
                 }
                 self.push(
                     "system",
@@ -324,6 +507,15 @@ impl Proc {
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
             "system" if s(&v, "subtype") == "init" => {
                 let model = s(&v, "model");
+                {
+                    let mut st = self.state.lock().unwrap();
+                    if !model.is_empty() {
+                        st.model = Some(model.clone());
+                    }
+                    if let Some(m) = v.get("permissionMode").and_then(Value::as_str) {
+                        st.mode = Some(m.to_string());
+                    }
+                }
                 self.push(
                     "system",
                     format!(
@@ -394,6 +586,78 @@ impl Proc {
                     text.push_str(&r);
                 }
                 self.push("result", text, agent);
+                self.turn_done();
+            }
+            "system" if s(&v, "subtype") == "status" => {
+                if let Some(m) = v.get("permissionMode").and_then(Value::as_str) {
+                    let changed = {
+                        let mut st = self.state.lock().unwrap();
+                        let changed = st.mode.as_deref() != Some(m);
+                        st.mode = Some(m.to_string());
+                        changed
+                    };
+                    if changed {
+                        self.push("system", format!("permission mode is now {}", m), None);
+                    }
+                }
+            }
+            // Claude Code asks the host before using a tool.
+            "control_request" => {
+                let id = s(&v, "request_id");
+                let req = v.get("request").cloned().unwrap_or(Value::Null);
+                if s(&req, "subtype") == "can_use_tool" {
+                    let tool = s(&req, "tool_name");
+                    let input = req.get("input").cloned().unwrap_or(Value::Null);
+                    let summary = tool_summary(&tool, &input);
+                    self.state.lock().unwrap().pending.push(Approval {
+                        request_id: id,
+                        tool: tool.clone(),
+                        input,
+                        suggestions: req
+                            .get("permission_suggestions")
+                            .cloned()
+                            .unwrap_or(Value::Array(vec![])),
+                        ts: now(),
+                    });
+                    self.push(
+                        "permission",
+                        format!("asks to use {}{}", tool, summary),
+                        agent,
+                    );
+                } else {
+                    // Nothing else is supported; say so rather than leave it waiting.
+                    let line = serde_json::json!({ "type": "control_response", "response": {
+                        "subtype": "error", "request_id": id, "error": "not supported by indra" } });
+                    let _ = self.send(Ctl::Line(line.to_string()));
+                }
+            }
+            // Answers to the console's own requests.
+            "control_response" => {
+                let r = v.get("response").cloned().unwrap_or(Value::Null);
+                let id = s(&r, "request_id");
+                if id == "indra-init" {
+                    return;
+                }
+                if s(&r, "subtype") == "error" {
+                    self.push(
+                        "error",
+                        format!("the agent refused: {}", s(&r, "error")),
+                        None,
+                    );
+                } else if let Some(m) = r.pointer("/response/model").and_then(Value::as_str) {
+                    self.state.lock().unwrap().model = Some(m.to_string());
+                    self.push("system", format!("model is now {}", m), None);
+                } else if let Some(m) = r.pointer("/response/mode").and_then(Value::as_str) {
+                    let changed = {
+                        let mut st = self.state.lock().unwrap();
+                        let changed = st.mode.as_deref() != Some(m);
+                        st.mode = Some(m.to_string());
+                        changed
+                    };
+                    if changed {
+                        self.push("system", format!("permission mode is now {}", m), None);
+                    }
+                }
             }
             _ => {}
         }
@@ -478,11 +742,13 @@ pub struct Procs {
     log_dir: PathBuf,
 }
 
-/// Extra launch options for pivots.
+/// Extra launch options: a pivot's session and parent, and the agent options.
 #[derive(Debug, Clone, Default)]
 pub struct StartOpts {
     pub resume: Option<Resume>,
     pub parent: Option<u64>,
+    /// Model, permission mode, tools and environment (from a profile).
+    pub agent: AgentOpts,
 }
 
 /// Where and what to launch.
@@ -570,6 +836,7 @@ impl Procs {
             .count()
     }
 
+    #[cfg(all(test, unix))]
     pub fn start(self: &Arc<Self>, l: Launch) -> Result<u64, String> {
         self.start_with(l, StartOpts::default())
     }
@@ -582,7 +849,11 @@ impl Procs {
             program: PathBuf,
             args: Vec<String>,
             cwd: Option<PathBuf>,
-            stdin: Option<String>,
+            env: Vec<(String, String)>,
+            /// Local interactive agent: its first stdin lines.
+            control: Option<Vec<String>>,
+            /// Remote: the job line for `indra node exec`.
+            job: Option<String>,
             node: String,
             runner: String,
             harness: String,
@@ -599,20 +870,23 @@ impl Procs {
                 prompt,
                 target,
             } => {
-                let (program, args) = crate::deck::nodes::runner_argv_with(
+                let ac = crate::deck::nodes::agent_command(
                     runner,
                     prompt,
                     target,
                     opts.resume.as_ref(),
+                    &opts.agent,
                 )?;
                 if !target.is_dir() {
                     return Err(format!("target is not a directory: {}", target.display()));
                 }
                 Plan {
-                    program,
-                    args,
+                    program: ac.program,
+                    args: ac.args,
                     cwd: Some(target.to_path_buf()),
-                    stdin: None,
+                    env: ac.env,
+                    control: ac.control,
+                    job: None,
                     node: crate::deck::nodes::LOCAL.into(),
                     runner: runner.name.clone(),
                     harness: harness.into(),
@@ -630,18 +904,22 @@ impl Procs {
                 prompt,
                 target,
             } => {
+                opts.agent.validate()?;
                 let (program, args) = node.ssh_command_for("exec")?;
                 let job = crate::deck::nodes::Job {
                     runner: runner.into(),
                     prompt: prompt.replace("{node}", &node.name),
                     target: target.into(),
                     resume: opts.resume.clone(),
+                    opts: opts.agent.clone(),
                 };
                 Plan {
                     program,
                     args,
                     cwd: None,
-                    stdin: Some(serde_json::to_string(&job).map_err(|e| e.to_string())?),
+                    env: Vec::new(),
+                    control: None,
+                    job: Some(serde_json::to_string(&job).map_err(|e| e.to_string())?),
                     node: node.name.clone(),
                     runner: runner.into(),
                     harness: harness.into(),
@@ -665,7 +943,8 @@ impl Procs {
 
         let mut cmd = tokio::process::Command::new(&plan.program);
         cmd.args(&plan.args)
-            .stdin(if plan.stdin.is_some() {
+            .envs(plan.env.iter().map(|(k, v)| (k, v)))
+            .stdin(if plan.job.is_some() || plan.control.is_some() {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -681,10 +960,12 @@ impl Procs {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot start {}: {}", plan.program.display(), e))?;
-        // A remote job lives as long as its stdin stays open: the waiter task
-        // below writes the job, then holds stdin until the job ends.
-        let mut job_stdin = child.stdin.take();
-        let payload = plan.stdin.clone();
+        // Stdin carries the remote job (and then control lines wrapped for the
+        // node), or a local interactive agent's control lines. A writer task
+        // owns it; a remote job lives as long as it stays open.
+        let child_stdin = child.stdin.take();
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel::<Ctl>();
+        let interactive = plan.control.is_some();
 
         let (tx, _) = broadcast::channel(1024);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -715,9 +996,18 @@ impl Procs {
                 format: plan.format.clone(),
                 host: None,
                 session: None,
+                interactive,
+                open: interactive,
+                turns: u32::from(interactive),
+                mode: opts.agent.permission_mode.clone(),
+                model: opts.agent.model.clone(),
+                pending: Vec::new(),
+                next_request: 0,
             }),
             tx,
             stop: Mutex::new(Some(stop_tx)),
+            opts: opts.agent.clone(),
+            ctl: Mutex::new((plan.job.is_some() || interactive).then(|| ctl_tx.clone())),
         });
         self.procs.lock().unwrap().insert(id, proc.clone());
         proc.push(
@@ -780,18 +1070,62 @@ impl Procs {
             }
         });
 
-        let p3 = proc.clone();
-        tokio::spawn(async move {
-            if let (Some(si), Some(payload)) = (job_stdin.as_mut(), payload) {
-                let line = format!("{}\n", payload);
-                if let Err(e) = tokio::io::AsyncWriteExt::write_all(si, line.as_bytes()).await {
-                    p3.push(
+        // The writer: first the job (remote) or the opening lines (local
+        // interactive), then whatever the console sends, until closed.
+        let (pw, job, first) = (proc.clone(), plan.job.clone(), plan.control.clone());
+        let (writer_stop_tx, writer_stop) = oneshot::channel::<()>();
+        let writer = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let Some(mut w) = child_stdin else { return };
+            let mut ctl_rx = ctl_rx;
+            let mut writer_stop = writer_stop;
+            if let Some(job) = job {
+                if let Err(e) = w.write_all(format!("{}\n", job).as_bytes()).await {
+                    pw.push(
                         "error",
                         format!("could not send the job to the node: {}", e),
                         None,
                     );
                 }
             }
+            for l in first.unwrap_or_default() {
+                let _ = w.write_all(format!("{}\n", l).as_bytes()).await;
+            }
+            let _ = w.flush().await;
+            loop {
+                tokio::select! {
+                    _ = &mut writer_stop => return,
+                    msg = ctl_rx.recv() => match msg {
+                        Some(Ctl::Line(l)) => {
+                            let line = if remote { serde_json::json!({ "t": "in", "l": l }).to_string() } else { l };
+                            if w.write_all(format!("{}\n", line).as_bytes()).await.is_err() || w.flush().await.is_err() {
+                                return;
+                            }
+                        }
+                        Some(Ctl::Close) => {
+                            if remote {
+                                // The node closes the agent's stdin; the SSH session stays.
+                                let _ = w.write_all(b"{\"t\":\"close\"}\n").await;
+                                let _ = w.flush().await;
+                            } else {
+                                return; // dropping stdin is the close
+                            }
+                        }
+                        None => {
+                            // Keep a remote job's stdin open until the job ends or is stopped.
+                            if remote {
+                                let _ = (&mut writer_stop).await;
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        drop(ctl_tx);
+
+        let p3 = proc.clone();
+        tokio::spawn(async move {
             let mut stopped = false;
             let status = tokio::select! {
                 s = child.wait() => s,
@@ -800,7 +1134,7 @@ impl Procs {
                     p3.push("system", "stop requested".into(), None);
                     // Closing a remote job's stdin makes the node stop the agent's tree;
                     // then the local ssh (or the local agent) is terminated as well.
-                    drop(job_stdin.take());
+                    let _ = writer_stop_tx.send(());
                     if remote {
                         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
                     }
@@ -809,6 +1143,8 @@ impl Procs {
             };
             let _ = t_out.await;
             let _ = t_err.await;
+            writer.abort();
+            *p3.ctl.lock().unwrap() = None;
             let (kind, text) = {
                 let mut st = p3.state.lock().unwrap();
                 st.ended = Some(now());
@@ -826,6 +1162,8 @@ impl Procs {
                     }
                     Err(_) => st.status = "failed".into(),
                 }
+                st.open = false;
+                st.pending.clear();
                 for a in st.agents.iter_mut().filter(|a| a.state == "running") {
                     a.state = if stopped { "error" } else { "done" };
                 }
@@ -844,6 +1182,26 @@ impl Procs {
             p3.push(kind, text, None);
         });
         Ok(id)
+    }
+}
+
+/// A short description of a tool request, for the feed.
+fn tool_summary(tool: &str, input: &Value) -> String {
+    let pick = [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "url",
+        "description",
+        "prompt",
+    ]
+    .iter()
+    .find_map(|k| input.get(*k).and_then(Value::as_str));
+    match pick {
+        Some(x) => format!(": {}", clip(x, 200)),
+        None if tool.is_empty() => String::new(),
+        None => String::new(),
     }
 }
 
@@ -932,6 +1290,7 @@ mod tests {
             format: format.into(),
             resume_args: vec![],
             fork_args: vec![],
+            model_args: vec![],
             program,
         }
     }
@@ -955,6 +1314,7 @@ mod tests {
             format: "text".into(),
             resume_args: vec![],
             fork_args: vec![],
+            model_args: vec![],
             program: crate::deck::config::which("sh"),
         };
         let procs = Procs::new(dir.join("logs"));
@@ -1043,9 +1403,18 @@ mod tests {
                 format: "claude-stream-json".into(),
                 host: None,
                 session: None,
+                interactive: false,
+                open: false,
+                turns: 0,
+                mode: None,
+                model: None,
+                pending: Vec::new(),
+                next_request: 0,
             }),
             tx,
             stop: Mutex::new(None),
+            opts: AgentOpts::default(),
+            ctl: Mutex::new(None),
         };
         for l in [
             r#"{"type":"system","subtype":"init","model":"m1","tools":[],"session_id":"4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"}"#,

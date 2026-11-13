@@ -8,7 +8,8 @@
 //! that would not load is refused before anything is written.
 
 use crate::deck::config::{
-    ConfigFile, HarnessCfg, LocalCfg, NodeCfg, PresetCfg, Result, RunnerCfg, ServerCfg, WorkflowCfg,
+    ConfigFile, HarnessCfg, LocalCfg, NodeCfg, PresetCfg, ProfileCfg, Result, RunnerCfg, ServerCfg,
+    WorkflowCfg,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -18,8 +19,8 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
 /// The top-level keys of `indra.toml`, in the order a new file gets them.
-pub const SECTIONS: [&str; 8] = [
-    "builtins", "server", "local", "harness", "runner", "preset", "node", "workflow",
+pub const SECTIONS: [&str; 9] = [
+    "builtins", "server", "local", "harness", "runner", "profile", "preset", "node", "workflow",
 ];
 
 /// The first lines of a config file the console creates.
@@ -74,6 +75,7 @@ fn fragment(section: &str, value: &Value) -> Result<Option<(String, Value)>> {
         "harness" => typed::<Vec<HarnessCfg>>(section, value),
         "runner" => typed::<Vec<RunnerCfg>>(section, value),
         "preset" => typed::<Vec<PresetCfg>>(section, value),
+        "profile" => typed::<Vec<ProfileCfg>>(section, value),
         "node" => typed::<Vec<NodeCfg>>(section, value),
         "workflow" => typed::<Vec<WorkflowCfg>>(section, value),
         _ => return Err(format!("unknown section '{}'", section)),

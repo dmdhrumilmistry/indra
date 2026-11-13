@@ -17,10 +17,17 @@
 //!   {"t":"err","l":"<a stderr line>"}
 //!   {"t":"error","msg":".."}     the job could not start
 //!   {"t":"exit","code":N}
+//!
+//! After the job line, the hub may send more lines on stdin for agents that
+//! are driven interactively (Claude Code's control channel):
+//!   {"t":"in","l":"<a line for the agent's stdin>"}
+//!   {"t":"close"}                  close the agent's stdin (its work is done)
+//! EOF on stdin still means "stop the agent".
 
 use crate::deck::config::{self, Harness, Runner, Settings, StageCfg};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{ExitCode, Stdio};
@@ -337,6 +344,9 @@ pub struct Job {
     /// Continue an earlier agent session on this node instead of starting fresh.
     #[serde(default)]
     pub resume: Option<Resume>,
+    /// Model, permission mode and the rest, from the profile.
+    #[serde(default)]
+    pub opts: AgentOpts,
 }
 
 /// Continue an earlier agent session (a pivot), optionally as a branch.
@@ -418,15 +428,20 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
             target.display()
         ));
     }
-    let (program, args) = match runner_argv_with(runner, &job.prompt, &target, job.resume.as_ref())
-    {
+    let ac = match agent_command(runner, &job.prompt, &target, job.resume.as_ref(), &job.opts) {
         Ok(x) => x,
         Err(e) => return fail(e),
     };
+    let program = ac.program.clone();
     let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(&args)
+    cmd.args(&ac.args)
+        .envs(ac.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&target)
-        .stdin(Stdio::null())
+        .stdin(if ac.control.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -439,7 +454,7 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
     let pid = child.id();
     emit(
         &out,
-        json!({ "t": "start", "runner": runner.name, "format": runner.format, "pid": pid, "host": hostname() }),
+        json!({ "t": "start", "runner": runner.name, "format": runner.format, "pid": pid, "host": hostname(), "interactive": ac.control.is_some() }),
     );
 
     let forward = |stream: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>,
@@ -464,6 +479,15 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
     let t1 = forward(so, "out", out.clone());
     let t2 = forward(se, "err", out.clone());
 
+    // An interactive agent's stdin: the first lines (initialize, the
+    // prompt), then whatever the hub forwards, until the hub closes it.
+    let mut agent_in = child.stdin.take();
+    if let (Some(w), Some(lines)) = (agent_in.as_mut(), &ac.control) {
+        for l in lines {
+            let _ = w.write_all(format!("{}\n", l).as_bytes()).await;
+        }
+        let _ = w.flush().await;
+    }
     // The hub keeps stdin open for the life of the job; EOF means the SSH
     // session (or the hub) went away, so the agent must stop too.
     let eof = async move {
@@ -473,6 +497,24 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
             match stdin.read_line(&mut buf).await {
                 Ok(0) | Err(_) => return,
                 Ok(_) => {}
+            }
+            let Ok(msg) = serde_json::from_str::<Value>(buf.trim()) else {
+                continue;
+            };
+            match msg.get("t").and_then(Value::as_str) {
+                Some("in") => {
+                    if let (Some(w), Some(l)) =
+                        (agent_in.as_mut(), msg.get("l").and_then(Value::as_str))
+                    {
+                        if w.write_all(format!("{}\n", l).as_bytes()).await.is_err()
+                            || w.flush().await.is_err()
+                        {
+                            agent_in = None;
+                        }
+                    }
+                }
+                Some("close") => agent_in = None,
+                _ => {}
             }
         }
     };
@@ -485,6 +527,225 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
     let code = status.ok().and_then(|st| st.code()).unwrap_or(1);
     emit(&out, json!({ "t": "exit", "code": code }));
     Ok(ExitCode::from(code.clamp(0, 255) as u8))
+}
+
+/// Claude Code's permission modes.
+pub const PERMISSION_MODES: [&str; 6] = [
+    "manual",
+    "acceptEdits",
+    "auto",
+    "plan",
+    "dontAsk",
+    "bypassPermissions",
+];
+/// Claude Code's effort levels.
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// How to run one agent, beyond its prompt: usually from a profile, and
+/// overridable per launch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentOpts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
+    /// Environment for the agent (e.g. ANTHROPIC_BASE_URL for a local model).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl AgentOpts {
+    /// Values end up as arguments and environment of a program, so each is
+    /// checked: no option smuggling (a leading `-`), no control characters.
+    pub fn validate(&self) -> Result<(), String> {
+        let word = |what: &str, v: &str, max: usize| -> Result<(), String> {
+            if v.is_empty()
+                || v.len() > max
+                || v.starts_with('-')
+                || v.chars().any(|c| c.is_control())
+            {
+                return Err(format!("invalid {}: {:?}", what, v));
+            }
+            Ok(())
+        };
+        if let Some(m) = &self.model {
+            word("model", m, 128)?;
+            if !m
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._:/-[]".contains(c))
+            {
+                return Err(format!("invalid model name: {:?}", m));
+            }
+        }
+        if let Some(m) = &self.permission_mode {
+            if !PERMISSION_MODES.contains(&m.as_str()) {
+                return Err(format!(
+                    "permission mode must be one of {}",
+                    PERMISSION_MODES.join(", ")
+                ));
+            }
+        }
+        if let Some(e) = &self.effort {
+            if !EFFORTS.contains(&e.as_str()) {
+                return Err(format!("effort must be one of {}", EFFORTS.join(", ")));
+            }
+        }
+        for t in self.allowed_tools.iter().chain(&self.disallowed_tools) {
+            word("tool rule", t, 300)?;
+            if t.contains(',') {
+                return Err(format!("a tool rule cannot contain a comma: {:?}", t));
+            }
+        }
+        for (k, v) in &self.env {
+            let ok = !k.is_empty()
+                && k.len() <= 128
+                && !k.starts_with(|c: char| c.is_ascii_digit())
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !ok {
+                return Err(format!("invalid environment variable name: {:?}", k));
+            }
+            if v.contains('\0') || v.len() > 8192 {
+                return Err(format!("invalid value for {}", k));
+            }
+        }
+        Ok(())
+    }
+
+    /// `other` on top of `self`: set fields win, lists and env are replaced.
+    pub fn with(&self, other: &AgentOpts) -> AgentOpts {
+        let mut o = self.clone();
+        if other.model.is_some() {
+            o.model = other.model.clone();
+        }
+        if other.permission_mode.is_some() {
+            o.permission_mode = other.permission_mode.clone();
+        }
+        if other.effort.is_some() {
+            o.effort = other.effort.clone();
+        }
+        if !other.allowed_tools.is_empty() {
+            o.allowed_tools = other.allowed_tools.clone();
+        }
+        if !other.disallowed_tools.is_empty() {
+            o.disallowed_tools = other.disallowed_tools.clone();
+        }
+        o.env
+            .extend(other.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        o
+    }
+}
+
+/// Everything needed to start an agent.
+#[derive(Debug, Clone)]
+pub struct AgentCommand {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Driven over Claude Code's control channel: these lines go to its
+    /// stdin first (initialize, then the prompt), and stdin stays open.
+    pub control: Option<Vec<String>>,
+}
+
+/// The command for a runner with options. A Claude Code runner whose
+/// arguments carry `{prompt}` on its own is driven interactively, so its
+/// tool requests can be approved and its mode and model changed while it
+/// runs; other runners take the prompt as an argument, as before.
+pub fn agent_command(
+    r: &Runner,
+    prompt: &str,
+    target: &std::path::Path,
+    resume: Option<&Resume>,
+    o: &AgentOpts,
+) -> Result<AgentCommand, String> {
+    o.validate()?;
+    let claude = r.format == "claude-stream-json";
+    let interactive = claude
+        && r.args.iter().any(|a| a == "{prompt}")
+        && r.args
+            .iter()
+            .filter(|a| a.contains("{prompt}"))
+            .all(|a| a == "{prompt}");
+    let (program, mut args) = runner_argv_with(
+        r,
+        if interactive { "\u{0}" } else { prompt },
+        target,
+        resume,
+    )?;
+    let mut control = None;
+    if interactive {
+        // The prompt goes over stdin as the first user message instead.
+        args.retain(|a| a != "\u{0}");
+        args.extend(
+            [
+                "--input-format",
+                "stream-json",
+                "--permission-prompt-tool",
+                "stdio",
+            ]
+            .map(String::from),
+        );
+        let prompt = prompt.replace("{target}", &target.to_string_lossy());
+        control = Some(vec![
+            json!({ "type": "control_request", "request_id": "indra-init", "request": { "subtype": "initialize" } }).to_string(),
+            user_message(&prompt),
+        ]);
+    }
+    if claude {
+        let mut flag = |f: &str, v: &Option<String>| {
+            if let Some(v) = v {
+                args.push(f.into());
+                args.push(v.clone());
+            }
+        };
+        flag("--model", &o.model);
+        flag("--permission-mode", &o.permission_mode);
+        flag("--effort", &o.effort);
+        if !o.allowed_tools.is_empty() {
+            args.push("--allowed-tools".into());
+            args.push(o.allowed_tools.join(","));
+        }
+        if !o.disallowed_tools.is_empty() {
+            args.push("--disallowed-tools".into());
+            args.push(o.disallowed_tools.join(","));
+        }
+    } else {
+        if let Some(m) = &o.model {
+            if r.model_args.is_empty() {
+                return Err(format!(
+                    "runner '{}' cannot choose a model (set model_args in its config)",
+                    r.name
+                ));
+            }
+            args.extend(r.model_args.iter().map(|a| a.replace("{model}", m)));
+        }
+        if o.permission_mode.is_some()
+            || o.effort.is_some()
+            || !o.allowed_tools.is_empty()
+            || !o.disallowed_tools.is_empty()
+        {
+            return Err(format!(
+                "runner '{}' is not Claude Code, so permission mode, effort and tool rules do not apply to it",
+                r.name
+            ));
+        }
+    }
+    Ok(AgentCommand {
+        program,
+        args,
+        env: o.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        control,
+    })
+}
+
+/// A user turn for Claude Code's stream-json input.
+pub fn user_message(text: &str) -> String {
+    json!({ "type": "user", "message": { "role": "user", "content": text }, "parent_tool_use_id": null, "session_id": "" }).to_string()
 }
 
 /// The argument vector a runner executes for a prompt in a target. The
@@ -543,6 +804,7 @@ mod tests {
             format: "claude-stream-json".into(),
             resume_args: vec!["--resume".into(), "{session}".into()],
             fork_args: vec!["--fork-session".into()],
+            model_args: vec![],
             program: Some(PathBuf::from("/bin/claude")),
         };
         let t = std::path::Path::new("/t");
