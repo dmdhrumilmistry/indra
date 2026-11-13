@@ -997,12 +997,114 @@
     }).then(function (r) { refreshOverview(); return r; });
   }
 
+  // ---- board: work items in columns, run by agents, synced with trackers --------
+  var COLS = [["todo", "To do"], ["running", "Running"], ["review", "Review"], ["done", "Done"], ["failed", "Failed"]];
+  function pageBoard(m) {
+    var ov = S.ov, ro = ov.read_only;
+    var importBox = h("div", { class: "row" });
+    var add = h("button", { class: "primary", type: "button", disabled: ro }, "New item");
+    m.appendChild(header("Board", "Work for agents. Run an item with a profile; when the agent finishes it moves to Review (or Failed), and you move it to Done. Items from Jira, ClickUp or GitHub report every move back.", [importBox, add]));
+    var lanes = h("div", { class: "lanes" }), detail = h("div");
+    m.appendChild(lanes); m.appendChild(detail);
+    var data = null, open = null;
+    function patch(id, body) {
+      return api("/api/board/items/" + id, { method: "PATCH", body: body }).then(load).catch(function (e) { toast(e.message, true); });
+    }
+    function runForm(it) {
+      var prof = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: it.profile ? "item: " + it.profile : "connector or runner default" }),
+        (ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name }); }));
+      var node = h("select", { "aria-label": "Node" }, ov.nodes.map(function (n) { return h("option", { value: n, text: n }); }));
+      node.value = it.node || "local";
+      var target = h("input", { type: "text", placeholder: it.target || "the harness's first target", "aria-label": "Target" });
+      var go = h("button", { class: "primary", type: "submit" }, "Run");
+      return h("form", { class: "row runform", onsubmit: function (e) {
+        e.preventDefault(); go.disabled = true;
+        api("/api/board/items/" + it.id + "/run", { method: "POST", body: { profile: prof.value || null, node: node.value, target: target.value.trim() || null } })
+          .then(function (r) { toast("Agent process #" + r.proc + " started"); load(); }).catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } }, prof, node, target, go);
+    }
+    function showDetail(it) {
+      open = it ? it.id : null; detail.textContent = "";
+      if (!it) return;
+      var src = it.source;
+      detail.appendChild(h("div", { class: "card itemdetail" },
+        h("div", { class: "row" }, h("h2", { text: "#" + it.id + " " + it.title }), src ? h("a", { href: src.url, target: "_blank", rel: "noopener", text: src.connector + " " + src.key + (src.state ? " (" + src.state + ")" : "") }) : null,
+          h("button", { type: "button", class: "ghost", onclick: function () { showDetail(null); } }, "Close")),
+        it.body ? h("pre", { class: "view small", text: it.body }) : h("p", { class: "muted", text: "No description." }),
+        it.column !== "running" && !ro ? runForm(it) : null,
+        it.proc_id ? h("p", null, h("a", { href: "#/proc/" + it.proc_id, text: "Open agent process #" + it.proc_id })) : null,
+        it.result ? [h("h3", { text: "Result" }), h("pre", { class: "view small", text: it.result })] : null,
+        it.notes.length ? [h("h3", { text: "History" }), h("ul", { class: "links" }, it.notes.slice().reverse().map(function (n) { return h("li", null, h("span", { class: "muted", text: ago(n.ts) + "  " }), n.text); }))] : null,
+        ro || it.column === "running" ? null : h("div", { class: "row" }, h("button", { type: "button", class: "danger", onclick: function () {
+          if (!window.confirm("Remove #" + it.id + " from the board? (Its tracker item is not touched.)")) return;
+          api("/api/board/items/" + it.id, { method: "DELETE" }).then(function () { showDetail(null); load(); }).catch(function (e) { toast(e.message, true); });
+        } }, "Remove from board"))));
+      detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    function card(it) {
+      var c = h("div", { class: "bcard " + it.column, draggable: ro || it.column === "running" ? null : "true", tabindex: "0", role: "button",
+        onclick: function () { showDetail(it); }, onkeydown: function (e) { if (e.key === "Enter") showDetail(it); } },
+        h("b", { text: it.title }),
+        h("div", { class: "row small" },
+          it.source ? h("span", { class: "pill", text: it.source.connector + " " + it.source.key }) : h("span", { class: "pill", text: "#" + it.id }),
+          it.profile ? h("span", { class: "pill", text: it.profile }) : null,
+          it.column === "running" ? h("span", { class: "pill run live", text: "agent #" + it.proc_id }) : null));
+      c.addEventListener("dragstart", function (e) { e.dataTransfer.setData("text/plain", String(it.id)); c.classList.add("dragging"); });
+      c.addEventListener("dragend", function () { c.classList.remove("dragging"); });
+      return c;
+    }
+    function render() {
+      lanes.textContent = "";
+      COLS.forEach(function (col) {
+        var items = data.items.filter(function (i) { return i.column === col[0]; });
+        var lane = h("div", { class: "lane " + col[0] }, h("h3", null, col[1], h("span", { class: "muted", text: " " + items.length })), items.map(card));
+        if (col[0] !== "running" && !ro) {
+          lane.addEventListener("dragover", function (e) { e.preventDefault(); lane.classList.add("over"); });
+          lane.addEventListener("dragleave", function () { lane.classList.remove("over"); });
+          lane.addEventListener("drop", function (e) {
+            e.preventDefault(); lane.classList.remove("over");
+            var id = Number(e.dataTransfer.getData("text/plain"));
+            var it = data.items.find(function (x) { return x.id === id; });
+            if (it && it.column !== col[0]) patch(id, { column: col[0] });
+          });
+        }
+        lanes.appendChild(lane);
+      });
+      importBox.textContent = "";
+      data.connectors.forEach(function (c) {
+        importBox.appendChild(h("button", { type: "button", disabled: ro, title: c.kind + " " + c.project + (c.auto_run ? ", runs new items automatically" : ""), onclick: function (e) {
+          e.target.disabled = true;
+          api("/api/board/import", { method: "POST", body: { connector: c.name } })
+            .then(function (r) { toast(c.name + ": " + r.added + " new, " + r.updated + " updated"); load(); })
+            .catch(function (err) { toast(err.message, true); }).then(function () { e.target.disabled = false; });
+        } }, "Import from " + c.name));
+      });
+      if (!data.connectors.length && canEdit()) importBox.appendChild(h("a", { href: "#/settings/connectors", text: "Connect Jira, ClickUp or GitHub" }));
+      if (open) { var it = data.items.find(function (x) { return x.id === open; }); if (it) showDetail(it); }
+    }
+    function load() { return api("/api/board").then(function (d) { data = d; render(); }).catch(function (e) { lanes.textContent = e.message; }); }
+    add.addEventListener("click", function () {
+      var title = h("input", { type: "text", required: true, "aria-label": "Title", placeholder: "What should an agent do?" });
+      var body = h("textarea", { "aria-label": "Details", placeholder: "Details, links, acceptance criteria" });
+      var prof = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "No profile" }), (ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name }); }));
+      detail.textContent = "";
+      detail.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+        e.preventDefault();
+        api("/api/board/items", { method: "POST", body: { title: title.value, body: body.value, profile: prof.value || null } })
+          .then(function () { detail.textContent = ""; load(); }).catch(function (err) { toast(err.message, true); });
+      } }, h("h2", { text: "New item" }), h("label", null, "Title", title), h("label", null, "Details", body), h("label", null, "Profile", prof),
+        h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Add to To do"), h("button", { type: "button", onclick: function () { detail.textContent = ""; } }, "Cancel"))));
+      title.focus();
+    });
+    load(); every(3000, function () { if (!document.querySelector(".lane.over")) load(); });
+  }
+
   // ---- settings: indra.toml, edited here ------------------------------------------
   // Each section of the config file has a schema; forms are built from it, and
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"],
-    ["presets", "Presets"], ["harnesses", "Harnesses"], ["secrets", "Secrets"], ["file", "File"]];
+    ["presets", "Presets"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -1023,6 +1125,22 @@
   ];
 
   var SCHEMA = {
+    connector: { tab: "connectors", noun: "connector", fields: function (c) { return [
+      { k: "name", label: "Name", req: true },
+      { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"]] },
+      { k: "url", label: "Site URL", placeholder: "https://acme.atlassian.net", help: "Jira: your site. GitHub and ClickUp: leave empty for the public API (set it for GitHub Enterprise)." },
+      { k: "project", label: "Project", req: true, help: "Jira project key (SEC), GitHub owner/repo, or ClickUp list id." },
+      { k: "query", label: "Filter", help: "Jira: extra JQL (labels = agent). GitHub: a label. ClickUp: statuses, comma-separated." },
+      { k: "email", label: "Account email (Jira)" },
+      { k: "token", label: "Token", req: true, placeholder: "secret:jira", help: "A secret reference, never the token itself: add the token in the Secrets tab (scope it to connector:<this name>)." },
+      { k: "profile", label: "Run with profile", type: "select", options: opts(cfgProfileNames(c), "None") },
+      { k: "node", label: "Node", type: "select", options: opts(cfgNodeNames(c), "local") },
+      { k: "target", label: "Target", help: "The directory agents work in for these items (default: the harness's first target)." },
+      { k: "prompt", label: "Instructions", type: "textarea", help: "Optional. {title}, {key}, {url} and {body} are filled in." },
+      { k: "poll_minutes", label: "Import every N minutes", type: "number", placeholder: "only when asked" },
+      { k: "auto_run", label: "Start an agent on each new item (within the node's capacity)", type: "bool" },
+      { k: "states", label: "States in the tracker", type: "kv", help: "running=In Progress, review=In Review, done=Done, failed=... one per line (GitHub: a label, or open/closed)." }]; },
+      summary: function (x) { return x.kind + " " + x.project + (x.query ? " (" + x.query + ")" : "") + (x.auto_run ? ", auto-run" : ""); } },
     profile: { tab: "profiles", noun: "profile", fields: function (c) { return [
       { k: "name", label: "Name", req: true, help: "Pick it on Launch, in presets, in workflow tasks and on the board." },
       { k: "description", label: "Description" },
@@ -1211,7 +1329,7 @@
       }
       ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, secrets: secrets, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, secrets: secrets, file: file })[tab]();
     }
 
     function general() {
@@ -1417,7 +1535,8 @@
         launch: function () { pageLaunch(m); },
         procs: function () { pageProcs(m); },
         proc: function () { pageProc(m, arg); },
-        settings: function () { pageSettings(m, arg); }
+        settings: function () { pageSettings(m, arg); },
+        board: function () { pageBoard(m); }
       };
       (pages[page] || pages.overview)();
     }).catch(function (e) { if (e.message !== "unauthorized") { m.appendChild(empty(e.message)); } });

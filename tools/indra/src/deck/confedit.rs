@@ -19,8 +19,17 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
 /// The top-level keys of `indra.toml`, in the order a new file gets them.
-pub const SECTIONS: [&str; 9] = [
-    "builtins", "server", "local", "harness", "runner", "profile", "preset", "node", "workflow",
+pub const SECTIONS: [&str; 10] = [
+    "builtins",
+    "server",
+    "local",
+    "harness",
+    "runner",
+    "profile",
+    "preset",
+    "node",
+    "workflow",
+    "connector",
 ];
 
 /// The first lines of a config file the console creates.
@@ -76,6 +85,7 @@ fn fragment(section: &str, value: &Value) -> Result<Option<(String, Value)>> {
         "runner" => typed::<Vec<RunnerCfg>>(section, value),
         "preset" => typed::<Vec<PresetCfg>>(section, value),
         "profile" => typed::<Vec<ProfileCfg>>(section, value),
+        "connector" => typed::<Vec<crate::deck::config::ConnectorCfg>>(section, value),
         "node" => typed::<Vec<NodeCfg>>(section, value),
         "workflow" => typed::<Vec<WorkflowCfg>>(section, value),
         _ => return Err(format!("unknown section '{}'", section)),

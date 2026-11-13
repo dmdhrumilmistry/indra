@@ -22,6 +22,7 @@ pub struct ConfigFile {
     pub runner: Vec<RunnerCfg>,
     pub preset: Vec<PresetCfg>,
     pub profile: Vec<ProfileCfg>,
+    pub connector: Vec<ConnectorCfg>,
     /// This machine as an agent node.
     pub local: LocalCfg,
     /// Remote machines reached over SSH.
@@ -254,6 +255,48 @@ impl ProfileCfg {
     }
 }
 
+/// A tracker the board imports work from and reports back to.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorCfg {
+    pub name: String,
+    /// jira | github | clickup
+    pub kind: String,
+    /// Base URL: the Jira site (https://acme.atlassian.net); GitHub and
+    /// ClickUp default to their public APIs (set it for GitHub Enterprise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Jira project key, GitHub "owner/repo", or ClickUp list id.
+    pub project: String,
+    /// Filter: extra JQL (Jira), a label (GitHub), or statuses (ClickUp, comma-separated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Jira account email (Jira Cloud uses email + API token).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The API token, as a secret reference: "secret:<name>".
+    pub token: String,
+    /// Profile, node and target to run imported items with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Instructions for the agent; {title}, {key}, {url} and {body} are filled in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Import new items every N minutes (default: only when asked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_minutes: Option<u64>,
+    /// Start an agent on each imported item, within the node's capacity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_run: bool,
+    /// Board column -> tracker state: running, review, done, failed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub states: std::collections::BTreeMap<String, String>,
+}
+
 fn dot() -> String {
     ".".into()
 }
@@ -319,6 +362,7 @@ pub struct Settings {
     pub runners: Vec<Runner>,
     pub presets: Vec<PresetCfg>,
     pub profiles: Vec<ProfileCfg>,
+    pub connectors: Vec<ConnectorCfg>,
     pub bind: String,
     pub read_only: bool,
     pub config_path: Option<PathBuf>,
@@ -348,6 +392,10 @@ impl Shared {
 }
 
 impl Settings {
+    pub fn connector(&self, name: &str) -> Option<&ConnectorCfg> {
+        self.connectors.iter().find(|c| c.name == name)
+    }
+
     pub fn profile(&self, name: &str) -> Option<&ProfileCfg> {
         self.profiles.iter().find(|p| p.name == name)
     }
@@ -860,6 +908,45 @@ pub fn build_settings(
     for p in &file.preset {
         known(&p.profile, &format!("preset '{}'", p.name))?;
     }
+    unique("connector", file.connector.iter().map(|c| c.name.as_str()))?;
+    for c in &file.connector {
+        let at = |m: String| format!("connector '{}': {}", c.name, m);
+        crate::deck::nodes::validate_name(&c.name).map_err(at)?;
+        if !crate::deck::trackers::KINDS.contains(&c.kind.as_str()) {
+            return Err(at(format!(
+                "kind must be one of {}",
+                crate::deck::trackers::KINDS.join(", ")
+            )));
+        }
+        match crate::deck::secrets::reference(&c.token) {
+            Some(n) => crate::deck::secrets::validate_name(n).map_err(at)?,
+            None => return Err(at("token must be a secret reference, \"secret:<name>\" (set it in Settings > Secrets), never the token itself".into())),
+        }
+        if c.kind == "jira" && (c.url.is_none() || c.email.is_none()) {
+            return Err(at(
+                "Jira needs url (https://<site>.atlassian.net) and email".into(),
+            ));
+        }
+        if let Some(u) = &c.url {
+            if !(u.starts_with("https://") || u.starts_with("http://")) {
+                return Err(at("url must start with https://".into()));
+            }
+        }
+        if c.project.trim().is_empty() {
+            return Err(at(
+                "project is required (Jira key, GitHub owner/repo, or ClickUp list id)".into(),
+            ));
+        }
+        for k in c.states.keys() {
+            if !["running", "review", "done", "failed"].contains(&k.as_str()) {
+                return Err(at(format!(
+                    "states: '{}' is not a board column (running, review, done, failed)",
+                    k
+                )));
+            }
+        }
+        known(&c.profile, &format!("connector '{}'", c.name))?;
+    }
     for w in &file.workflow {
         for t in &w.tasks {
             known(
@@ -921,6 +1008,7 @@ pub fn build_settings(
         runners,
         presets,
         profiles: file.profile.clone(),
+        connectors: file.connector.clone(),
         local_max_parallel: file.local.max_parallel.unwrap_or(4).max(1),
         nodes,
         workflows,

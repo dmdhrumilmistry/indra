@@ -285,7 +285,9 @@ impl Vault {
             }
         }
         for p in c.profiles.iter().flatten() {
-            crate::deck::nodes::validate_name(p).map_err(|e| format!("profile: {}", e))?;
+            // A profile, or a connector as "connector:<name>".
+            let name = p.strip_prefix("connector:").unwrap_or(p);
+            crate::deck::nodes::validate_name(name).map_err(|e| format!("profile: {}", e))?;
         }
         for n in c.nodes.iter().flatten() {
             crate::deck::nodes::validate_name(n).map_err(|e| format!("node: {}", e))?;

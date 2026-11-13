@@ -235,6 +235,14 @@ async fn serve(
         }),
     );
     let (procs, engine) = (app.procs.clone(), app.engine.clone());
+    // Keep the board moving: finished agents, scheduled imports, auto runs.
+    let ticker = app.clone();
+    tokio::spawn(async move {
+        loop {
+            crate::deck::board::tick(&ticker).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
     tokio::select! {
         r = axum::serve(listener, web::router(app)) => r.map_err(|e| e.to_string()),
         _ = shutdown_signal() => {
