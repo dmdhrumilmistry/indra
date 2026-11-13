@@ -106,6 +106,8 @@ fn hub(name: &str, webrtc: bool) -> Hub {
             "127.0.0.1:0",
         ])
         .env("INDRA_TOKEN", TOKEN)
+        // Each hub its own data directory, on macOS too (which ignores XDG_DATA_HOME).
+        .env("HOME", dir.join("hub-home"))
         .env("XDG_DATA_HOME", dir.join("hub-data"))
         .env("XDG_CONFIG_HOME", dir.join("hub-config"))
         .current_dir(&dir)
@@ -150,6 +152,7 @@ impl Hub {
             ])
             .args(["--target", self.dir.join("node-work").to_str().unwrap()])
             .args(["--config", self.dir.join("node.toml").to_str().unwrap()])
+            .env("HOME", self.dir.join("node-home"))
             .env("XDG_CONFIG_HOME", self.dir.join("node-config"))
             .env("XDG_DATA_HOME", self.dir.join("node-data"))
             .stdout(Stdio::null())

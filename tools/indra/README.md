@@ -31,7 +31,7 @@ picked up automatically, and any other harness is a few lines of TOML.
 (`indra.exe` on Windows) and put it on your `PATH`. Builds exist for Linux (x86_64 and arm64,
 static), macOS (Apple silicon and Intel) and Windows (x86_64).
 
-**From source** (any platform with [Rust](https://rustup.rs) 1.80+):
+**From source** (any platform with [Rust](https://rustup.rs) 1.89+):
 
 ```bash
 cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra
