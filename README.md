@@ -46,7 +46,7 @@ a web console to launch agents and watch them work.
     <td width="33%" valign="top">
       <h3>Watch it work</h3>
       <code>indra serve</code> shows every subagent, its tool calls, refused permissions and cost, live,
-      plus graph maps of your harness and memory.
+      on this machine or remote ones over SSH, and <code>indra run</code> orchestrates them.
     </td>
   </tr>
 </table>
@@ -258,6 +258,28 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
     <td width="33%"><img src="assets/screenshots/memory.png" alt="The memory graph"><br><sub><b>Memory:</b> findings, guards and false positives</sub></td>
   </tr>
 </table>
+
+### Agents on many machines (`indra nodes`, `indra run`)
+
+Run agents on this machine and on any machine you can SSH into, and orchestrate them:
+
+- **Nodes:** add a remote machine with a `[[node]]` block (an SSH destination, its capacity,
+  its codebases). No daemon and no open port: indra uses your SSH keys, and the remote runs
+  only its own configured runners. `indra nodes` checks them all.
+- **Workflows:** a graph of agent tasks across nodes, run in dependency order within each
+  node's capacity, with retries, skip-on-failure and cancel. Run one with `indra run nightly`
+  (cron and CI friendly) or from the console.
+- **Fan-out:** one prompt across any set of repositories on any machines, from the console.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/nodes.png" alt="The Nodes page: this machine, a reachable build box, and an unreachable node"><br><sub><b>Nodes:</b> health, runners and capacity of every machine</sub></td>
+    <td width="50%"><img src="assets/screenshots/workflow.png" alt="A workflow running across two machines"><br><sub><b>Workflows:</b> tasks across machines, in dependency order</sub></td>
+  </tr>
+</table>
+
+See [Nodes and orchestration](tools/indra/README.md#nodes-and-orchestration) for the setup and
+how remote execution stays safe.
 
 The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
 `.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.

@@ -92,7 +92,9 @@ counterpart, paths built with `Path`, and tests that pass on Windows. Memory not
 stay readable by Obsidian. The console can start processes, so keep its security model
 intact (see `tools/indra/README.md`): token on every API call, loopback Host check,
 same-origin writes, no shell, files confined to what discovery found or to a run
-directory, and UI strings rendered with `textContent` only. `.github/workflows/indra.yml`
+directory, and UI strings rendered with `textContent` only. Remote nodes go over SSH
+with `BatchMode=yes`; the only remote command is `indra node <info|runs|exec>` and the job
+travels as JSON on stdin, never through a remote shell, so keep it that way. `.github/workflows/indra.yml`
 tests it on all three OSes and publishes binaries on an `indra-v*` tag.
 
 ## CI: the two-stage knowledge-base updater

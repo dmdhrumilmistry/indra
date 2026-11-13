@@ -503,48 +503,251 @@
     load(); every(3000, load);
   }
 
+  // Nodes, fetched once per page that needs them.
+  function loadNodes(refresh) { return api("/api/nodes" + hq(refresh ? { refresh: 1 } : {})); }
+  function runnersOn(node, ov) {
+    if (node.name === "local") return ov.runners.filter(function (r) { return r.available; }).map(function (r) { return r.name; });
+    return node.info ? node.info.runners.filter(function (r) { return r.available; }).map(function (r) { return r.name; }) : [];
+  }
+
   function pageLaunch(m) {
     var ov = S.ov, hs = harness();
-    m.appendChild(header("Launch an agent", "Runs a configured runner in a target directory with your prompt, and streams what it does."));
+    m.appendChild(header("Launch an agent", "Runs a runner on any node, in one of its target directories, and streams what it does."));
     if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
     if (!hs) { m.appendChild(empty("No harness configured.")); return; }
-    var avail = ov.runners.filter(function (r) { return r.available; });
-    if (!avail.length) { m.appendChild(h("div", { class: "note warn", text: "No runner is installed. Install Claude Code, Codex or Gemini CLI, or add a [[runner]] to indra.toml." })); return; }
-    var runner = h("select", { "aria-label": "Runner" }, avail.map(function (r) { return h("option", { value: r.name, text: r.name + "  (" + r.command + ")" }); }));
-    var target = h("select", { "aria-label": "Target" }, hs.targets.map(function (t, i) { return h("option", { value: String(i), text: t }); }));
-    var presets = ov.presets.filter(function (p) { return !p.harness || p.harness === hs.name; });
-    var preset = h("select", { "aria-label": "Preset" }, h("option", { value: "", text: "Write your own" }), presets.map(function (p, i) { return h("option", { value: String(i), text: p.name }); }));
-    var prompt = h("textarea", { placeholder: "What should the agent do?", "aria-label": "Prompt" });
-    var preview = h("div", { class: "cmd" });
-    var go = h("button", { class: "primary", type: "submit" }, "Launch");
-    function update() {
-      var r = ov.runners.find(function (x) { return x.name === runner.value; });
-      var t = hs.targets[Number(target.value)] || "";
-      var p = prompt.value.split("{target}").join(t);
-      preview.textContent = r ? [r.command].concat(r.args.map(function (a) { return a.split("{target}").join(t).split("{prompt}").join(p); }))
-        .map(function (a) { return /[\s"'$`\\;&|<>]/.test(a) ? JSON.stringify(a) : a; }).join(" ") : "";
-      go.disabled = !prompt.value.trim();
+    var holder = h("div", { class: "muted", text: "Checking nodes..." });
+    m.appendChild(holder);
+    loadNodes(false).then(function (nodes) {
+      holder.remove();
+      var node = h("select", { "aria-label": "Node" }, nodes.map(function (n) {
+        return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : "  (" + n.ssh + (n.error ? ", unreachable" : "") + ")") });
+      }));
+      var runner = h("select", { "aria-label": "Runner" });
+      var target = h("select", { "aria-label": "Target" });
+      var presets = ov.presets.filter(function (p) { return !p.harness || p.harness === hs.name; });
+      var preset = h("select", { "aria-label": "Preset" }, h("option", { value: "", text: "Write your own" }), presets.map(function (p, i) { return h("option", { value: String(i), text: p.name }); }));
+      var prompt = h("textarea", { placeholder: "What should the agent do?", "aria-label": "Prompt" });
+      var preview = h("div", { class: "cmd" });
+      var go = h("button", { class: "primary", type: "submit" }, "Launch");
+      function cur() { return nodes.find(function (n) { return n.name === node.value; }) || nodes[0]; }
+      function fillNode() {
+        var n = cur(), names = runnersOn(n, ov), keep = runner.value;
+        runner.textContent = ""; target.textContent = "";
+        names.forEach(function (r) { runner.appendChild(h("option", { value: r, text: r })); });
+        if (names.indexOf(keep) >= 0) runner.value = keep;
+        n.targets.forEach(function (t, i) { target.appendChild(h("option", { value: String(i), text: t })); });
+        update();
+      }
+      function update() {
+        var n = cur(), t = n.targets[Number(target.value)] || "", p = prompt.value.split("{target}").join(t).split("{node}").join(n.name);
+        if (n.kind === "local") {
+          var r = ov.runners.find(function (x) { return x.name === runner.value; });
+          preview.textContent = r ? [r.command].concat(r.args.map(function (a) { return a.split("{target}").join(t).split("{prompt}").join(p); }))
+            .map(function (a) { return /[\s"'$`\;&|<>]/.test(a) ? JSON.stringify(a) : a; }).join(" ") : "";
+        } else {
+          preview.textContent = "ssh " + n.ssh + " -- indra node exec   (job: " + JSON.stringify({ runner: runner.value, target: t, prompt: p }) + ")";
+        }
+        var why = !runner.value ? (n.error ? "This node is unreachable: " + n.error : "No runner is installed on this node.") : !n.targets.length ? "This node has no targets configured." : "";
+        note.textContent = why; note.hidden = !why;
+        go.disabled = !prompt.value.trim() || !runner.value || !n.targets.length;
+      }
+      var note = h("div", { class: "note warn", hidden: true });
+      preset.addEventListener("change", function () {
+        var p = presets[Number(preset.value)];
+        if (p) { prompt.value = p.prompt; if (p.runner) { runner.value = p.runner; } }
+        update();
+      });
+      node.addEventListener("change", fillNode);
+      [runner, target, prompt].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
+      var form = h("form", { class: "form", onsubmit: function (e) {
+        e.preventDefault(); go.disabled = true;
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value) } })
+          .then(function (r) { location.hash = "#/proc/" + r.id; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } },
+        h("label", null, "Preset", preset),
+        h("label", null, "Prompt", h("small", { text: "{target} becomes the target path, {node} the node name." }), prompt),
+        h("div", { class: "row" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", null, "Target", target)),
+        note,
+        h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On a remote node the job travels as JSON over SSH." }), preview),
+        h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. A remote node runs only runners from its own configuration." }),
+        h("div", { class: "row" }, go, h("a", { href: "#/workflows", text: "Or fan out to many targets at once" })));
+      m.appendChild(form);
+      fillNode();
+    }).catch(function (e) { holder.textContent = e.message; });
+  }
+
+  // ---- nodes --------------------------------------------------------------------
+  function meter(used, max) {
+    var fill = h("div", { class: "fill" }); fill.style.width = Math.min(100, 100 * used / Math.max(1, max)) + "%";
+    return h("div", { class: "bar" }, h("span", { text: "agents" }), h("div", { class: "track" }, fill), h("b", { text: used + "/" + max }));
+  }
+  function pageNodes(m) {
+    var refresh = h("button", { type: "button" }, "Check again");
+    m.appendChild(header("Nodes", "The machines agents run on. Remote nodes are reached over SSH and must have indra installed; each runs only its own configured runners.", [refresh]));
+    var grid = h("div", { class: "grid" }), runsBox = h("div");
+    m.appendChild(grid); m.appendChild(runsBox);
+    function showRuns(n) {
+      runsBox.textContent = "";
+      runsBox.appendChild(h("h2", { text: "Runs on " + n.name }));
+      var box = h("div", { class: "muted", text: "Loading..." }); runsBox.appendChild(box);
+      api("/api/nodes/runs" + hq({ node: n.name })).then(function (runs) {
+        box.textContent = ""; box.className = "tablewrap";
+        if (!runs.length) { box.appendChild(empty("No runs in this node's targets.")); return; }
+        box.appendChild(h("table", null, h("thead", null, h("tr", null, ["Run", "Progress", "Results", "By agent", "Updated"].map(function (t) { return h("th", { text: t }); }))),
+          h("tbody", null, runs.map(function (r) {
+            var groups = Object.keys(r.counts.by_group).map(function (g) { return g + " " + r.counts.by_group[g]; }).join(", ");
+            var go = n.name === "local" ? function () { location.hash = "#/run/" + encodeURIComponent(r.key); } : null;
+            return h("tr", { class: go ? "click" : "", onclick: go },
+              h("td", null, h("b", { text: r.name }), " ", r.active ? h("span", { class: "pill run live", text: "live" }) : null, h("div", { class: "muted", text: r.target })),
+              h("td", null, segs(r.stages)), h("td", { text: String(r.counts.total) }), h("td", { class: "desc", text: groups || "-" }), h("td", { class: "muted", text: ago(r.modified) }));
+          }))));
+      }).catch(function (e) { box.textContent = e.message; });
     }
-    preset.addEventListener("change", function () {
-      var p = presets[Number(preset.value)];
-      if (p) { prompt.value = p.prompt; if (p.runner && avail.some(function (r) { return r.name === p.runner; })) runner.value = p.runner; }
-      update();
-    });
-    [runner, target, prompt].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
-    var form = h("form", { class: "form", onsubmit: function (e) {
-      e.preventDefault(); go.disabled = true;
-      api("/api/procs", { method: "POST", body: { h: hs.name, runner: runner.value, prompt: prompt.value, target: Number(target.value) } })
-        .then(function (r) { location.hash = "#/proc/" + r.id; })
-        .catch(function (err) { toast(err.message, true); go.disabled = false; });
-    } },
-      h("label", null, "Preset", preset),
-      h("label", null, "Prompt", h("small", { text: "{target} becomes the target path." }), prompt),
-      h("div", { class: "row" }, h("label", null, "Runner", runner), h("label", null, "Target", target)),
-      h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. The prompt is one argument." }), preview),
-      h("div", { class: "note", text: "The agent runs with your user's permissions and your agent CLI's own permission settings (for Claude Code: .claude/settings.json). Tool calls it is not allowed to make are refused, and show up in the feed." }),
-      h("div", { class: "row" }, go));
-    m.appendChild(form);
-    update();
+    function render(nodes) {
+      grid.textContent = "";
+      nodes.forEach(function (n) {
+        var i = n.info, ok = !!i;
+        var card = h("div", { class: "card" },
+          h("div", { class: "row" }, h("h4", { text: n.name }), h("span", { class: "pill", text: n.kind === "local" ? "this machine" : "ssh" }),
+            h("span", { class: "pill " + (ok ? "ok" : "bad"), text: ok ? "online" : "unreachable" })),
+          h("p", { class: "muted", text: n.kind === "local" ? (n.description || "") : n.ssh + (n.description ? "  -  " + n.description : "") }),
+          ok ? h("div", { class: "stats" },
+            [["host", i.hostname], ["os", i.os + " " + i.arch], ["cpus", String(i.cpus)], ["indra", i.version]].map(function (x) {
+              return h("div", { class: "stat" }, h("b", { class: "small", text: x[1] }), h("span", { text: x[0] }));
+            })) : h("div", { class: "note bad", text: n.error || "not checked yet" }),
+          meter(n.running, n.max_parallel),
+          ok ? [h("h3", { text: "Runners" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (missing)") }); }))] : null,
+          h("h3", { text: "Targets" }),
+          n.targets.length ? h("div", { class: "files" }, n.targets.map(function (t) { return h("div", { class: "cmd", text: t }); })) : h("p", { class: "muted", text: "none configured" }),
+          h("div", { class: "row" }, h("button", { type: "button", onclick: function () { showRuns(n); } }, "Show runs"),
+            h("a", { href: "#/launch", text: "Launch here" })));
+        grid.appendChild(card);
+      });
+      if (nodes.length === 1) grid.appendChild(h("div", { class: "card" }, h("h4", { text: "Add a remote machine" }),
+        h("p", { class: "muted", text: "Install indra on it, make sure `ssh <host>` works without a password prompt, then add a [[node]] to indra.toml:" }),
+        h("pre", { class: "view", text: '[[node]]\nname = "build-box"\nssh = "me@build-box"\nmax_parallel = 2\ntargets = ["/srv/api"]' })));
+    }
+    function load(force) { grid.textContent = ""; grid.appendChild(h("div", { class: "muted", text: "Checking nodes..." })); loadNodes(force).then(render).catch(function (e) { grid.textContent = e.message; }); }
+    refresh.addEventListener("click", function () { load(true); });
+    load(false);
+  }
+
+  // ---- workflows ----------------------------------------------------------------
+  var WF_STATE = { waiting: "", queued: "warn", running: "run live", succeeded: "ok", failed: "bad", skipped: "", cancelled: "warn" };
+  function wfPill(s) { return h("span", { class: "pill " + (WF_STATE[s] || ""), text: s }); }
+
+  function pageWorkflows(m) {
+    var ov = S.ov, hs = harness();
+    m.appendChild(header("Workflows", "Multi-step agent work across nodes: tasks run in dependency order, within each node's capacity, with retries. Run them here or with `indra run <name>`."));
+    var runsBox = h("div"), defsBox = h("div", { class: "grid" });
+    m.appendChild(h("h2", { text: "Runs" })); m.appendChild(runsBox);
+    m.appendChild(h("h2", { text: "Configured workflows" })); m.appendChild(defsBox);
+    function loadRuns() {
+      api("/api/workflows").then(function (w) {
+        runsBox.textContent = "";
+        if (!w.runs.length) runsBox.appendChild(empty("No workflow has run since the console started."));
+        else runsBox.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["#", "Workflow", "Status", "Tasks", "Started"].map(function (t) { return h("th", { text: t }); }))),
+          h("tbody", null, w.runs.map(function (r) {
+            var go = function () { location.hash = "#/workflow/" + r.id; };
+            var done = r.tasks.filter(function (t) { return t.state === "succeeded"; }).length;
+            return h("tr", { class: "click", tabindex: "0", onclick: go, onkeydown: function (e) { if (e.key === "Enter") go(); } },
+              h("td", { text: String(r.id) }), h("td", null, h("b", { text: r.name })), h("td", null, wfPill(r.status)),
+              h("td", null, h("div", { class: "segs" }, r.tasks.map(function (t) { return h("i", { class: t.state === "succeeded" ? "done" : t.state === "running" ? "running" : "", title: t.id + ": " + t.state }); })), h("span", { class: "muted", text: " " + done + "/" + r.tasks.length })),
+              h("td", { class: "muted", text: ago(r.started) }));
+          })))));
+        defsBox.textContent = "";
+        if (!w.defs.length) defsBox.appendChild(h("div", { class: "card" }, h("h4", { text: "No workflows configured" }),
+          h("p", { class: "muted", text: "Add [[workflow]] blocks to indra.toml (indra init writes an example), or use a fan-out below." })));
+        w.defs.forEach(function (d) {
+          defsBox.appendChild(h("div", { class: "card" },
+            h("div", { class: "row" }, h("h4", { text: d.name }), h("span", { class: "pill", text: d.task.length + " tasks" })),
+            d.description ? h("p", { class: "muted", text: d.description }) : null,
+            h("ul", { class: "links" }, d.task.map(function (t) {
+              return h("li", null, h("b", { text: t.id }), h("span", { class: "muted", text: "  on " + t.node + (t.needs.length ? ", after " + t.needs.join(", ") : "") }));
+            })),
+            h("div", { class: "row" }, h("button", { class: "primary", type: "button", disabled: ov.read_only, onclick: function (e) {
+              e.target.disabled = true;
+              api("/api/workflows", { method: "POST", body: { name: d.name } }).then(function (r) { location.hash = "#/workflow/" + r.id; })
+                .catch(function (err) { toast(err.message, true); e.target.disabled = false; });
+            } }, "Run"))));
+        });
+      }).catch(function (e) { runsBox.textContent = e.message; });
+    }
+    loadRuns(); every(3000, loadRuns);
+
+    if (ov.read_only || !hs) return;
+    m.appendChild(h("h2", { text: "Fan out" }));
+    var fan = h("div", { class: "card" }, h("p", { class: "muted", text: "Loading nodes..." }));
+    m.appendChild(fan);
+    loadNodes(false).then(function (nodes) {
+      fan.textContent = "";
+      var prompt = h("textarea", { "aria-label": "Prompt", placeholder: "/indra full security review of {target}" });
+      prompt.value = "/indra full security review of {target}";
+      var names = {}; nodes.forEach(function (n) { runnersOn(n, ov).forEach(function (r) { names[r] = 1; }); });
+      var runner = h("select", { "aria-label": "Runner" }, Object.keys(names).map(function (r) { return h("option", { value: r, text: r }); }));
+      var boxes = [];
+      var picks = h("div", { class: "picks" }, nodes.map(function (n) {
+        return h("fieldset", null, h("legend", null, n.name, " ", h("span", { class: "muted", text: n.error ? "(unreachable)" : "(" + n.running + "/" + n.max_parallel + " busy)" })),
+          n.targets.length ? n.targets.map(function (t, i) {
+            var cb = h("input", { type: "checkbox" }); boxes.push({ cb: cb, node: n.name, target: i });
+            return h("label", { class: "pick" }, cb, h("span", { text: t }));
+          }) : h("p", { class: "muted", text: "no targets" }));
+      }));
+      var go = h("button", { class: "primary", type: "submit" }, "Run on selected targets");
+      fan.appendChild(h("form", { class: "form", onsubmit: function (e) {
+        e.preventDefault();
+        var targets = boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return { node: b.node, target: b.target }; });
+        if (!targets.length) { toast("Pick at least one target", true); return; }
+        go.disabled = true;
+        api("/api/workflows/fanout", { method: "POST", body: { h: hs.name, runner: runner.value, prompt: prompt.value, targets: targets } })
+          .then(function (r) { location.hash = "#/workflow/" + r.id; }).catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } },
+        h("label", null, "Prompt", h("small", { text: "Runs once per selected target, in parallel within each node's capacity." }), prompt),
+        h("label", null, "Runner", runner), h("div", null, h("b", { text: "Targets" }), picks), h("div", { class: "row" }, go)));
+    }).catch(function (e) { fan.textContent = e.message; });
+  }
+
+  function pageWorkflowRun(m, id) {
+    var top = h("div"), dag = h("div", { class: "dag" });
+    m.appendChild(top); m.appendChild(dag);
+    function depth(tasks) {
+      var by = {}, memo = {};
+      tasks.forEach(function (t) { by[t.id] = t; });
+      function d(id) { if (memo[id] != null) return memo[id]; var t = by[id]; memo[id] = 0; memo[id] = t && t.needs.length ? 1 + Math.max.apply(null, t.needs.map(d)) : 0; return memo[id]; }
+      tasks.forEach(function (t) { d(t.id); });
+      return memo;
+    }
+    function load() {
+      api("/api/workflows/" + id).then(function (r) {
+        top.textContent = "";
+        var cancel = h("button", { class: "danger", type: "button", disabled: r.status !== "running" || S.ov.read_only, onclick: function () {
+          cancel.disabled = true; api("/api/workflows/" + id + "/cancel", { method: "POST" }).then(function () { toast("Cancelling"); }).catch(function (e) { toast(e.message, true); });
+        } }, "Cancel");
+        top.appendChild(header("Workflow #" + r.id + " - " + r.name, "Started " + ago(r.started) + (r.ended ? ", finished " + ago(r.ended) : ""), [wfPill(r.status), cancel]));
+        var lv = depth(r.tasks), cols = [];
+        r.tasks.forEach(function (t) { (cols[lv[t.id]] = cols[lv[t.id]] || []).push(t); });
+        dag.textContent = "";
+        cols.forEach(function (col, ci) {
+          dag.appendChild(h("div", { class: "dag-col" }, h("h3", { text: ci === 0 ? "Start" : "Step " + (ci + 1) }), col.map(function (t) {
+            return h("div", { class: "card task " + t.state },
+              h("div", { class: "row" }, h("b", { text: t.id }), wfPill(t.state)),
+              h("div", { class: "muted", text: t.node + "  -  " + t.runner }),
+              h("div", { class: "cmd small", text: t.target }),
+              t.needs.length ? h("div", { class: "muted", text: "after " + t.needs.join(", ") }) : null,
+              t.attempts > 1 || t.retries ? h("div", { class: "muted", text: "attempt " + t.attempts + " of " + (t.retries + 1) }) : null,
+              t.error ? h("div", { class: "note " + (t.state === "failed" ? "bad" : "warn"), text: t.error }) : null,
+              t.proc_id ? h("a", { href: "#/proc/" + t.proc_id, text: "Open agent process #" + t.proc_id }) : null);
+          })));
+        });
+        if (r.status !== "running") stop();
+      }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); stop(); });
+    }
+    var t = setInterval(load, 1500);
+    function stop() { clearInterval(t); }
+    S.cleanup.push(stop);
+    load();
   }
 
   function statusPill(s) {
@@ -553,11 +756,11 @@
   }
   function procTable(list) {
     return h("div", { class: "tablewrap" }, h("table", null,
-      h("thead", null, h("tr", null, ["#", "Status", "Runner", "Prompt", "Agents", "Cost", "Started"].map(function (t) { return h("th", { text: t }); }))),
+      h("thead", null, h("tr", null, ["#", "Status", "Node", "Runner", "Prompt", "Agents", "Cost", "Started"].map(function (t) { return h("th", { text: t }); }))),
       h("tbody", null, list.map(function (p) {
         var go = function () { location.hash = "#/proc/" + p.id; };
         return h("tr", { class: "click", tabindex: "0", onclick: go, onkeydown: function (e) { if (e.key === "Enter") go(); } },
-          h("td", { text: String(p.id) }), h("td", null, statusPill(p.status)), h("td", { text: p.runner }),
+          h("td", { text: String(p.id) }), h("td", null, statusPill(p.status)), h("td", { text: p.node + (p.host && p.node !== "local" ? " (" + p.host + ")" : "") }), h("td", { text: p.runner }),
           h("td", { class: "desc" }, h("div", { text: p.prompt.length > 90 ? p.prompt.slice(0, 88) + "..." : p.prompt }), p.last ? h("div", { class: "muted", text: p.last }) : null),
           h("td", { text: String(p.agents.length) }),
           h("td", { text: p.cost_usd != null ? "$" + p.cost_usd.toFixed(4) : "-" }),
@@ -590,7 +793,7 @@
         stop.disabled = true;
         api("/api/procs/" + id + "/stop", { method: "POST" }).then(function () { toast("Stopping"); }).catch(function (e) { toast(e.message, true); });
       } }, "Stop");
-      top.appendChild(header("Process #" + p.id + " - " + p.runner, p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null, stop]));
+      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null, stop]));
       top.appendChild(h("div", { class: "cmd", text: p.prompt }));
       agentsBox.textContent = "";
       agentsBox.appendChild(p.agents.length ? h("div", { class: "bars" }, p.agents.map(function (a) {
@@ -642,7 +845,7 @@
     S.cleanup = [];
     var parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
     var page = parts[0], arg = parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined;
-    var navKey = { def: "agents", run: "runs", proc: "procs" }[page] || page;
+    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows" }[page] || page;
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -663,6 +866,9 @@
         memory: function () { pageMemory(m, arg); },
         runs: function () { pageRuns(m); },
         run: function () { pageRun(m, arg); },
+        nodes: function () { pageNodes(m); },
+        workflows: function () { pageWorkflows(m); },
+        workflow: function () { pageWorkflowRun(m, arg); },
         launch: function () { pageLaunch(m); },
         procs: function () { pageProcs(m); },
         proc: function () { pageProc(m, arg); }

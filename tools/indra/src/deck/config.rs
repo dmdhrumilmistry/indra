@@ -20,6 +20,90 @@ pub struct ConfigFile {
     pub harness: Vec<HarnessCfg>,
     pub runner: Vec<RunnerCfg>,
     pub preset: Vec<PresetCfg>,
+    /// This machine as an agent node.
+    pub local: LocalCfg,
+    /// Remote machines reached over SSH.
+    pub node: Vec<NodeCfg>,
+    /// Multi-step, multi-node agent workflows.
+    pub workflow: Vec<WorkflowCfg>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalCfg {
+    /// Agents allowed to run at once on this machine (default 4).
+    pub max_parallel: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCfg {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// SSH destination: host, user@host, or a Host alias from ~/.ssh/config.
+    pub ssh: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Private key file (default: whatever ssh would use).
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// indra binary on the remote (default "indra").
+    #[serde(default)]
+    pub indra: Option<String>,
+    /// Extra arguments for remote `indra node ...`, e.g. ["--config", "/etc/indra.toml"].
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Agents allowed to run at once on this node (default 2).
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
+    /// Codebases on the remote, as remote paths.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// ssh client to run (default "ssh").
+    #[serde(default)]
+    pub ssh_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowCfg {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Harness whose name is recorded with each task (default: the first).
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default, rename = "task")]
+    pub tasks: Vec<TaskCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCfg {
+    pub id: String,
+    /// "local" or a [[node]] name.
+    #[serde(default = "local_node")]
+    pub node: String,
+    /// Directory on that node the agent runs in.
+    pub target: String,
+    #[serde(default = "claude_runner")]
+    pub runner: String,
+    /// `{target}` and `{node}` are filled in.
+    pub prompt: String,
+    /// Task ids that must succeed first.
+    #[serde(default)]
+    pub needs: Vec<String>,
+    /// Extra attempts after a failure.
+    #[serde(default)]
+    pub retries: u32,
+}
+
+fn local_node() -> String {
+    crate::deck::nodes::LOCAL.into()
+}
+fn claude_runner() -> String {
+    "claude".into()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -169,6 +253,78 @@ pub struct Settings {
     pub read_only: bool,
     pub config_path: Option<PathBuf>,
     pub data_dir: PathBuf,
+    pub local_max_parallel: usize,
+    pub nodes: Vec<crate::deck::nodes::Node>,
+    pub workflows: Vec<WorkflowCfg>,
+}
+
+impl Settings {
+    pub fn node(&self, name: &str) -> Option<&crate::deck::nodes::Node> {
+        self.nodes.iter().find(|n| n.name == name)
+    }
+
+    /// Agents allowed at once on a node.
+    pub fn capacity(&self, node: &str) -> usize {
+        if node == crate::deck::nodes::LOCAL {
+            self.local_max_parallel
+        } else {
+            self.node(node).map(|n| n.max_parallel).unwrap_or(1)
+        }
+    }
+}
+
+/// Check a workflow: tasks exist, ids are unique and simple, nodes are
+/// known, every `needs` names a task, and the dependencies have no cycle.
+pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
+    let at = |m: String| format!("workflow '{}': {}", w.name, m);
+    if w.tasks.is_empty() {
+        return Err(at("has no [[workflow.task]]".into()));
+    }
+    let mut ids: Vec<&str> = Vec::new();
+    for t in &w.tasks {
+        crate::deck::nodes::validate_name(&t.id).map_err(|e| at(format!("task id: {}", e)))?;
+        if ids.contains(&t.id.as_str()) {
+            return Err(at(format!("task id '{}' is used twice", t.id)));
+        }
+        ids.push(&t.id);
+        if t.node != crate::deck::nodes::LOCAL && !node_names.contains(&t.node) {
+            return Err(at(format!(
+                "task '{}' runs on unknown node '{}'",
+                t.id, t.node
+            )));
+        }
+        if t.prompt.trim().is_empty() {
+            return Err(at(format!("task '{}' has an empty prompt", t.id)));
+        }
+    }
+    for t in &w.tasks {
+        for n in &t.needs {
+            if !ids.contains(&n.as_str()) {
+                return Err(at(format!("task '{}' needs unknown task '{}'", t.id, n)));
+            }
+        }
+    }
+    // Kahn's algorithm: whatever cannot be ordered is on a cycle.
+    let mut done: Vec<&str> = Vec::new();
+    loop {
+        let ready: Vec<&str> = w
+            .tasks
+            .iter()
+            .filter(|t| {
+                !done.contains(&t.id.as_str()) && t.needs.iter().all(|n| done.contains(&n.as_str()))
+            })
+            .map(|t| t.id.as_str())
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        done.extend(ready);
+    }
+    if done.len() != w.tasks.len() {
+        let stuck: Vec<&str> = ids.iter().copied().filter(|i| !done.contains(i)).collect();
+        return Err(at(format!("dependency cycle among: {}", stuck.join(", "))));
+    }
+    Ok(())
 }
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:7878";
@@ -513,10 +669,54 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
         }
     }
 
+    let mut nodes = Vec::new();
+    for n in &file.node {
+        crate::deck::nodes::validate_name(&n.name)?;
+        if n.name == crate::deck::nodes::LOCAL
+            || nodes
+                .iter()
+                .any(|x: &crate::deck::nodes::Node| x.name == n.name)
+        {
+            return Err(format!("node name '{}' is reserved or used twice", n.name));
+        }
+        crate::deck::nodes::validate_destination(&n.ssh)?;
+        nodes.push(crate::deck::nodes::Node {
+            name: n.name.clone(),
+            description: n.description.clone(),
+            ssh: n.ssh.clone(),
+            port: n.port,
+            identity: n.identity.as_ref().map(|i| expand(&base, i)),
+            indra: n.indra.clone().unwrap_or_else(|| "indra".into()),
+            args: n.args.clone(),
+            max_parallel: n.max_parallel.unwrap_or(2).max(1),
+            targets: n.targets.clone(),
+            ssh_command: n.ssh_command.clone().unwrap_or_else(|| "ssh".into()),
+        });
+    }
+    let node_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
+    let mut workflows = Vec::new();
+    for w in &file.workflow {
+        validate_workflow(w, &node_names)?;
+        if workflows.iter().any(|x: &WorkflowCfg| x.name == w.name) {
+            return Err(format!("workflow name '{}' is used twice", w.name));
+        }
+        let mut w = w.clone();
+        // Local targets are relative to the config file; remote ones are the remote's business.
+        for t in &mut w.tasks {
+            if t.node == crate::deck::nodes::LOCAL {
+                t.target = abs(expand(&base, &t.target)).to_string_lossy().into_owned();
+            }
+        }
+        workflows.push(w);
+    }
+
     Ok(Settings {
         harnesses,
         runners,
         presets,
+        local_max_parallel: file.local.max_parallel.unwrap_or(4).max(1),
+        nodes,
+        workflows,
         bind: opts
             .bind
             .or(file.server.bind.clone())
@@ -568,6 +768,41 @@ bind = "127.0.0.1:7878"     # keep it on loopback; a token is required either wa
 # args    = ["-p", "{prompt}", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"]
 # format  = "claude-stream-json"
 
+# This machine as an agent node.
+# [local]
+# max_parallel = 4                                   # agents at once here
+
+# Remote machines, reached over SSH (keys, agent and ~/.ssh/config as usual).
+# The remote needs `indra` on its PATH; it runs only its own runners, by name.
+# [[node]]
+# name         = "build-box"
+# ssh          = "me@build-box.internal"             # or a Host alias from ~/.ssh/config
+# max_parallel = 2
+# targets      = ["/srv/api", "/srv/web"]            # codebases on that machine
+# indra        = "indra"                             # path of indra on the remote
+# args         = ["--config", "/etc/indra.toml"]     # extra args for the remote indra
+
+# Workflows: tasks on any node, ordered by `needs`, run with `indra run <name>`
+# or from the console. A task whose dependency failed is skipped.
+# [[workflow]]
+# name = "nightly"
+# [[workflow.task]]
+# id = "api"
+# node = "build-box"
+# target = "/srv/api"
+# prompt = "/indra full security review of {target}"
+# retries = 1
+# [[workflow.task]]
+# id = "web"
+# node = "local"
+# target = "../web"
+# prompt = "/indra full security review of {target}"
+# [[workflow.task]]
+# id = "summary"
+# target = "."
+# prompt = "Summarise today's review runs and list new critical findings."
+# needs = ["api", "web"]
+
 # Presets are saved prompts on the Launch page.
 # [[preset]]
 # name    = "Nightly review"
@@ -602,6 +837,10 @@ mod tests {
         let c: ConfigFile = toml::from_str(&uncommented).unwrap();
         assert_eq!(c.harness[0].stages.len(), 2);
         assert_eq!(c.runner[0].name, "claude-edits");
+        assert_eq!(c.local.max_parallel, Some(4));
+        assert_eq!(c.node[0].name, "build-box");
+        assert_eq!(c.workflow[0].tasks.len(), 3);
+        assert!(validate_workflow(&c.workflow[0], &["build-box".into()]).is_ok());
     }
 
     #[test]

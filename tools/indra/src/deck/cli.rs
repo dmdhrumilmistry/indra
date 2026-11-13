@@ -5,11 +5,10 @@
 //! them work. The indra security-review profile is the default; any harness
 //! described by a few globs works too.
 
-use crate::deck::{config, discover, procs, runs, web};
-use clap::Args;
+use crate::deck::{config, discover, nodes, runs, web, workflows};
+use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 /// Which harnesses to load. Shared by every console command.
 #[derive(Args)]
@@ -172,12 +171,7 @@ async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result
     if open {
         open_browser(&url);
     }
-    let app = Arc::new(web::App {
-        procs: procs::Procs::new(s.data_dir.join("logs")),
-        settings: s,
-        token,
-        loopback,
-    });
+    let app = web::App::new(s, token, loopback);
     axum::serve(listener, web::router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -337,5 +331,217 @@ fn check(s: &config::Settings) -> ExitCode {
     } else {
         println!("ok");
         ExitCode::SUCCESS
+    }
+}
+
+// ---- nodes and orchestration ------------------------------------------------------
+
+#[derive(Args)]
+pub struct NodesArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+    #[arg(long)]
+    json: bool,
+}
+
+/// Check every node: reachable, indra version, CPUs, runners installed.
+pub fn run_nodes(a: NodesArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, None, false)?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut rows: Vec<(String, String, Result<nodes::NodeInfo, String>, usize)> = vec![(
+        nodes::LOCAL.into(),
+        "this machine".into(),
+        Ok(nodes::local_info(&s)),
+        s.local_max_parallel,
+    )];
+    rt.block_on(async {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, n) in s.nodes.iter().cloned().enumerate() {
+            set.spawn(async move { (i, nodes::remote_info(&n).await) });
+        }
+        let mut res: Vec<(usize, Result<nodes::NodeInfo, String>)> = Vec::new();
+        while let Some(Ok(r)) = set.join_next().await {
+            res.push(r);
+        }
+        res.sort_by_key(|r| r.0);
+        for (i, r) in res {
+            let n = &s.nodes[i];
+            rows.push((n.name.clone(), n.ssh.clone(), r, n.max_parallel));
+        }
+    });
+    let failed = rows.iter().filter(|r| r.2.is_err()).count();
+    if a.json {
+        let v: Vec<_> = rows
+            .iter()
+            .map(|(n, d, r, m)| match r {
+                Ok(i) => serde_json::json!({ "name": n, "at": d, "max_parallel": m, "info": i }),
+                Err(e) => serde_json::json!({ "name": n, "at": d, "max_parallel": m, "error": e }),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    } else {
+        for (n, d, r, m) in &rows {
+            match r {
+                Ok(i) => {
+                    let runners: Vec<&str> = i
+                        .runners
+                        .iter()
+                        .filter(|x| x.available)
+                        .map(|x| x.name.as_str())
+                        .collect();
+                    println!(
+                        "{:<14} ok    {}  ({} {}, {} cpus, indra {}, max {} agents)  runners: {}",
+                        n,
+                        if i.hostname.is_empty() {
+                            d.as_str()
+                        } else {
+                            i.hostname.as_str()
+                        },
+                        i.os,
+                        i.arch,
+                        i.cpus,
+                        i.version,
+                        m,
+                        if runners.is_empty() {
+                            "none".to_string()
+                        } else {
+                            runners.join(", ")
+                        }
+                    );
+                }
+                Err(e) => println!("{:<14} DOWN  {}  {}", n, d, e),
+            }
+        }
+    }
+    Ok(if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+#[derive(Args)]
+pub struct RunArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+    /// Workflow name from the config; omit to list them
+    name: Option<String>,
+}
+
+fn clock() -> String {
+    crate::mem::time::format_unix(runs::now())[11..19].to_string()
+}
+
+/// Run a workflow and follow it in the terminal. Exit code 0 only when every
+/// task succeeded; Ctrl-C cancels the run (stopping its agents) and waits.
+pub fn run_workflow(a: RunArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, None, false)?;
+    let Some(name) = a.name else {
+        if s.workflows.is_empty() {
+            println!("no workflows configured; add [[workflow]] to indra.toml (see `indra init`)");
+        }
+        for w in &s.workflows {
+            println!(
+                "{:<20} {} task(s)  {}",
+                w.name,
+                w.tasks.len(),
+                w.description
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    let s = std::sync::Arc::new(s);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let procs = crate::deck::procs::Procs::new(s.data_dir.join("logs"));
+        let engine = workflows::Engine::new(procs.clone(), s.clone());
+        let id = engine.start_named(&name)?;
+        println!("{} workflow '{}' started", clock(), name);
+        let mut seen: std::collections::HashMap<String, (&'static str, u32)> =
+            std::collections::HashMap::new();
+        let mut cancelled = false;
+        let run = loop {
+            let r = engine.get(id).ok_or("workflow run vanished")?;
+            for t in &r.tasks {
+                let now = (t.state, t.attempts);
+                if seen.get(&t.id) != Some(&now) {
+                    seen.insert(t.id.clone(), now);
+                    if t.state == "waiting" {
+                        continue;
+                    }
+                    let mut line = format!("{} {:<18} {:<12} {}", clock(), t.id, t.node, t.state);
+                    if let Some(pid) = t.proc_id.filter(|_| t.state == "running") {
+                        line.push_str(&format!("  (process #{}, attempt {})", pid, t.attempts));
+                    }
+                    if let Some(e) = t.error.as_ref().filter(|_| t.state != "running") {
+                        line.push_str(&format!("  - {}", e));
+                    }
+                    println!("{}", line);
+                }
+            }
+            if r.status != "running" {
+                break r;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(workflows::TICK_MS)) => {}
+                _ = tokio::signal::ctrl_c(), if !cancelled => {
+                    cancelled = true;
+                    eprintln!("{} cancelling: stopping running agents...", clock());
+                    engine.cancel(id);
+                }
+            }
+        };
+        println!("\n{} workflow '{}' {}", clock(), name, run.status);
+        for t in &run.tasks {
+            let log = t
+                .proc_id
+                .and_then(|p| procs.get(p))
+                .map(|p| p.view().log)
+                .unwrap_or_default();
+            println!("  {:<18} {:<12} {:<10} {}", t.id, t.node, t.state, log);
+        }
+        Ok::<ExitCode, String>(if run.status == "succeeded" {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        })
+    })
+}
+
+#[derive(Subcommand)]
+pub enum NodeCmd {
+    /// Print this machine's facts as JSON
+    Info,
+    /// List run directories described by a JSON spec on stdin
+    Runs,
+    /// Run one agent job given as JSON on stdin; stops it when stdin closes
+    Exec,
+}
+
+/// `indra node ...`: the remote side of a node. The hub runs these over SSH.
+#[derive(Args)]
+pub struct NodeArgs {
+    #[command(subcommand)]
+    cmd: NodeCmd,
+    /// Config file on this machine (its runners are the only ones it will run)
+    #[arg(long, global = true, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
+pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
+    let opts = DeckOpts {
+        config: a.config,
+        targets: Vec::new(),
+    };
+    match a.cmd {
+        NodeCmd::Info => nodes::cmd_info(&load(opts, None, false)?),
+        NodeCmd::Runs => nodes::cmd_runs(),
+        NodeCmd::Exec => nodes::cmd_exec(&load(opts, None, false)?),
     }
 }

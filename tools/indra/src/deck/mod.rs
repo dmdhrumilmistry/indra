@@ -4,6 +4,8 @@
 pub mod cli;
 pub mod config;
 pub mod discover;
+pub mod nodes;
 pub mod procs;
 pub mod runs;
 pub mod web;
+pub mod workflows;

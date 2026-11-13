@@ -16,8 +16,10 @@
 
 use crate::deck::config::{Harness, Settings};
 use crate::deck::discover::{self, Def};
+use crate::deck::nodes::{self, NodeInfo, RunsSpec, LOCAL};
 use crate::deck::procs::{Launch, Procs};
 use crate::deck::runs;
+use crate::deck::workflows::{self, Engine};
 use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -28,15 +30,39 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::Mutex;
+
+/// When a remote node was last checked, and what it said.
+pub type NodeProbe = (u64, Result<NodeInfo, String>);
 
 pub struct App {
-    pub settings: Settings,
+    pub settings: Arc<Settings>,
     pub token: String,
     pub procs: Arc<Procs>,
+    pub engine: Arc<Engine>,
     /// Bound to a loopback address: enforce a loopback Host header.
     pub loopback: bool,
+    /// Remote node facts, cached briefly: (checked at, result).
+    pub node_cache: Mutex<HashMap<String, NodeProbe>>,
+}
+
+impl App {
+    pub fn new(settings: Settings, token: String, loopback: bool) -> Arc<App> {
+        let settings = Arc::new(settings);
+        let procs = Procs::new(settings.data_dir.join("logs"));
+        let engine = Engine::new(procs.clone(), settings.clone());
+        Arc::new(App {
+            settings,
+            token,
+            procs,
+            engine,
+            loopback,
+            node_cache: Mutex::new(HashMap::new()),
+        })
+    }
 }
 
 const COOKIE: &str = "indra_token";
@@ -264,6 +290,8 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         })).collect::<Vec<_>>(),
         "presets": s.presets,
         "procs": app.procs.list(),
+        "nodes": std::iter::once(LOCAL.to_string()).chain(app.settings.nodes.iter().map(|n| n.name.clone())).collect::<Vec<_>>(),
+        "workflows": app.settings.workflows.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
         "running": app.procs.running(),
     }))
 }
@@ -422,9 +450,32 @@ async fn run_file(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResu
 #[derive(Deserialize)]
 struct LaunchReq {
     h: Option<String>,
+    /// "local" (default) or a configured node.
+    node: Option<String>,
     runner: String,
     prompt: String,
+    /// Index into that node's targets (see /api/nodes).
     target: usize,
+}
+
+/// The directories agents may run in on a node: the harness targets for
+/// this machine, a node's configured `targets` for a remote one.
+fn node_targets(app: &App, h: &Harness, node: &str) -> ApiResult<Vec<String>> {
+    if node == LOCAL {
+        return Ok(h.targets.iter().map(|t| t.display().to_string()).collect());
+    }
+    app.settings
+        .node(node)
+        .map(|n| n.targets.clone())
+        .ok_or_else(|| bad(format!("unknown node '{}'", node)))
+}
+
+fn check_prompt(p: &str) -> ApiResult<&str> {
+    let p = p.trim();
+    if p.is_empty() || p.len() > 20_000 {
+        return Err(bad("the prompt must be 1 to 20000 characters"));
+    }
+    Ok(p)
 }
 
 async fn proc_start(
@@ -434,30 +485,37 @@ async fn proc_start(
     if app.settings.read_only {
         return Err(forbidden("indra is running read-only"));
     }
-    let prompt = r.prompt.trim();
-    if prompt.is_empty() || prompt.len() > 20_000 {
-        return Err(bad("the prompt must be 1 to 20000 characters"));
-    }
+    let prompt = check_prompt(&r.prompt)?;
     let h = app.harness(r.h.as_deref())?;
-    let runner = app
-        .settings
-        .runners
-        .iter()
-        .find(|x| x.name == r.runner)
-        .ok_or_else(|| bad("unknown runner"))?;
-    let target = h
-        .targets
-        .get(r.target)
-        .ok_or_else(|| bad("unknown target"))?;
-    let id = app
-        .procs
-        .start(Launch {
+    let node = r.node.as_deref().unwrap_or(LOCAL);
+    let targets = node_targets(&app, h, node)?;
+    let target = targets.get(r.target).ok_or_else(|| bad("unknown target"))?;
+    let id = if node == LOCAL {
+        let runner = app
+            .settings
+            .runners
+            .iter()
+            .find(|x| x.name == r.runner)
+            .ok_or_else(|| bad("unknown runner"))?;
+        let target = std::path::PathBuf::from(target);
+        app.procs.start(Launch::Local {
             runner,
+            harness: &h.name,
+            prompt,
+            target: &target,
+        })
+    } else {
+        let n = app.settings.node(node).ok_or_else(|| bad("unknown node"))?;
+        nodes::validate_name(&r.runner).map_err(bad)?;
+        app.procs.start(Launch::Remote {
+            node: n,
+            runner: &r.runner,
             harness: &h.name,
             prompt,
             target,
         })
-        .map_err(bad)?;
+    }
+    .map_err(bad)?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -527,6 +585,178 @@ async fn proc_events(
     Ok(Sse::new(first.chain(live)).keep_alive(KeepAlive::default()))
 }
 
+// ---- nodes ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NodesQ {
+    h: Option<String>,
+    refresh: Option<u8>,
+}
+
+const NODE_CACHE_SECS: u64 = 30;
+
+async fn nodes_list(
+    State(app): State<Arc<App>>,
+    Query(q): Query<NodesQ>,
+) -> ApiResult<Json<Value>> {
+    let h = app.harness(q.h.as_deref())?;
+    let now = runs::now();
+    // Probe stale remote nodes in parallel.
+    let mut set = tokio::task::JoinSet::new();
+    for n in app.settings.nodes.iter().cloned() {
+        let fresh = q.refresh.is_none()
+            && app
+                .node_cache
+                .lock()
+                .unwrap()
+                .get(&n.name)
+                .map(|(t, _)| now.saturating_sub(*t) < NODE_CACHE_SECS)
+                .unwrap_or(false);
+        if !fresh {
+            set.spawn(async move { (n.name.clone(), nodes::remote_info(&n).await) });
+        }
+    }
+    while let Some(Ok((name, res))) = set.join_next().await {
+        app.node_cache
+            .lock()
+            .unwrap()
+            .insert(name, (runs::now(), res));
+    }
+    let local = json!({
+        "name": LOCAL, "kind": "local", "description": "This machine",
+        "max_parallel": app.settings.local_max_parallel, "running": app.procs.running_on(LOCAL),
+        "targets": node_targets(&app, h, LOCAL)?, "info": nodes::local_info(&app.settings), "error": null, "checked": now,
+    });
+    let cache = app.node_cache.lock().unwrap();
+    let mut out = vec![local];
+    for n in &app.settings.nodes {
+        let (checked, info, error) = match cache.get(&n.name) {
+            Some((t, Ok(i))) => (*t, json!(i), Value::Null),
+            Some((t, Err(e))) => (*t, Value::Null, json!(e)),
+            None => (0, Value::Null, json!("not checked yet")),
+        };
+        out.push(json!({
+            "name": n.name, "kind": "ssh", "ssh": n.ssh, "description": n.description,
+            "max_parallel": n.max_parallel, "running": app.procs.running_on(&n.name),
+            "targets": n.targets, "info": info, "error": error, "checked": checked,
+        }));
+    }
+    Ok(Json(json!(out)))
+}
+
+#[derive(Deserialize)]
+struct NodeRunsQ {
+    h: Option<String>,
+    node: String,
+}
+
+async fn node_runs(
+    State(app): State<Arc<App>>,
+    Query(q): Query<NodeRunsQ>,
+) -> ApiResult<Json<Value>> {
+    let h = app.harness(q.h.as_deref())?;
+    if q.node == LOCAL {
+        return Ok(Json(json!(runs::list(h, 100))));
+    }
+    let n = app
+        .settings
+        .node(&q.node)
+        .ok_or_else(|| not_found("unknown node"))?;
+    let Some(spec) = RunsSpec::for_node(h, &n.targets) else {
+        return Ok(Json(json!([])));
+    };
+    let v = nodes::remote_runs(n, &spec)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(v))
+}
+
+// ---- workflows -------------------------------------------------------------------
+
+async fn workflows_list(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(json!({ "defs": app.settings.workflows, "runs": app.engine.list() }))
+}
+
+#[derive(Deserialize)]
+struct RunWfReq {
+    name: String,
+}
+
+async fn workflow_run(
+    State(app): State<Arc<App>>,
+    Json(r): Json<RunWfReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings.read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let id = app.engine.start_named(&r.name).map_err(bad)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+struct FanTarget {
+    node: String,
+    target: usize,
+}
+
+#[derive(Deserialize)]
+struct FanOutReq {
+    h: Option<String>,
+    runner: String,
+    prompt: String,
+    targets: Vec<FanTarget>,
+}
+
+async fn workflow_fanout(
+    State(app): State<Arc<App>>,
+    Json(r): Json<FanOutReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings.read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let prompt = check_prompt(&r.prompt)?;
+    nodes::validate_name(&r.runner).map_err(bad)?;
+    if r.targets.is_empty() || r.targets.len() > 100 {
+        return Err(bad("pick 1 to 100 targets"));
+    }
+    let h = app.harness(r.h.as_deref())?;
+    let mut pairs = Vec::new();
+    for t in &r.targets {
+        let list = node_targets(&app, h, &t.node)?;
+        let path = list
+            .get(t.target)
+            .ok_or_else(|| bad(format!("unknown target on node '{}'", t.node)))?;
+        pairs.push((t.node.clone(), path.clone()));
+    }
+    let mut wf = workflows::fan_out(&r.runner, prompt, &pairs);
+    wf.harness = Some(h.name.clone());
+    let id = app.engine.start(wf).map_err(bad)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn workflow_get(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    app.engine
+        .get(id)
+        .map(|r| Json(json!(r)))
+        .ok_or_else(|| not_found("no such workflow run"))
+}
+
+async fn workflow_cancel(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    if app.settings.read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    if !app.engine.cancel(id) {
+        return Err(not_found("no such workflow run"));
+    }
+    Ok(Json(json!({ "cancelling": true })))
+}
+
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(index))
@@ -552,6 +782,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/run", get(run_get))
         .route("/api/run/file", get(run_file))
         .route("/api/procs", get(procs_list).post(proc_start))
+        .route("/api/nodes", get(nodes_list))
+        .route("/api/nodes/runs", get(node_runs))
+        .route("/api/workflows", get(workflows_list).post(workflow_run))
+        .route("/api/workflows/fanout", post(workflow_fanout))
+        .route("/api/workflows/{id}", get(workflow_get))
+        .route("/api/workflows/{id}/cancel", post(workflow_cancel))
         .route("/api/procs/{id}", get(proc_get))
         .route("/api/procs/{id}/stop", post(proc_stop))
         .route("/api/procs/{id}/events", get(proc_events))
@@ -628,13 +864,11 @@ mod tests {
             read_only,
             config_path: None,
             data_dir: dir.join("data"),
+            local_max_parallel: 4,
+            nodes: vec![],
+            workflows: vec![],
         };
-        let app = Arc::new(App {
-            settings,
-            token: TOKEN.into(),
-            procs: Procs::new(dir.join("data/logs")),
-            loopback: true,
-        });
+        let app = App::new(settings, TOKEN.into(), true);
         (app, dir)
     }
 
@@ -980,6 +1214,92 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn nodes_fanout_and_workflow_api() {
+        let (app, dir) = fixture("wf", false);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let (s, _, body) = call(&app, "GET", "/api/nodes", &[AUTH], None).await;
+        assert_eq!(s, StatusCode::OK);
+        let nodes: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(nodes[0]["name"], "local");
+        assert_eq!(nodes[0]["targets"].as_array().unwrap().len(), 1);
+        assert!(nodes[0]["info"]["cpus"].as_u64().unwrap() >= 1);
+
+        // Unknown nodes, targets and workflows are refused.
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "node": "nope", "runner": "echo", "prompt": "x", "target": 0 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            "/api/workflows",
+            &[AUTH, origin],
+            Some(json!({ "name": "nope" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            "/api/workflows/9/cancel",
+            &[AUTH, origin],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let (s, _, _) = call(&app, "POST", "/api/workflows/fanout", &[AUTH, origin], Some(json!({ "runner": "echo", "prompt": "x", "targets": [{ "node": "local", "target": 5 }] }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            "/api/workflows/fanout",
+            &[AUTH, origin],
+            Some(json!({ "runner": "echo", "prompt": "x", "targets": [] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+
+        // A fan-out over the local target runs to completion.
+        let (s, _, body) = call(&app, "POST", "/api/workflows/fanout", &[AUTH, origin], Some(json!({ "runner": "echo", "prompt": "hi {target}", "targets": [{ "node": "local", "target": 0 }] }))).await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let mut run = Value::Null;
+        for _ in 0..60 {
+            let (_, _, body) = call(
+                &app,
+                "GET",
+                &format!("/api/workflows/{}", id),
+                &[AUTH],
+                None,
+            )
+            .await;
+            run = serde_json::from_str(&body).unwrap();
+            if run["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(run["status"], "succeeded", "{}", run);
+        assert_eq!(run["tasks"][0]["id"], "local-target");
+        let (_, _, body) = call(&app, "GET", "/api/procs", &[AUTH], None).await;
+        assert!(body.contains("\"node\":\"local\""));
+
+        let (ro, ro_dir) = fixture("wf-ro", true);
+        let (s, _, _) = call(&ro, "POST", "/api/workflows/fanout", &[AUTH, origin], Some(json!({ "runner": "echo", "prompt": "x", "targets": [{ "node": "local", "target": 0 }] }))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(ro_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn stop_kills_a_running_process() {
         let (app, dir) = fixture("stop", false);
         let sleep = Runner {
@@ -992,7 +1312,7 @@ mod tests {
         let h = &app.settings.harnesses[0];
         let id = app
             .procs
-            .start(Launch {
+            .start(Launch::Local {
                 runner: &sleep,
                 harness: "t",
                 prompt: "30",

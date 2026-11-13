@@ -21,6 +21,7 @@
       <a href="#pipeline">Pipeline</a>
       <a href="#memory">Memory</a>
       <a href="#console">Console</a>
+      <a href="#orchestrate">Orchestrate</a>
       <a href="#install">Install</a>
       <a class="gh" href="https://github.com/dmdhrumilmistry/indra">GitHub</a>
     </nav>
@@ -103,6 +104,34 @@
     <div class="secure">
       <h3>Locked down like a remote shell</h3>
       <p>Loopback only by default, a token on every call, DNS-rebinding and CSRF checks, no shell (the prompt is one argument), file access confined to the harness, and a strict Content-Security-Policy.</p>
+    </div>
+  </section>
+
+  <section class="wrap band" id="orchestrate">
+    <p class="eyebrow">indra nodes &middot; indra run</p>
+    <h2>Orchestrate agents across machines</h2>
+    <p class="sub">Run agents on this machine and on any machine you can SSH into. Chain them into workflows that run in dependency order, within each machine's capacity, with retries and cancel.</p>
+    <div class="grid2">
+      <figure class="shot"><img src="assets/screenshots/nodes.png" alt="The Nodes page: this machine, a reachable build box and an unreachable node" loading="lazy" width="1280" height="780"><figcaption><b>Nodes.</b> Health, runners and capacity of every machine, checked over SSH.</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/workflow.png" alt="A workflow with three review tasks on two machines and a summary waiting for them" loading="lazy" width="1280" height="780"><figcaption><b>Workflows.</b> Three reviews on two machines, then a summary once they all succeed.</figcaption></figure>
+    </div>
+    <div class="split tight">
+      <div class="term small"><pre><code><span class="c">[[node]]</span>
+name         = "build-box"
+ssh          = "ci@build-box.internal"
+max_parallel = 2
+targets      = ["/srv/api", "/srv/web"]
+
+<span class="c">[[workflow.task]]</span>
+id     = "summary"
+prompt = "Summarise tonight's reviews."
+needs  = ["api", "web"]</code></pre></div>
+      <ul class="ticks">
+        <li><b>No daemon, no open port.</b> Remote machines are reached with your SSH keys and known hosts.</li>
+        <li><b>Nothing reaches a remote shell.</b> The job travels as JSON; the remote runs only its own runners.</li>
+        <li><b>Stop means stop.</b> Closing the session ends the agent's whole process tree on the remote.</li>
+        <li><b>Cron and CI ready.</b> <code>indra run nightly</code> exits non-zero if any task failed.</li>
+      </ul>
     </div>
   </section>
 

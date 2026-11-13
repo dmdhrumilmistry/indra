@@ -18,6 +18,7 @@ and Indra, king of the devas, is a fitting name for the thing that commands the 
 | `indra mem ...` | Graph memory: Markdown notes with typed `[[links]]`, ranked recall that follows links, a terminal tree view. Obsidian-compatible. |
 | `indra serve` | Web console: agents, skills and prompts (view and edit), graph maps, memory, live run monitoring, and launching agents with a live view of their subagents and tool calls. |
 | `indra ls`, `indra check` | The console's picture in the terminal, and a config check. |
+| `indra nodes`, `indra run` | Agents on this machine and on remote ones over SSH: node health, and multi-step workflows run in dependency order across them. |
 | `indra init` | A commented `indra.toml` for custom harnesses, runners and presets. |
 
 The [security harness](../../README.md) is the default profile, any Claude Code project is
@@ -381,11 +382,120 @@ The console can start programs and rewrite prompts, so it is built like a remote
 
 Processes are tracked while `indra serve` runs; their logs stay on disk after it exits.
 
+## Nodes and orchestration
+
+Agents can run on this machine and on any machine you can SSH into. A **node** is one such
+machine; `local` is always there.
+
+```toml
+[local]
+max_parallel = 4                         # agents at once on this machine
+
+[[node]]
+name         = "build-box"
+ssh          = "ci@build-box.internal"   # host, user@host, or a Host alias from ~/.ssh/config
+max_parallel = 2
+targets      = ["/srv/api", "/srv/web"]  # codebases on that machine
+```
+
+Each remote node needs `indra` on its `PATH` (or set `indra = "/path/to/indra"`), and
+`ssh <destination>` must work without a password prompt (keys or an agent). Then:
+
+```text
+$ indra nodes
+local          ok    laptop     (macos aarch64, 10 cpus, indra 0.1.0, max 4 agents)  runners: claude
+build-box      ok    ci-7       (linux x86_64, 16 cpus, indra 0.1.0, max 2 agents)   runners: claude, codex
+gpu-box        DOWN  me@gpu-box  ssh: Could not resolve hostname gpu-box: Name or service not known
+```
+
+In the console, **Nodes** shows each machine, its runners, its capacity and the review runs on
+its disk, and **Launch** can start an agent on any node. A remote agent streams into the same
+live view as a local one, with its subagents and tool calls, and Stop stops it on the remote.
+
+### Workflows
+
+A workflow is a graph of agent tasks, each on a node, run in dependency order:
+
+```toml
+[[workflow]]
+name = "nightly"
+description = "Review the services on the build box and the web app here, then summarise."
+
+[[workflow.task]]
+id      = "api"
+node    = "build-box"
+target  = "/srv/api"
+prompt  = "/indra full security review of {target}"
+retries = 1                              # one more attempt if it fails
+
+[[workflow.task]]
+id     = "web"
+node   = "local"                         # the default
+target = "../web"                        # local targets are relative to indra.toml
+prompt = "/indra full security review of {target}"
+
+[[workflow.task]]
+id     = "summary"
+target = "."
+prompt = "Summarise tonight's reviews and list new critical findings."
+needs  = ["api", "web"]                  # runs only if both succeed
+```
+
+- A task starts when everything it `needs` has succeeded; if one of them failed, it is
+  **skipped**.
+- Tasks start only while their node has room (`max_parallel`, counting every agent there).
+- A failed task is retried up to `retries` times.
+- Cancelling stops the running agents and cancels what has not started.
+- `{target}` and `{node}` are filled into the prompt; `runner` defaults to `claude`.
+- Workflows are checked when the config loads: unique task ids, known nodes, `needs` that exist,
+  and no cycles.
+
+Run one from the terminal (cron, CI) or from the console's **Workflows** page:
+
+```text
+$ indra run nightly
+17:01:29 workflow 'nightly' started
+17:01:29 api                build-box    running  (process #1, attempt 1)
+17:01:29 web                local        running  (process #2, attempt 1)
+17:14:52 web                local        succeeded
+17:21:07 api                build-box    succeeded
+17:21:07 summary            local        running  (process #3, attempt 1)
+17:23:40 summary            local        succeeded
+
+17:23:40 workflow 'nightly' succeeded
+```
+
+`indra run` exits 0 only if every task succeeded; Ctrl-C cancels the run and stops its agents.
+`indra run` without a name lists the configured workflows.
+
+The **Workflows** page also has **fan-out**: one prompt across any set of targets on any nodes,
+in parallel within each node's capacity. That is the quickest way to review ten repositories
+spread over three machines.
+
+### How remote execution stays safe
+
+- **SSH does the transport.** No daemon, no open port: authentication, encryption and host-key
+  checking are SSH's. indra calls `ssh` with `BatchMode=yes`, so it never prompts and never
+  accepts an unknown host key.
+- **Nothing you type reaches a remote shell.** The only remote command is the fixed
+  `indra node exec`; the job (runner name, prompt, target) travels as JSON on stdin. A prompt
+  containing `$(...)` is just text.
+- **The remote decides what runs.** `indra node exec` runs only runners from its own
+  configuration, by name, in a directory that must exist on it. The console can launch only
+  into a node's configured `targets`.
+- **Stop means stop.** The hub keeps the job's stdin open for its lifetime; when it closes
+  (Stop, cancel, or a dropped connection), the node terminates the agent's whole process tree.
+- Destinations are validated, so a config value cannot smuggle in an ssh option such as
+  `-oProxyCommand=...`.
+
+Remote nodes need a POSIX shell (Linux, macOS, BSD). `local` works everywhere.
+
 ## Development
 
 ```bash
 cd tools/indra
-cargo test            # unit tests, API security tests, and end-to-end tests of `indra mem`
+cargo test            # unit tests, API security tests, end-to-end tests of `indra mem`,
+                      # and orchestration over SSH (with a stand-in ssh client)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo run -- serve --target /path/to/project
