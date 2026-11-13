@@ -287,6 +287,7 @@ open the browser for you, `--read-only` to turn off launching and editing.
 | **Memory** | The `indra mem` vaults the harness reads and writes, as graphs. |
 | **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
 | **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, and the final cost. Stop ends the whole process tree. |
+| **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. See [the board guide](../../docs/guides/board.md). |
 | **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. See [Settings](#settings). |
 
 The same picture without a browser:

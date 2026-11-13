@@ -128,7 +128,7 @@ nodes (one WebSocket each, a heartbeat every few seconds) and the job traffic go
 Several hubs can share a node fleet behind a signaling relay; the workflow engine already
 schedules by per-node capacity.
 
-## Tasks and the board
+## Tasks and the board (built)
 
 A **board** shows work items in columns: **To do**, **Running**, **Review**, **Done**,
 **Failed**. It is generic: an item is a title, a body, labels, an optional source, and a profile
@@ -144,8 +144,10 @@ to run it with, so it serves reviews, fixes, research or anything else an agent 
  move to "Done" when you accept it      <--sync---   Done
 ```
 
-- **Connectors** are per tracker: how to list items with a filter, read one, comment, and move
-  it between states. Credentials are secrets. A connector maps tracker states to board columns.
+- **Connectors** are per tracker (Jira, GitHub Issues, ClickUp; Linear next): how to list items
+  with a filter, comment, and move one between states. The token is a secret reference, scoped
+  to the connector. A connector maps board columns to tracker states. Requests go through the
+  system `curl`, credentials on its stdin.
 - **Flow.** Import (manual or every few minutes), run with a profile on a node, and when the
   agent finishes, post its result as a comment and move the item to the mapped state.
   A person moves items to Done; agents never close tickets on their own.
@@ -167,6 +169,6 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 
 1. Agent control and profiles (including Ollama), and this document. Done.
 2. Secrets. Done.
-3. Board and tracker connectors.
+3. Board and tracker connectors (Jira, GitHub Issues, ClickUp). Done.
 4. Graph workflow editor with components.
 5. WebRTC transport with reconnection, SSH kept as the fallback.

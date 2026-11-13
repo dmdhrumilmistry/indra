@@ -50,6 +50,8 @@ pub struct App {
     pub node_cache: Mutex<HashMap<String, NodeProbe>>,
     /// Editing the config file from the console (None: not offered).
     pub config: Option<ConfigAccess>,
+    /// Work items, run by agents and synced with trackers.
+    pub board: Arc<crate::deck::board::Board>,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -77,6 +79,9 @@ impl App {
         config: Option<ConfigAccess>,
     ) -> Arc<App> {
         let procs = Procs::new(settings.data_dir.join("logs"));
+        let board = Arc::new(crate::deck::board::Board::open(
+            settings.data_dir.join("board.json"),
+        ));
         let shared = config::Shared::new(settings);
         let engine = Engine::new(procs.clone(), shared.clone());
         Arc::new(App {
@@ -87,6 +92,7 @@ impl App {
             loopback,
             node_cache: Mutex::new(HashMap::new()),
             config,
+            board,
         })
     }
 
@@ -108,6 +114,12 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-
 // ---- errors ------------------------------------------------------------------
 
 pub struct ApiError(StatusCode, String);
+
+impl ApiError {
+    pub fn message(self) -> String {
+        self.1
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -507,7 +519,7 @@ struct LaunchReq {
 }
 
 /// A profile and per-launch overrides, resolved into a runner and options.
-fn resolve_agent(
+pub(crate) fn resolve_agent(
     settings: &Settings,
     profile: Option<&str>,
     runner: &str,
@@ -1120,6 +1132,105 @@ async fn secret_delete(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- the board -------------------------------------------------------------------
+
+fn board_writable(app: &App) -> ApiResult<()> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    Ok(())
+}
+
+async fn board_get(State(app): State<Arc<App>>) -> Json<Value> {
+    crate::deck::board::tick(&app).await;
+    let s = app.settings();
+    Json(json!({
+        "columns": crate::deck::board::COLUMNS,
+        "items": app.board.items(),
+        "connectors": crate::deck::board::connectors_view(&s),
+    }))
+}
+
+#[derive(Deserialize)]
+struct NewItem {
+    title: String,
+    #[serde(flatten)]
+    rest: crate::deck::board::Patch,
+}
+
+async fn board_create(
+    State(app): State<Arc<App>>,
+    Json(r): Json<NewItem>,
+) -> ApiResult<Json<Value>> {
+    board_writable(&app)?;
+    let id = app.board.create(&r.title, r.rest, None).map_err(bad)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn board_update(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(p): Json<crate::deck::board::Patch>,
+) -> ApiResult<Json<Value>> {
+    board_writable(&app)?;
+    let before = app.board.get(id).ok_or_else(|| not_found("no such item"))?;
+    let to = p.column.clone();
+    let it = app.board.update(id, p).map_err(bad)?;
+    if let Some(c) = to.filter(|c| *c != before.column) {
+        crate::deck::board::moved(&app, id, &c).await;
+    }
+    Ok(Json(json!(it)))
+}
+
+async fn board_delete(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    board_writable(&app)?;
+    app.board.delete(id).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize, Default)]
+struct RunItem {
+    profile: Option<String>,
+    runner: Option<String>,
+    node: Option<String>,
+    target: Option<String>,
+}
+
+async fn board_run(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<RunItem>,
+) -> ApiResult<Json<Value>> {
+    board_writable(&app)?;
+    let req = crate::deck::board::RunReq {
+        profile: r.profile,
+        runner: r.runner,
+        node: r.node,
+        target: r.target,
+    };
+    let pid = crate::deck::board::run(&app, id, req).await.map_err(bad)?;
+    Ok(Json(json!({ "proc": pid })))
+}
+
+#[derive(Deserialize)]
+struct ImportReq {
+    connector: String,
+}
+
+async fn board_import(
+    State(app): State<Arc<App>>,
+    Json(r): Json<ImportReq>,
+) -> ApiResult<Json<Value>> {
+    board_writable(&app)?;
+    let (added, updated) = crate::deck::board::import(&app, &r.connector)
+        .await
+        .map_err(bad)?;
+    Ok(Json(json!({ "added": added, "updated": updated })))
+}
+
 // ---- settings (the config file) ------------------------------------------------
 
 fn config_access(app: &App) -> ApiResult<&ConfigAccess> {
@@ -1282,6 +1393,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/check", post(config_check))
+        .route("/api/board", get(board_get))
+        .route("/api/board/items", post(board_create))
+        .route(
+            "/api/board/items/{id}",
+            axum::routing::patch(board_update).delete(board_delete),
+        )
+        .route("/api/board/items/{id}/run", post(board_run))
+        .route("/api/board/import", post(board_import))
         .route("/api/secrets", get(secrets_list))
         .route(
             "/api/secrets/{name}",
@@ -1382,6 +1501,7 @@ mod tests {
             runners: vec![echo],
             presets: vec![],
             profiles: vec![],
+            connectors: vec![],
             bind: "127.0.0.1:0".into(),
             read_only,
             config_path: None,
@@ -2258,6 +2378,273 @@ while True:
         )
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The board against a stand-in tracker that speaks GitHub's and Jira's
+    /// REST APIs: import, run with a profile, report the result back, and
+    /// report "done" when a person accepts it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn board_items_flow_from_trackers_to_agents_and_back() {
+        use axum::extract::{Path as P, State as St};
+        type Log = Arc<Mutex<Vec<String>>>;
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        fn rec(log: &Log, h: &HeaderMap, what: String) {
+            let auth = h
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+            log.lock().unwrap().push(format!("{} [{}]", what, auth));
+        }
+        let mock = Router::new()
+            .route("/repos/o/r/issues", get(|St(l): St<Log>, h: HeaderMap| async move {
+                rec(&l, &h, "gh list".into());
+                Json(json!([
+                    { "number": 7, "title": "Fix login", "body": "The login form accepts empty passwords.", "html_url": "http://gh/7", "state": "open" },
+                    { "number": 8, "title": "a PR", "pull_request": {}, "html_url": "http://gh/8", "state": "open" }
+                ]))
+            }))
+            .route("/repos/o/r/issues/{n}/comments", post(|St(l): St<Log>, h: HeaderMap, P(n): P<String>, Json(b): Json<Value>| async move {
+                rec(&l, &h, format!("gh comment {} {}", n, b["body"].as_str().unwrap_or("")));
+                Json(json!({}))
+            }))
+            .route("/repos/o/r/issues/{n}/labels", post(|St(l): St<Log>, h: HeaderMap, P(n): P<String>, Json(b): Json<Value>| async move {
+                rec(&l, &h, format!("gh label {} {}", n, b["labels"][0].as_str().unwrap_or("")));
+                Json(json!([]))
+            }))
+            .route("/repos/o/r/issues/{n}/labels/{label}", axum::routing::delete(|St(l): St<Log>, h: HeaderMap, P((n, label)): P<(String, String)>| async move {
+                rec(&l, &h, format!("gh unlabel {} {}", n, label));
+                StatusCode::NOT_FOUND
+            }))
+            .route("/repos/o/r/issues/{n}", axum::routing::patch(|St(l): St<Log>, h: HeaderMap, P(n): P<String>, Json(b): Json<Value>| async move {
+                rec(&l, &h, format!("gh state {} {}", n, b["state"].as_str().unwrap_or("")));
+                Json(json!({}))
+            }))
+            .route("/rest/api/3/search/jql", get(|St(l): St<Log>, h: HeaderMap| async move {
+                rec(&l, &h, "jira search".into());
+                Json(json!({ "issues": [{ "key": "SEC-1", "fields": { "summary": "XSS in search", "status": { "name": "To Do" },
+                    "description": { "type": "doc", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Reflected in q=" }] }] } } }] }))
+            }))
+            .route("/rest/api/3/issue/{k}/transitions", get(|St(l): St<Log>, h: HeaderMap, P(k): P<String>| async move {
+                rec(&l, &h, format!("jira transitions {}", k));
+                Json(json!({ "transitions": [
+                    { "id": "21", "name": "Start", "to": { "name": "In Progress" } },
+                    { "id": "31", "name": "Send for review", "to": { "name": "In Review" } }] }))
+            }).post(|St(l): St<Log>, h: HeaderMap, P(k): P<String>, Json(b): Json<Value>| async move {
+                rec(&l, &h, format!("jira move {} {}", k, b["transition"]["id"].as_str().unwrap_or("")));
+                StatusCode::NO_CONTENT
+            }))
+            .route("/rest/api/3/issue/{k}/comment", post(|St(l): St<Log>, h: HeaderMap, P(k): P<String>, Json(b): Json<Value>| async move {
+                rec(&l, &h, format!("jira comment {} {}", k, b["body"]["content"][0]["content"][0]["text"].as_str().unwrap_or("")));
+                Json(json!({}))
+            }))
+            .with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let (fx, dir) = fixture("board", false);
+        let mut settings = (*fx.settings()).clone();
+        settings.runners.push(Runner {
+            name: "say".into(),
+            command: "sh".into(),
+            args: vec!["-c".into(), "echo \"did: $0\"".into(), "{prompt}".into()],
+            format: "text".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: crate::deck::config::which("sh"),
+        });
+        settings.profiles.push(config::ProfileCfg {
+            name: "w".into(),
+            runner: Some("say".into()),
+            ..Default::default()
+        });
+        let states = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        settings.connectors.push(config::ConnectorCfg {
+            name: "gh".into(),
+            kind: "github".into(),
+            url: Some(base.clone()),
+            project: "o/r".into(),
+            token: "secret:ghtok".into(),
+            profile: Some("w".into()),
+            states: states(&[
+                ("running", "in-progress"),
+                ("review", "needs-review"),
+                ("done", "closed"),
+            ]),
+            ..Default::default()
+        });
+        settings.connectors.push(config::ConnectorCfg {
+            name: "jira".into(),
+            kind: "jira".into(),
+            url: Some(base.clone()),
+            project: "SEC".into(),
+            email: Some("me@x.com".into()),
+            token: "secret:jt".into(),
+            profile: Some("w".into()),
+            states: states(&[("running", "In Progress"), ("review", "In Review")]),
+            ..Default::default()
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let set = |v: &str, scope: &str| crate::deck::secrets::Change {
+            value: Some(v.into()),
+            profiles: Some(vec![scope.into()]),
+            ..Default::default()
+        };
+        app.procs
+            .vault()
+            .set("ghtok", set("gh-token-1", "connector:gh"))
+            .unwrap();
+        app.procs
+            .vault()
+            .set("jt", set("jira-token-2", "connector:somebody-else"))
+            .unwrap();
+        let origin = ("origin", "http://127.0.0.1:7878");
+
+        // Import: the issue, not the pull request.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/board/import",
+            &[AUTH, origin],
+            Some(json!({ "connector": "gh" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        assert!(body.contains("\"added\":1"), "{}", body);
+        // A secret scoped to another connector is not handed to this one.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/board/import",
+            &[AUTH, origin],
+            Some(json!({ "connector": "jira" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", body);
+        app.procs
+            .vault()
+            .set("jt", set("jira-token-2", "connector:jira"))
+            .unwrap();
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/board/import",
+            &[AUTH, origin],
+            Some(json!({ "connector": "jira" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+
+        let board = |app: Arc<App>| async move {
+            let (_, _, b) = call(&app, "GET", "/api/board", &[AUTH], None).await;
+            serde_json::from_str::<Value>(&b).unwrap()
+        };
+        let b = board(app.clone()).await;
+        let item = |b: &Value, key: &str| {
+            b["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["source"]["key"] == key)
+                .cloned()
+                .unwrap()
+        };
+        let gh = item(&b, "7");
+        assert_eq!(gh["column"], "todo");
+        assert_eq!(item(&b, "SEC-1")["body"], "Reflected in q=");
+
+        // Run it with the connector's profile; the agent finishes; the item goes to review.
+        for key in ["7", "SEC-1"] {
+            let id = item(&b, key)["id"].as_u64().unwrap();
+            let (s, _, body) = call(
+                &app,
+                "POST",
+                &format!("/api/board/items/{}/run", id),
+                &[AUTH, origin],
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{}", body);
+        }
+        let mut b = Value::Null;
+        for _ in 0..200 {
+            b = board(app.clone()).await;
+            if b["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["column"] == "review")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let gh = item(&b, "7");
+        assert_eq!(gh["column"], "review", "{}", b);
+        assert!(
+            gh["result"]
+                .as_str()
+                .unwrap()
+                .contains("did: Work on this task."),
+            "{}",
+            gh
+        );
+        assert!(
+            gh["result"].as_str().unwrap().contains("Fix login"),
+            "{}",
+            gh
+        );
+
+        // A person accepts it: done goes back to the tracker.
+        let id = gh["id"].as_u64().unwrap();
+        let (s, _, body) = call(
+            &app,
+            "PATCH",
+            &format!("/api/board/items/{}", id),
+            &[AUTH, origin],
+            Some(json!({ "column": "done" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let (s, _, _) = call(
+            &app,
+            "PATCH",
+            &format!("/api/board/items/{}", id),
+            &[AUTH, origin],
+            Some(json!({ "column": "running" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "only Run makes an item running");
+
+        let seen = log.lock().unwrap().join("\n");
+        for want in [
+            "gh list [Bearer gh-token-1]",
+            "gh comment 7 indra started an agent on this (process #",
+            "gh label 7 in-progress",
+            "gh comment 7 indra agent process #",
+            "gh label 7 needs-review",
+            "gh unlabel 7 in-progress",
+            "gh state 7 closed",
+            "jira search [Basic bWVAeC5jb206amlyYS10b2tlbi0y]",
+            "jira move SEC-1 21",
+            "jira move SEC-1 31",
+            "jira comment SEC-1 indra started an agent",
+        ] {
+            assert!(seen.contains(want), "missing {:?} in:\n{}", want, seen);
+        }
+        assert!(
+            !seen.contains("jira-token-2]") || seen.contains("Basic"),
+            "tokens only travel in the auth header"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

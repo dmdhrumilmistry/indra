@@ -266,6 +266,10 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Secrets:** tokens agents need live in an encrypted store, are referenced from profiles
   (`JIRA_TOKEN = "secret:jira"`), are scoped to profiles and machines, reach the agent only in
   memory at launch, and are redacted from everything it prints.
+- **Board:** work items in To do, Running, Review, Done and Failed. Run one with a profile; it
+  moves to Review when the agent finishes. Connect Jira, GitHub Issues or ClickUp to import
+  tickets, run them (automatically if you like) and report results and state back. See
+  [the board guide](docs/guides/board.md).
 - **Settings:** configure everything from the browser: runners, remote nodes, workflows,
   presets, harnesses, capacity, or the raw `indra.toml`. Each save is checked and applies at
   once, and your comments in the file are kept.
