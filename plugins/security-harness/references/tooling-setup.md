@@ -16,6 +16,7 @@ is already on the machine. Rules that apply to every install below:
   - **SBOM** → `syft`.
   - **CVEs** → the first of `grype` / `trivy` / `osv-scanner` you can install (prefer **grype** - it consumes
     syft's SBOM directly). Stop once one is working.
+  - **Long-term memory** → `indra` (skipped with `memory:off`).
   - **PDF/doc reports** → one PDF engine: prefer `wkhtmltopdf`; `pandoc` also enables `.docx`. Headless
     Chrome (often already present) is a third fallback the reporter can use, so a PDF engine is optional.
 - **Re-check after installing** (`<tool> --version`) and set the capability accordingly. A freshly installed
@@ -93,6 +94,20 @@ scoop install wkhtmltopdf                                                       
 brew install --cask wkhtmltopdf                                                                # macOS
 sudo apt-get install -y wkhtmltopdf                                                            # Debian/Ubuntu (only if apt + non-interactive sudo already work)
 ```
+
+### indra  (long-term memory via `indra mem` - optional, see the sh-memory skill)
+
+A single static binary. Prefer a prebuilt release binary (no toolchain needed), else build from source
+with Cargo:
+
+```
+# Prebuilt: download indra-<target> from the latest `indra-v*` release of
+# https://github.com/dmdhrumilmistry/security-harness/releases into a directory on PATH
+# (for example ~/.local/bin, or %LOCALAPPDATA%\Programs\indra on Windows).
+cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra   # any OS with Rust
+```
+
+If neither works, set `indra:false`: the pipeline runs without long-term memory.
 
 ## After installs
 

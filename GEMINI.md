@@ -17,10 +17,15 @@ demand rather than loaded here, so this file stays short.
   `sh-kb-*` skill directly.
 - A request for the **full pipeline** or a written report: activate
   `sh-security-review`.
+- A request to **recall or record what earlier reviews learned** ("what do we
+  know about X", "remember this"): activate `sh-memory`. It needs the `indra`
+  CLI and is skipped cleanly without it.
 
 ## Pipeline shape
 
-`recon -> hunt (parallel, one per class) -> chain -> verify -> report`
+`recon -> recall -> hunt (parallel, one per class) -> chain -> verify -> report -> remember`
+
+`recall` and `remember` are the optional long-term memory steps (`sh-memory`).
 
 Each stage has a matching sub-agent definition under
 `plugins/security-harness/agents/` and shared reference material under

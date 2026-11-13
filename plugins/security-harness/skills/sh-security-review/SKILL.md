@@ -1,7 +1,7 @@
 ---
 name: sh-security-review
 description: "Run the full multi-agent security review pipeline on a codebase - recon/mapping (Graft + SBOM/CVE), parallel vulnerability hunting backed by ~15 per-class knowledge bases, escalation chaining, impact verification, and reporting to README/JSON/SARIF/doc/PDF. Use when the user asks to security-review, audit, pentest, or find vulnerabilities in a codebase. Usually invoked via the sh-router skill."
-argument-hint: "[target path, default: cwd] [classes:sqli,xss,...] [stage:recon|hunt|chain|verify|report] [depth:quick|deep]"
+argument-hint: "[target path, default: cwd] [classes:sqli,xss,...] [stage:recon|hunt|chain|verify|report|remember] [depth:quick|deep] [memory:off]"
 ---
 
 # Security Review Pipeline
@@ -31,8 +31,10 @@ Parse `$ARGUMENTS` (all optional):
 - **target**: a path -> the codebase to review. Default: current working directory.
 - **`classes:a,b,c`**: restrict hunting to these vuln classes (slugs from finding-schema `class` enum).
   Default: recon decides which classes are relevant to the detected stack/surface.
-- **`stage:<name>`**: run only one stage against an existing run (`recon`|`hunt`|`chain`|`verify`|`report`).
-  Requires a prior run (reads `latest`). Default: run all stages 0->5.
+- **`stage:<name>`**: run only one stage against an existing run (`recon`|`hunt`|`chain`|`verify`|`report`|`remember`).
+  Requires a prior run (reads `latest`). Default: run all stages 0->6.
+- **`memory:off`**: neither read nor write long-term memory (the `sh-memory` skill) for this run. Default:
+  on whenever `indra` is available.
 - **`depth:quick|deep`**: `deep` -> `graft build --deep` and larger hunter budgets. `quick` -> structural
   graft only, tighter budgets. Default: `deep` if the repo is small (< ~1500 files), else `quick`.
 - **`models:<preset>` and/or `models:<stage>=<model>,...`**: override the model each stage runs on
@@ -109,6 +111,8 @@ Stage 0 announcement so the user sees exactly what each stage will run on.
    non-interactive installs; never launch an elevation prompt. If an install fails or no installer exists,
    mark the tool `false` and continue - **nothing here blocks the run.** Re-check `<tool> --version` after
    installing.
+   Also probe `indra --version` (long-term memory, see the `sh-memory` skill). If it is missing, install it
+   per the `indra` section of tooling-setup.md under the same rules. Skip the probe when `memory:off`.
 6. **Write `capabilities.json`** (see state-files.md) from the post-install probes, recording which tools
    were installed this run and any that could not be (with a short reason in `notes`). Also note whether
    claude-in-chrome browser tools are available (Chrome PDF fallback).
@@ -135,6 +139,22 @@ After it returns: read `recon.md`. Decide the **class list** to hunt - the user'
 else the classes whose sinks/surface recon actually found (don't hunt XXE if there's no XML parsing).
 Log the decision to the user.
 
+### Memory recall (orchestrator, only when `capabilities.indra` is true)
+
+Long-term memory turns past runs into leads. Follow the `sh-memory` skill. For each selected class, build a
+query from the class slug, the frameworks recon found, and the names of that class's sinks in
+`codebase-map.json`, then write the result to `<run_dir>/recall-<class>.md`:
+
+```bash
+TV="<TARGET>/.security-harness/memory"
+{ indra mem --vault "$TV" recall "<class> <frameworks> <sinks>" -n 8 --max-chars 5000
+  indra mem recall "<class> <frameworks>" -n 5 --max-chars 2500; } > "<run_dir>/recall-<class>.md"
+```
+
+The first command reads the target vault (this codebase's past findings, guards and false positives), the
+second the user's global vault (portable techniques). Both are fast and read-only, and an empty vault
+just yields "Nothing relevant". Tell the user how many notes were recalled per class.
+
 ## Stage 2 - Hunt (spawn `sh-hunter` in parallel, one per class)
 
 Spawn the hunters **concurrently** (multiple Agent tool calls in a single message), **one instance per
@@ -142,8 +162,9 @@ selected class**. **Set each hunter's `model` from `scope.models.hunt`**: if it'
 every hunter (flattened); if it's the tiered object, look up the class's tier (pattern/trace/logic per the
 Model-selection table) and use that tier's model. Each hunter prompt includes: `run_dir`, its assigned
 `class`, the finding-id prefix to use (`SH-<CLASS-UPPER>-`), and the instruction to load the matching
-`sh-kb-<class>` skill for its knowledge base. Hunters must read `attempts.md` before probing and append to
-it after, and append candidate findings to `findings.jsonl`.
+`sh-kb-<class>` skill for its knowledge base, and the path `<run_dir>/recall-<class>.md` when that file
+exists. Hunters must read `attempts.md` before probing and append to it after, and append candidate
+findings to `findings.jsonl`.
 
 Batch to respect concurrency limits: if more than ~6 classes, spawn in waves. Between waves, nothing to
 merge - hunters coordinate via `attempts.md`.
@@ -165,6 +186,10 @@ post-verification confidence, sets `status` (`verified`/`false-positive`/`needs-
 full set to `verified.jsonl`. It must not silently drop findings - false-positives stay in the file marked
 as such (the reporter filters them out of published results but keeps an audit trail).
 
+Point the verifier at the `recall-*.md` files as well: a candidate that matches a recorded false positive
+must be re-checked against the guard that note names, and either refuted with that reason or explained
+(the guard changed). Memory is evidence to re-check, never a verdict to copy.
+
 For a large candidate set, the verifier may internally fan out (verify per-class or per-finding) but writes
 a single consolidated `verified.jsonl`.
 
@@ -177,15 +202,34 @@ chains, appendix), `findings.json` (array of all findings), `results.sarif` (SAR
 (via the capability fallback chain: wkhtmltopdf -> pandoc -> headless Chrome; else keep HTML and note
 PDF skipped). Emit `report.docx` if pandoc is present.
 
+## Stage 6 - Remember (orchestrator, only when `capabilities.indra` is true)
+
+Follow the `sh-memory` skill. First the mechanical part, which records every verified / needs-runtime
+finding and every false positive into the target vault (no evidence, payloads or secrets are copied):
+
+```bash
+PY="$(command -v python3 || command -v python)"
+"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/sh-memory/scripts/sh-memory-record.py" "<run_dir>"
+```
+
+Then write **up to five** judged learnings from this run (guards that caused false positives, framework
+behaviour that mattered, recon shortcuts) into the target vault, and promote any that are fully
+target-independent to the global vault. Never store secrets, credentials, tokens or PII, in either vault.
+A failure here is reported, never fatal: the review's reports are already written.
+
 ## Finish
 
 Print to the user: run directory path, counts (candidates found / verified / false-positive /
-needs-runtime), top findings by severity, chains, and the paths of the generated reports. If any stage
+needs-runtime), top findings by severity, chains, and the paths of the generated reports. If memory was
+used, also say how many notes were recalled and recorded, and that
+`indra mem --vault <TARGET>/.security-harness/memory export -o graph.html` renders the memory as an
+interactive graph (or open that folder in Obsidian). If any stage
 degraded (Graft/SCA/PDF absent), say so plainly and how it affected coverage/confidence.
 
 ## Single-stage & single-class shortcuts
 
 - `stage:hunt classes:sqli` on an existing run -> just spawn the sqli hunter against current recon.
+- `stage:remember` on an existing run -> just Stage 6, e.g. after the user corrected a verdict by hand.
 - The router (`sh-router`) may call this skill with a narrowed scope for targeted requests
   ("find SQLi in ./src") - honor `classes:` and skip irrelevant stages (e.g. chaining a single class).
 

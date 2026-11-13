@@ -15,7 +15,9 @@ security-harness/                         # a plugin marketplace
 └── plugins/security-harness/
     ├── skills/
     │   ├── sh-router            # single entry point - routes any appsec request
-    │   ├── sh-security-review   # the pipeline orchestrator (Stages 0-5)
+    │   ├── sh-security-review   # the pipeline orchestrator (Stages 0-6)
+    │   ├── sh-pr-review         # review one pull request, post inline comments
+    │   ├── sh-memory            # long-term graph memory across runs (via indra)
     │   └── sh-kb-*  (15)        # per-vuln-class knowledge bases
     ├── agents/
     │   ├── sh-recon             # map: Graft graph + stack/SBOM/CVE + attack surface
@@ -24,6 +26,7 @@ security-harness/                         # a plugin marketplace
     │   ├── sh-verifier          # confirm: offensive + seceng + dev verification + PoC
     │   └── sh-reporter          # deliver: README/JSON/SARIF/HTML/PDF/doc
     └── references/              # shared contracts (finding schema, SARIF map, state files, rubrics)
+tools/indra/                              # indra: one Rust CLI for graph memory and the agent web console
 ```
 
 ### Vulnerability classes covered (the `sh-kb-*` skills)
@@ -139,6 +142,67 @@ Everything lands under `<target>/.security-harness/<run-id>/`:
 
 Each published finding carries a payload, a PoC, the verification verdict, CWE/OWASP ids, CVSS, and a
 code-level mitigation.
+
+## indra: memory and agent console
+
+[`indra`](tools/indra/README.md) is one small Rust CLI (~2.5 MB, Linux / macOS / Windows) that
+ships in this repo. It is named for Indra's net: an endless net with a jewel at every knot, each
+reflecting all the others.
+
+```bash
+cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra
+```
+
+or download a binary from an `indra-v*` [release](https://github.com/dmdhrumilmistry/security-harness/releases).
+
+### Long-term memory (`indra mem`)
+
+Without memory, every review starts from zero: it re-flags the sanitizer that was cleared last
+week and re-learns the same framework quirk on every codebase. The `sh-memory` skill gives the
+harness a memory that persists across runs, stored as a graph of small Markdown notes.
+
+- **After recon**, the pipeline recalls what earlier runs learned about each class it is about to
+  hunt (past findings, known guards, confirmed false positives) and hands it to that hunter.
+- **After the report**, it records verified findings and false positives (never evidence,
+  payloads or secrets) and up to five judged learnings.
+- **Two vaults:** `<target>/.security-harness/memory/` for codebase-specific knowledge (gitignored
+  with the rest), and a per-user global vault for portable techniques only.
+
+Memory is optional. Without `indra` installed, or with `memory:off`, the pipeline runs exactly as
+before. You can also use it directly:
+
+```
+/sh-memory what do we know about SSRF in this codebase
+indra mem --vault .security-harness/memory tree          # the memory graph, in the terminal
+indra mem recall "django raw sql"                        # what do we know about this?
+```
+
+A vault is an ordinary Obsidian-compatible folder, so you can also open it in Obsidian.
+
+### Agent console (`indra serve`)
+
+A local web console for the harness, and for any other agent harness:
+
+```bash
+cd security-harness && indra serve --target ~/code/my-api     # prints a URL with an access token
+```
+
+- **Agents, skills, prompts:** read and edit every definition the harness is made of, and see
+  what each one uses and is used by.
+- **Graph map:** stages run agents, agents spawn agents and load the `sh-kb-*` skills,
+  everything reads its references.
+- **Memory:** the memory vaults drawn as graphs.
+- **Runs:** each `.security-harness/run-*` with stage progress, findings per class, severity and
+  status counts, and every file it wrote, live.
+- **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
+  watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
+  final cost. Stop stops the whole process tree.
+
+The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
+`.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.
+It is locked down like a remote shell: loopback only, a token on every call, DNS-rebinding and
+CSRF checks, no shell, and file access confined to the harness. `indra ls` and `indra check`
+give the same picture in the terminal.
 
 ## Pull request review
 
@@ -311,10 +375,14 @@ actually introduces or aggravates can fail it.
 3. **Hunt** (`sh-hunter` ×N, parallel) - one hunter per relevant class loads its `sh-kb-*` knowledge base,
    traces attacker input from source to sink, and records candidates. A shared **attempts ledger** stops
    agents from repeating each other's probes.
+   With `indra` available, the orchestrator first recalls each class's past findings, guards and
+   false positives from long-term memory and hands them to that hunter.
 4. **Chain** (`sh-chainer`) - compose findings into higher-severity attack paths.
 5. **Verify** (`sh-verifier`) - refute first, then confirm exploitability from evidence, build PoCs, assign
    CVSS, and cut false positives.
 6. **Report** (`sh-reporter`) - produce the deliverables.
+7. **Remember** (optional, `sh-memory`) - record verified findings, false positives and a few
+   learnings into the long-term memory graph for the next run.
 
 Subagents share nothing but files; the contract is in `plugins/security-harness/references/state-files.md`.
 

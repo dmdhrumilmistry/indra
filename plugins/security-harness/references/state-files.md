@@ -15,16 +15,20 @@ reads and writes these exact paths and shapes.
 - The orchestrator also maintains a `latest` pointer: `<TARGET>/.security-harness/latest` (a file whose
   contents is the current run-id) so ad-hoc/router invocations can find the active run.
 - Add `.security-harness/` to the target's `.gitignore` if writing inside a git repo (recon does this).
+- `<TARGET>/.security-harness/memory/` is the target's **long-term memory vault** (`indra mem` notes). Unlike a
+  run directory it persists across runs: Stage 6 writes it, the next run's recall reads it. It is covered
+  by the same `.gitignore` entry.
 
 ## Files
 
 | File | Writer(s) | Reader(s) | Shape |
 |---|---|---|---|
-| `capabilities.json` | orchestrator (Stage 0) | all | `{ "graft": bool, "graft_version": "0.12.0", "graft_installed_this_run": bool, "graft_wired": bool, "graft_deep": bool, "syft": bool, "grype": bool, "trivy": bool, "osv_scanner": bool, "pandoc": bool, "wkhtmltopdf": bool, "chrome": bool, "notes": "..." }` - `graft_deep` true only when LLM creds (GRAFT_API_KEY/PROVIDER/MODEL) are set; `graft_wired` true when `graft init` registered the MCP server for the target. |
+| `capabilities.json` | orchestrator (Stage 0) | all | `{ "graft": bool, "graft_version": "0.12.0", "graft_installed_this_run": bool, "graft_wired": bool, "graft_deep": bool, "syft": bool, "grype": bool, "trivy": bool, "osv_scanner": bool, "pandoc": bool, "wkhtmltopdf": bool, "chrome": bool, "indra": bool, "notes": "..." }` - `graft_deep` true only when LLM creds (GRAFT_API_KEY/PROVIDER/MODEL) are set; `graft_wired` true when `graft init` registered the MCP server for the target. |
 | `scope.json` | orchestrator (Stage 0) | all | `{ "target": "abs/path", "include": ["src/**"], "exclude": ["**/test/**","**/vendor/**"], "classes": ["sqli","access-control", ...], "run_id": "...", "mode": "full|single-class|single-stage", "models": { "setup":"inherit", "recon":"sonnet", "hunt": {"pattern":"haiku","trace":"sonnet","logic":"opus"} \| "<model>", "chain":"opus", "verify":"opus", "report":"haiku" } }` - `models` is the resolved per-stage model map (see the orchestrator's Model-selection section); `hunt` is either a single model string (flattened) or the tiered object. |
 | `recon.md` | sh-recon | hunters, chainer, verifier, reporter | Human-readable recon report (stack, versions, SBOM summary, CVEs, attack surface, entry points, trust boundaries, Graft usage notes). |
 | `codebase-map.json` | sh-recon | hunters, chainer | Machine map: see schema below. |
 | `attempts.md` | every hunter (append) | every hunter (read first) | Append-only ledger. See format below. |
+| `recall-<class>.md` | orchestrator (after recon, when `indra` is available) | that class's hunter, verifier | Markdown output of `indra mem recall` from the target and global memory vaults. See the `sh-memory` skill. |
 | `findings.jsonl` | hunters (append) | chainer, verifier | One `finding-schema.json` object per line, `status: candidate`. |
 | `chains.md` | sh-chainer | verifier, reporter | Escalation chains referencing finding ids. See format below. |
 | `verified.jsonl` | sh-verifier | reporter | Final findings (candidate objects re-emitted with updated `status`, `verification`, `cvss`, `poc`, `confidence`). |
