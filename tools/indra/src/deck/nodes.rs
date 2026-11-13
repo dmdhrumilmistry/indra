@@ -106,6 +106,12 @@ pub fn shell_quote(s: &str) -> String {
 impl Node {
     /// `(program, args)` that run `indra node <sub>` on this node over SSH.
     pub fn ssh_command_for(&self, sub: &str) -> Result<(PathBuf, Vec<String>), String> {
+        if self.ssh.is_empty() {
+            return Err(format!(
+                "node '{}' has no ssh destination; it is reached when it connects (`indra node connect`)",
+                self.name
+            ));
+        }
         let program = config::which(&self.ssh_command).ok_or_else(|| {
             format!(
                 "node '{}': ssh client '{}' is not installed",
@@ -393,11 +399,26 @@ pub fn cmd_exec(s: &Settings) -> Result<ExitCode, String> {
     code
 }
 
+/// Where a job's envelope lines go: stdout for `indra node exec`, the hub
+/// link for `indra node connect`.
+pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
+
+/// What the hub sends a running job after it starts.
+#[derive(Debug)]
+pub enum JobInput {
+    /// A line for the agent's stdin (interactive agents).
+    Line(String),
+    /// Close the agent's stdin: its work is done.
+    Close,
+    /// Stop the agent and its whole process tree.
+    Stop,
+}
+
 async fn exec(s: &Settings) -> Result<ExitCode, String> {
     let out: Out = Arc::new(Mutex::new(std::io::stdout()));
-    let fail = |msg: String| {
-        emit(&out, json!({ "t": "error", "msg": msg }));
-        Ok(ExitCode::from(2))
+    let emit_out: Emit = {
+        let out = out.clone();
+        Arc::new(move |v: Value| emit(&out, v))
     };
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut line = String::new();
@@ -407,11 +428,66 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?
         == 0
     {
-        return fail("no job on stdin".into());
+        emit(&out, json!({ "t": "error", "msg": "no job on stdin" }));
+        return Ok(ExitCode::from(2));
     }
     let job: Job = match serde_json::from_str(line.trim()) {
         Ok(j) => j,
-        Err(e) => return fail(format!("bad job: {}", e)),
+        Err(e) => {
+            emit(
+                &out,
+                json!({ "t": "error", "msg": format!("bad job: {}", e) }),
+            );
+            return Ok(ExitCode::from(2));
+        }
+    };
+    // Stdin after the job: control lines, and EOF when the hub goes away.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match stdin.read_line(&mut buf).await {
+                Ok(0) | Err(_) => {
+                    let _ = tx.send(JobInput::Stop);
+                    return;
+                }
+                Ok(_) => {}
+            }
+            let Ok(msg) = serde_json::from_str::<Value>(buf.trim()) else {
+                continue;
+            };
+            let input = match msg.get("t").and_then(Value::as_str) {
+                Some("in") => msg
+                    .get("l")
+                    .and_then(Value::as_str)
+                    .map(|l| JobInput::Line(l.to_string())),
+                Some("close") => Some(JobInput::Close),
+                _ => None,
+            };
+            if let Some(i) = input {
+                if tx.send(i).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let code = run_job(s, job, emit_out, rx).await;
+    Ok(ExitCode::from(code.clamp(0, 255) as u8))
+}
+
+/// Run one job on this machine: check it, start its runner, send its output
+/// as envelope lines, take input, and stop its process tree on Stop. Returns
+/// the exit code (2 when it could not start).
+pub async fn run_job(
+    s: &Settings,
+    job: Job,
+    out: Emit,
+    mut input: tokio::sync::mpsc::UnboundedReceiver<JobInput>,
+) -> i32 {
+    let fail = |msg: String| {
+        out(json!({ "t": "error", "msg": msg }));
+        2
     };
     let Some(runner) = s.runners.iter().find(|r| r.name == job.runner) else {
         return fail(format!(
@@ -452,19 +528,18 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
         Err(e) => return fail(format!("cannot start {}: {}", program.display(), e)),
     };
     let pid = child.id();
-    emit(
-        &out,
+    out(
         json!({ "t": "start", "runner": runner.name, "format": runner.format, "pid": pid, "host": hostname(), "interactive": ac.control.is_some() }),
     );
 
     let forward = |stream: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>,
                    tag: &'static str,
-                   out: Out| {
+                   out: Emit| {
         tokio::spawn(async move {
             let Some(r) = stream else { return };
             let mut lines = BufReader::new(r).lines();
             while let Ok(Some(l)) = lines.next_line().await {
-                emit(&out, json!({ "t": tag, "l": l }));
+                out(json!({ "t": tag, "l": l }));
             }
         })
     };
@@ -479,8 +554,7 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
     let t1 = forward(so, "out", out.clone());
     let t2 = forward(se, "err", out.clone());
 
-    // An interactive agent's stdin: the first lines (initialize, the
-    // prompt), then whatever the hub forwards, until the hub closes it.
+    // An interactive agent's stdin: its opening lines, then what the hub sends.
     let mut agent_in = child.stdin.take();
     if let (Some(w), Some(lines)) = (agent_in.as_mut(), &ac.control) {
         for l in lines {
@@ -488,24 +562,11 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
         }
         let _ = w.flush().await;
     }
-    // The hub keeps stdin open for the life of the job; EOF means the SSH
-    // session (or the hub) went away, so the agent must stop too.
-    let eof = async move {
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match stdin.read_line(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
-            }
-            let Ok(msg) = serde_json::from_str::<Value>(buf.trim()) else {
-                continue;
-            };
-            match msg.get("t").and_then(Value::as_str) {
-                Some("in") => {
-                    if let (Some(w), Some(l)) =
-                        (agent_in.as_mut(), msg.get("l").and_then(Value::as_str))
-                    {
+    let stop = async move {
+        while let Some(i) = input.recv().await {
+            match i {
+                JobInput::Line(l) => {
+                    if let Some(w) = agent_in.as_mut() {
                         if w.write_all(format!("{}\n", l).as_bytes()).await.is_err()
                             || w.flush().await.is_err()
                         {
@@ -513,20 +574,21 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
                         }
                     }
                 }
-                Some("close") => agent_in = None,
-                _ => {}
+                JobInput::Close => agent_in = None,
+                JobInput::Stop => return,
             }
         }
+        // The input side is gone (the hub went away): stop as well.
     };
     let status = tokio::select! {
         st = child.wait() => st,
-        _ = eof => crate::deck::procs::stop_tree(&mut child, pid).await,
+        _ = stop => crate::deck::procs::stop_tree(&mut child, pid).await,
     };
     let _ = t1.await;
     let _ = t2.await;
     let code = status.ok().and_then(|st| st.code()).unwrap_or(1);
-    emit(&out, json!({ "t": "exit", "code": code }));
-    Ok(ExitCode::from(code.clamp(0, 255) as u8))
+    out(json!({ "t": "exit", "code": code }));
+    code
 }
 
 /// Claude Code's permission modes.

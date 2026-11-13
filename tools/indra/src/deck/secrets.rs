@@ -333,6 +333,42 @@ impl Vault {
         self.save(&all)
     }
 
+    /// A node's link key: stored like a secret, never resolvable by profiles.
+    pub fn set_node_key(&self, node: &str, key: &str) -> Result<()> {
+        let name = crate::deck::link::key_name(node);
+        validate_name(&name)?;
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.load()?;
+        let t = now();
+        all.insert(
+            name,
+            Entry {
+                value: key.to_string(),
+                description: format!("link key of node {}", node),
+                profiles: vec![],
+                nodes: vec![node.to_string()],
+                created: t,
+                updated: t,
+                last_used: None,
+                uses: 0,
+            },
+        );
+        self.save(&all)
+    }
+
+    /// Whether `key` is the link key of `node` (compared in constant time).
+    pub fn check_node_key(&self, node: &str, key: &str) -> bool {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(all) = self.load() else { return false };
+        match all.get(&crate::deck::link::key_name(node)) {
+            Some(e) => {
+                let (a, b) = (e.value.as_bytes(), key.as_bytes());
+                a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+            }
+            None => false,
+        }
+    }
+
     pub fn remove(&self, name: &str) -> Result<bool> {
         validate_name(name)?;
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -364,6 +400,12 @@ impl Vault {
         for (k, v) in env {
             let Some(name) = reference(v) else { continue };
             validate_name(name)?;
+            if name.starts_with("node.") {
+                return Err(format!(
+                    "secret '{}' is a node's link key and is never given to agents",
+                    name
+                ));
+            }
             let e = all.get(name).ok_or_else(|| {
                 format!(
                     "secret '{}' (for {}) is not set: add it in Settings > Secrets or with `indra secret set {}`",

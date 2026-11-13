@@ -131,6 +131,31 @@ struct State {
     next_request: u64,
 }
 
+impl State {
+    fn new(format: &str, interactive: bool, agent: &AgentOpts) -> State {
+        State {
+            status: "running".into(),
+            exit_code: None,
+            ended: None,
+            events: VecDeque::new(),
+            seq: 0,
+            tools: BTreeMap::new(),
+            agents: Vec::new(),
+            cost_usd: None,
+            format: format.to_string(),
+            host: None,
+            session: None,
+            interactive,
+            open: interactive,
+            turns: u32::from(interactive),
+            mode: agent.permission_mode.clone(),
+            model: agent.model.clone(),
+            pending: Vec::new(),
+            next_request: 0,
+        }
+    }
+}
+
 pub struct Proc {
     id: u64,
     node: String,
@@ -759,6 +784,8 @@ pub struct Procs {
     log_dir: PathBuf,
     /// Secrets that profiles reference (`secret:<name>`), next to the logs.
     vault: Arc<crate::deck::secrets::Vault>,
+    /// Nodes that dialled in (`indra node connect`).
+    links: Arc<crate::deck::link::Links>,
 }
 
 /// Extra launch options: a pivot's session and parent, and the agent options.
@@ -803,7 +830,96 @@ impl Procs {
             next: AtomicU64::new(1),
             log_dir,
             vault: Arc::new(crate::deck::secrets::Vault::open(secrets)),
+            links: Arc::new(crate::deck::link::Links::default()),
         })
+    }
+
+    /// Nodes connected over the agent link.
+    pub fn links(&self) -> &Arc<crate::deck::link::Links> {
+        &self.links
+    }
+
+    /// Follow a job on a node over its link: its envelope lines (the
+    /// `indra node exec` protocol) feed the process, console input goes to
+    /// the node, and Stop asks the node to stop the agent's tree.
+    fn drive_linked(
+        &self,
+        proc: Arc<Proc>,
+        node: String,
+        job: u64,
+        mut lines: mpsc::UnboundedReceiver<String>,
+        mut ctl_rx: mpsc::UnboundedReceiver<Ctl>,
+        mut stop_rx: oneshot::Receiver<()>,
+    ) {
+        let logf = Arc::new(Mutex::new(std::fs::File::create(&proc.log).ok()));
+        let links = self.links.clone();
+        tokio::spawn(async move {
+            let mut stopped = false;
+            let mut code: Option<i32> = None;
+            let mut stop_deadline: Option<tokio::time::Instant> = None;
+            loop {
+                let wait = async {
+                    match stop_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::select! {
+                    l = lines.recv() => match l {
+                        Some(l) => {
+                            if let Some(f) = logf.lock().unwrap().as_mut() {
+                                let _ = writeln!(f, "{}", proc.redacted(&l));
+                            }
+                            let v: Value = serde_json::from_str(&l).unwrap_or(Value::Null);
+                            if v.get("t").and_then(Value::as_str) == Some("exit") {
+                                code = v.get("code").and_then(Value::as_i64).map(|c| c as i32);
+                                break;
+                            }
+                            proc.node_line(&l);
+                        }
+                        None => break,
+                    },
+                    c = ctl_rx.recv() => match c {
+                        Some(Ctl::Line(l)) => links.job_input(&node, job, crate::deck::nodes::JobInput::Line(l)),
+                        Some(Ctl::Close) => links.job_input(&node, job, crate::deck::nodes::JobInput::Close),
+                        None => {}
+                    },
+                    _ = &mut stop_rx, if !stopped => {
+                        stopped = true;
+                        proc.push("system", "stop requested".into(), None);
+                        links.job_input(&node, job, crate::deck::nodes::JobInput::Stop);
+                        // The node stops the tree and reports the exit; do not wait forever.
+                        stop_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(15));
+                    }
+                    _ = wait => break,
+                }
+            }
+            *proc.ctl.lock().unwrap() = None;
+            let text = {
+                let mut st = proc.state.lock().unwrap();
+                st.ended = Some(now());
+                st.exit_code = code;
+                st.open = false;
+                st.pending.clear();
+                st.status = if stopped {
+                    "stopped".into()
+                } else if code == Some(0) {
+                    "exited".into()
+                } else {
+                    "failed".into()
+                };
+                for a in st.agents.iter_mut().filter(|a| a.state == "running") {
+                    a.state = if stopped { "error" } else { "done" };
+                }
+                format!(
+                    "{} (exit code {})",
+                    st.status,
+                    code.map(|c| c.to_string()).unwrap_or_else(|| "none".into())
+                )
+            };
+            *proc.stop.lock().unwrap() = None;
+            proc.push("exit", text, None);
+        });
     }
 
     /// The secret store agents' profiles draw from.
@@ -886,6 +1002,8 @@ impl Procs {
             control: Option<Vec<String>>,
             /// Remote: the job line for `indra node exec`.
             job: Option<String>,
+            /// Remote over the agent link: the node and the job.
+            link: Option<(String, crate::deck::nodes::Job)>,
             node: String,
             runner: String,
             harness: String,
@@ -932,6 +1050,7 @@ impl Procs {
                     env: ac.env,
                     control: ac.control,
                     job: None,
+                    link: None,
                     node: crate::deck::nodes::LOCAL.into(),
                     runner: runner.name.clone(),
                     harness: harness.into(),
@@ -950,7 +1069,6 @@ impl Procs {
                 target,
             } => {
                 opts.agent.validate()?;
-                let (program, args) = node.ssh_command_for("exec")?;
                 let job = crate::deck::nodes::Job {
                     runner: runner.into(),
                     prompt: prompt.replace("{node}", &node.name),
@@ -958,13 +1076,30 @@ impl Procs {
                     resume: opts.resume.clone(),
                     opts: opts.agent.clone(),
                 };
+                // A node that dialled in is reached over its link; SSH is the fallback.
+                let linked = self.links.connected(&node.name);
+                if !linked && node.ssh.is_empty() {
+                    return Err(format!(
+                        "node '{}' is not connected (run `indra node connect` there) and has no ssh fallback",
+                        node.name
+                    ));
+                }
+                let (program, args) = if linked {
+                    (PathBuf::from(format!("link:{}", node.name)), Vec::new())
+                } else {
+                    node.ssh_command_for("exec")?
+                };
                 Plan {
                     program,
                     args,
                     cwd: None,
                     env: Vec::new(),
                     control: None,
-                    job: Some(serde_json::to_string(&job).map_err(|e| e.to_string())?),
+                    job: (!linked)
+                        .then(|| serde_json::to_string(&job))
+                        .transpose()
+                        .map_err(|e| e.to_string())?,
+                    link: linked.then(|| (node.name.clone(), job.clone())),
                     node: node.name.clone(),
                     runner: runner.into(),
                     harness: harness.into(),
@@ -985,6 +1120,55 @@ impl Procs {
             "{}-{}-{}-{}.log",
             started, id, plan.node, plan.runner
         ));
+
+        // Over the agent link: the job goes to the node; no local process.
+        let linked = match &plan.link {
+            Some((n, job)) => Some(self.links.start_job(n, job)?),
+            None => None,
+        };
+        if let Some((job_id, lines)) = linked {
+            let (ctl_tx, ctl_rx) = mpsc::unbounded_channel::<Ctl>();
+            let (tx, _) = broadcast::channel(1024);
+            let (stop_tx, stop_rx) = oneshot::channel();
+            let proc = Arc::new(Proc {
+                id,
+                node: plan.node.clone(),
+                parent: opts.parent,
+                resumed: opts.resume.as_ref().map(|r| r.session.clone()),
+                can_resume: plan.can_resume,
+                runner: plan.runner.clone(),
+                harness: plan.harness.clone(),
+                prompt: plan.prompt.clone(),
+                cwd: plan.target.clone(),
+                command: vec![
+                    format!("indra node connect ({})", plan.node),
+                    plan.runner.clone(),
+                ],
+                started,
+                log: log.clone(),
+                state: Mutex::new(State::new(&plan.format, false, &opts.agent)),
+                tx,
+                stop: Mutex::new(Some(stop_tx)),
+                opts: shown,
+                profile: opts.profile.clone(),
+                redact: redact.clone(),
+                ctl: Mutex::new(Some(ctl_tx)),
+            });
+            let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
+            self.vault
+                .record_use(&used, opts.profile.as_deref(), &node_name, id);
+            self.procs.lock().unwrap().insert(id, proc.clone());
+            proc.push(
+                "system",
+                format!(
+                    "started {} on node {} in {} (over its link)",
+                    plan.runner, plan.node, plan.target
+                ),
+                None,
+            );
+            self.drive_linked(proc, plan.node.clone(), job_id, lines, ctl_rx, stop_rx);
+            return Ok(id);
+        }
 
         let mut cmd = tokio::process::Command::new(&plan.program);
         cmd.args(&plan.args)
@@ -1029,26 +1213,7 @@ impl Procs {
                 .collect(),
             started,
             log: log.clone(),
-            state: Mutex::new(State {
-                status: "running".into(),
-                exit_code: None,
-                ended: None,
-                events: VecDeque::new(),
-                seq: 0,
-                tools: BTreeMap::new(),
-                agents: Vec::new(),
-                cost_usd: None,
-                format: plan.format.clone(),
-                host: None,
-                session: None,
-                interactive,
-                open: interactive,
-                turns: u32::from(interactive),
-                mode: opts.agent.permission_mode.clone(),
-                model: opts.agent.model.clone(),
-                pending: Vec::new(),
-                next_request: 0,
-            }),
+            state: Mutex::new(State::new(&plan.format, interactive, &opts.agent)),
             tx,
             stop: Mutex::new(Some(stop_tx)),
             opts: shown,

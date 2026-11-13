@@ -291,9 +291,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 
 Run agents on this machine and on any machine you can SSH into, and orchestrate them:
 
-- **Nodes:** add a remote machine with a `[[node]]` block (an SSH destination, its capacity,
-  its codebases). No daemon and no open port: indra uses your SSH keys, and the remote runs
-  only its own configured runners. `indra nodes` checks them all.
+- **Nodes:** a machine dials in with `indra node connect` (no open port, no SSH; a direct
+  WebRTC channel when possible, relayed otherwise; it reconnects on its own and loses no output),
+  or is reached over SSH as a fallback. Either way it runs only its own configured runners.
 - **Workflows:** a graph of agent tasks across nodes, run in dependency order within each
   node's capacity, with retries, skip-on-failure and cancel. Run one with `indra run nightly`
   (cron and CI friendly) or from the console.

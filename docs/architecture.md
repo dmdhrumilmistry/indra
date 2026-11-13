@@ -100,19 +100,20 @@ Agents need tokens (tracker APIs, cloud credentials, model keys). The rules:
    replaces known secret values with `[secret:name]`.
 6. **Audited.** Each delivery is recorded (secret, profile, node, process, time).
 
-## Transport: WebRTC first, SSH as the last resort
+## Transport: WebRTC first, SSH as the last resort (built)
 
 Today the hub reaches nodes over SSH. The next transport inverts the direction, so nodes need no
 open port and no SSH account:
 
-1. **Enrol.** On the hub, **Nodes > Add** creates a one-time enrolment code. On the node:
-   `indra node connect https://hub.example --code ABCD-1234`. The node generates a key pair and
-   receives a node certificate; from then on it authenticates with its key.
-2. **Signal.** The node keeps one outbound WebSocket to the hub (`/api/nodes/signal`). It carries
+1. **Enrol.** On the hub, **Nodes > Add a machine** creates a one-time enrolment code (15
+   minutes). On the node: `indra node connect https://hub.example --name box --code ABCDE-FGHJK`.
+   The hub answers with a random 256-bit key for that node, kept in its encrypted secret store
+   and in an owner-only file on the node; from then on the node presents that key.
+2. **Signal.** The node keeps one outbound WebSocket to the hub (`/agent/connect`). It carries
    presence, heartbeats and WebRTC offers, answers and ICE candidates.
 3. **Connect.** Hub and node open a WebRTC peer connection (STUN for NAT traversal, optional
-   TURN) with a reliable, ordered data channel per job, so a slow job never blocks another.
-   DTLS encrypts it end to end.
+   TURN) with one reliable, ordered data channel; job frames carry their job id. DTLS encrypts
+   it end to end. Frames over 60 KB take the WebSocket.
 4. **Fall back.** If ICE fails, jobs flow over the signaling WebSocket instead (relayed by the
    hub). If the node has no agent connection at all and has an `ssh` destination configured,
    the hub uses SSH as it does today.
@@ -125,8 +126,8 @@ open port and no SSH account:
 
 **Scale.** Nodes dial in, so the hub needs no route to them; a hub handles thousands of idle
 nodes (one WebSocket each, a heartbeat every few seconds) and the job traffic goes peer to peer.
-Several hubs can share a node fleet behind a signaling relay; the workflow engine already
-schedules by per-node capacity.
+Sharing one fleet between several hubs (behind a signaling relay) is a possible later step;
+the workflow engine already schedules by per-node capacity.
 
 ## Tasks and the board (built)
 
@@ -173,4 +174,4 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 2. Secrets. Done.
 3. Board and tracker connectors (Jira, GitHub Issues, ClickUp). Done.
 4. Graph workflow editor with components and sub-workflows. Done.
-5. WebRTC transport with reconnection, SSH kept as the fallback.
+5. WebRTC transport with reconnection, SSH kept as the fallback. Done.
