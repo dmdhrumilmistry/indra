@@ -7,7 +7,7 @@
     "name": "Dhrumil Mistry",
     "url": "https://github.com/dmdhrumilmistry"
   },
-  "homepage": "https://github.com/dmdhrumilmistry/security-harness",
+  "homepage": "https://github.com/dmdhrumilmistry/indra",
   "license": "MIT",
   "keywords": [
     "security",
@@ -26,5 +26,5 @@
     "cve",
     "dast"
   ],
-  "repository": "https://github.com/dmdhrumilmistry/security-harness"
+  "repository": "https://github.com/dmdhrumilmistry/indra"
 }

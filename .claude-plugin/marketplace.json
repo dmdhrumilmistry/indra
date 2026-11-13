@@ -16,7 +16,7 @@
         "name": "Dhrumil Mistry",
         "url": "https://github.com/dmdhrumilmistry"
       },
-      "homepage": "https://github.com/dmdhrumilmistry/security-harness",
+      "homepage": "https://github.com/dmdhrumilmistry/indra",
       "tags": [
         "security",
         "appsec",
@@ -30,7 +30,7 @@
       "source": "./plugins/security-harness",
       "version": "0.2.0",
       "license": "MIT",
-      "repository": "https://github.com/dmdhrumilmistry/security-harness",
+      "repository": "https://github.com/dmdhrumilmistry/indra",
       "category": "security",
       "keywords": [
         "security",

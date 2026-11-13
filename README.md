@@ -1,6 +1,8 @@
-# Security Harness
+# indra
 
-A multi-agent **application-security review harness** for Claude Code (and, later, other AI agents). One
+**indra** (formerly `security-harness`) is a multi-agent **application-security review harness** for
+Claude Code and other AI agents, plus the [`indra` CLI](tools/indra/README.md): a graph memory and a
+web console for running and watching agents. The harness ships as the `security-harness` plugin. One
 router skill dispatches to a full offensive-security pipeline that **maps** a codebase, **hunts**
 vulnerabilities with a per-class knowledge base, **chains** findings into escalations, **verifies** real
 impact, and **reports** to README / JSON / SARIF / doc / PDF.
@@ -43,27 +45,27 @@ checklist are in [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md).
 **Claude Code** - add this repo as a plugin marketplace and install the plugin:
 
 ```
-/plugin marketplace add dmdhrumilmistry/security-harness
+/plugin marketplace add dmdhrumilmistry/indra
 /plugin install security-harness
 ```
 
 `/plugin marketplace add` accepts any of: a GitHub `owner/repo` (as above), a full git URL
-(`https://github.com/dmdhrumilmistry/security-harness.git`), or a local path to a clone
-(e.g. `/plugin marketplace add ./security-harness` from the directory containing your checkout).
+(`https://github.com/dmdhrumilmistry/indra.git`), or a local path to a clone
+(e.g. `/plugin marketplace add ./indra` from the directory containing your checkout).
 Then run `/plugin install security-harness` and reload when prompted.
 
 **Gemini CLI** - a native extension, manifest at the repo root:
 
 ```bash
-gemini extensions install https://github.com/dmdhrumilmistry/security-harness
+gemini extensions install https://github.com/dmdhrumilmistry/indra
 ```
 
 **opencode, Codex, or any [agentskills.io](https://agentskills.io) agent** - copy the
 skills into a discovery directory. Codex additionally picks up `AGENTS.md` on its own:
 
 ```bash
-git clone https://github.com/dmdhrumilmistry/security-harness
-cd security-harness
+git clone https://github.com/dmdhrumilmistry/indra
+cd indra
 python3 scripts/sync-agent-skills.py --install agents     # ~/.agents/skills
 python3 scripts/sync-agent-skills.py --install opencode   # ~/.config/opencode/skills
 ```
@@ -150,10 +152,10 @@ ships in this repo. It is named for Indra's net: an endless net with a jewel at 
 reflecting all the others.
 
 ```bash
-cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra
+cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra
 ```
 
-or download a binary from an `indra-v*` [release](https://github.com/dmdhrumilmistry/security-harness/releases).
+or download a binary from an `indra-v*` [release](https://github.com/dmdhrumilmistry/indra/releases).
 
 ### Long-term memory (`indra mem`)
 
@@ -184,7 +186,7 @@ A vault is an ordinary Obsidian-compatible folder, so you can also open it in Ob
 A local web console for the harness, and for any other agent harness:
 
 ```bash
-cd security-harness && indra serve --target ~/code/my-api     # prints a URL with an access token
+cd indra && indra serve --target ~/code/my-api     # prints a URL with an access token
 ```
 
 - **Agents, skills, prompts:** read and edit every definition the harness is made of, and see

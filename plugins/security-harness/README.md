@@ -9,21 +9,21 @@ escalations, verifies real impact, and writes a report.
 **Claude Code**
 
 ```
-/plugin marketplace add dmdhrumilmistry/security-harness
+/plugin marketplace add dmdhrumilmistry/indra
 /plugin install security-harness@security-harness
 ```
 
 **Gemini CLI**
 
 ```bash
-gemini extensions install https://github.com/dmdhrumilmistry/security-harness
+gemini extensions install https://github.com/dmdhrumilmistry/indra
 ```
 
 **opencode, or any agentskills.io-compatible agent**
 
 ```bash
-git clone https://github.com/dmdhrumilmistry/security-harness
-cd security-harness
+git clone https://github.com/dmdhrumilmistry/indra
+cd indra
 python3 scripts/sync-agent-skills.py --install agents
 ```
 
@@ -41,7 +41,7 @@ review PR 42
 
 ## Long-term memory
 
-With the [`indra`](https://github.com/dmdhrumilmistry/security-harness/tree/main/tools/indra)
+With the [`indra`](https://github.com/dmdhrumilmistry/indra/tree/main/tools/indra)
 CLI installed, reviews remember. Before hunting, each hunter gets what earlier runs learned
 about its class (past findings, known guards, confirmed false positives). After the report,
 the run's results and a few learnings are recorded as a graph of Obsidian-compatible
