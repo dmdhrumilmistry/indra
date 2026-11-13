@@ -47,6 +47,7 @@
   function bytes(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
   function toast(msg, bad) {
+    Array.prototype.forEach.call(document.querySelectorAll(".toast"), function (x) { x.remove(); });
     var t = h("div", { class: "toast" + (bad ? " bad" : ""), role: "status", text: msg });
     document.body.appendChild(t);
     setTimeout(function () { t.remove(); }, bad ? 6000 : 2600);
@@ -571,7 +572,14 @@
         note,
         h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On a remote node the job travels as JSON over SSH." }), preview),
         h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. A remote node runs only runners from its own configuration." }),
-        h("div", { class: "row" }, go, h("a", { href: "#/workflows", text: "Or fan out to many targets at once" })));
+        h("div", { class: "row" }, go, canEdit() ? h("button", { type: "button", onclick: function () {
+          var name = window.prompt("Save this prompt as a preset named:");
+          if (!name || !name.trim()) return;
+          var p = { name: name.trim(), prompt: prompt.value, harness: hs.name };
+          if (runner.value) p.runner = runner.value;
+          addToSection("preset", p).then(function () { toast("Saved preset " + p.name); })
+            .catch(function (err) { toast(err.message, true); });
+        } }, "Save as preset") : null, h("a", { href: "#/workflows", text: "Or fan out to many targets at once" })));
       m.appendChild(form);
       fillNode();
     }).catch(function (e) { holder.textContent = e.message; });
@@ -584,7 +592,8 @@
   }
   function pageNodes(m) {
     var refresh = h("button", { type: "button" }, "Check again");
-    m.appendChild(header("Nodes", "The machines agents run on. Remote nodes are reached over SSH and must have indra installed; each runs only its own configured runners.", [refresh]));
+    m.appendChild(header("Nodes", "The machines agents run on. Remote nodes are reached over SSH and must have indra installed; each runs only its own configured runners.",
+      [canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Add or edit nodes" }) : null, refresh]));
     var grid = h("div", { class: "grid" }), runsBox = h("div");
     m.appendChild(grid); m.appendChild(runsBox);
     function showRuns(n) {
@@ -625,8 +634,9 @@
         grid.appendChild(card);
       });
       if (nodes.length === 1) grid.appendChild(h("div", { class: "card" }, h("h4", { text: "Add a remote machine" }),
-        h("p", { class: "muted", text: "Install indra on it, make sure `ssh <host>` works without a password prompt, then add a [[node]] to indra.toml:" }),
-        h("pre", { class: "view", text: '[[node]]\nname = "build-box"\nssh = "me@build-box"\nmax_parallel = 2\ntargets = ["/srv/api"]' })));
+        h("p", { class: "muted", text: "Install indra on it and make sure `ssh <host>` works without a password prompt, then add it here." }),
+        canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Add a node" })
+          : h("pre", { class: "view", text: '[[node]]\nname = "build-box"\nssh = "me@build-box"\nmax_parallel = 2\ntargets = ["/srv/api"]' })));
     }
     function load(force) { grid.textContent = ""; grid.appendChild(h("div", { class: "muted", text: "Checking nodes..." })); loadNodes(force).then(render).catch(function (e) { grid.textContent = e.message; }); }
     refresh.addEventListener("click", function () { load(true); });
@@ -659,19 +669,20 @@
           })))));
         defsBox.textContent = "";
         if (!w.defs.length) defsBox.appendChild(h("div", { class: "card" }, h("h4", { text: "No workflows configured" }),
-          h("p", { class: "muted", text: "Add [[workflow]] blocks to indra.toml (indra init writes an example), or use a fan-out below." })));
+          h("p", { class: "muted", text: "Chain agent tasks across machines, in dependency order. Or use a fan-out below." }),
+          canEdit() ? h("a", { class: "btn", href: "#/settings/workflows", text: "Create a workflow" }) : null));
         w.defs.forEach(function (d) {
           defsBox.appendChild(h("div", { class: "card" },
             h("div", { class: "row" }, h("h4", { text: d.name }), h("span", { class: "pill", text: d.task.length + " tasks" })),
             d.description ? h("p", { class: "muted", text: d.description }) : null,
             h("ul", { class: "links" }, d.task.map(function (t) {
-              return h("li", null, h("b", { text: t.id }), h("span", { class: "muted", text: "  on " + t.node + (t.needs.length ? ", after " + t.needs.join(", ") : "") }));
+              return h("li", null, h("b", { text: t.id }), h("span", { class: "muted", text: "  on " + t.node + ((t.needs || []).length ? ", after " + t.needs.join(", ") : "") }));
             })),
             h("div", { class: "row" }, h("button", { class: "primary", type: "button", disabled: ov.read_only, onclick: function (e) {
               e.target.disabled = true;
               api("/api/workflows", { method: "POST", body: { name: d.name } }).then(function (r) { location.hash = "#/workflow/" + r.id; })
                 .catch(function (err) { toast(err.message, true); e.target.disabled = false; });
-            } }, "Run"))));
+            } }, "Run"), canEdit() ? h("a", { href: "#/settings/workflows", text: "Edit" }) : null)));
         });
       }).catch(function (e) { runsBox.textContent = e.message; });
     }
@@ -871,6 +882,287 @@
     S.cleanup.push(function () { es.close(); clearTimeout(pending); });
   }
 
+  // Whether this console may edit indra.toml (see Settings).
+  function canEdit() { return !!(S.ov && S.ov.settings && S.ov.settings.editable); }
+  // Append one item to a list section of indra.toml.
+  function addToSection(section, item) {
+    return api("/api/config").then(function (c) {
+      if (c.error) throw new Error("indra.toml has an error; fix it in Settings > File first");
+      var list = (c.config[section] || []).filter(function (x) { return x.name !== item.name; }).concat([item]);
+      return api("/api/config", { method: "PUT", body: { version: c.version, section: section, value: list } });
+    }).then(function (r) { refreshOverview(); return r; });
+  }
+
+  // ---- settings: indra.toml, edited here ------------------------------------------
+  // Each section of the config file has a schema; forms are built from it, and
+  // a save replaces that one section on the server, which keeps the rest of
+  // the file (comments included), checks the result, and applies it at once.
+  var TABS = [["general", "General"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"],
+    ["presets", "Presets"], ["harnesses", "Harnesses"], ["file", "File"]];
+
+  function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
+  function cfgRunnerNames(c) {
+    var n = {}; (c.config.runner || []).concat(c.builtin.runners).forEach(function (r) { n[r.name] = 1; }); return Object.keys(n);
+  }
+  function cfgHarnessNames(c) {
+    var n = {}; (c.config.harness || []).concat(c.builtin.harnesses).forEach(function (x) { n[x.name] = 1; }); return Object.keys(n);
+  }
+  function cfgNodeNames(c) { return ["local"].concat((c.config.node || []).map(function (n) { return n.name; })); }
+
+  var SCHEMA = {
+    runner: { tab: "runners", noun: "runner", fields: function () { return [
+      { k: "name", label: "Name", req: true, help: "How you pick it on Launch and in workflows. A built-in name (claude, codex, gemini) replaces the built-in." },
+      { k: "command", label: "Program", req: true, help: "A program on PATH or a full path. It runs directly, never through a shell." },
+      { k: "args", label: "Arguments", type: "list", req: true, help: "One per line. {prompt} is required; {target} is the directory the agent runs in. Each is filled in as one whole argument." },
+      { k: "format", label: "Output", type: "select", options: [["", "Plain text (default)"], ["text", "Plain text"], ["claude-stream-json", "Claude Code stream-json: subagents, tool calls, cost"]] },
+      { k: "resume_args", label: "Arguments to continue a session", type: "list", help: "Used by Pivot > Continue; {session} is the session id. stream-json runners default to --resume {session}." },
+      { k: "fork_args", label: "Arguments to branch a session", type: "list", help: "Added after those when the original agent keeps running, e.g. --fork-session." }]; },
+      summary: function (r) { return r.command + " " + (r.args || []).join(" "); } },
+    node: { tab: "nodes", noun: "node", fields: function () { return [
+      { k: "name", label: "Name", req: true },
+      { k: "description", label: "Description" },
+      { k: "ssh", label: "SSH destination", req: true, help: "host, user@host, or a Host alias from ~/.ssh/config. `ssh <destination>` must work without a password prompt, and the host key must already be trusted." },
+      { k: "targets", label: "Targets", type: "list", help: "Codebases on that machine, one path per line, as paths there." },
+      { k: "max_parallel", label: "Agents at once", type: "number", placeholder: "2" },
+      { k: "port", label: "SSH port", type: "number", placeholder: "22" },
+      { k: "identity", label: "Private key file", placeholder: "whatever ssh would use" },
+      { k: "indra", label: "indra on the remote", placeholder: "indra" },
+      { k: "args", label: "Extra arguments for the remote indra", type: "list", help: "One per line, e.g. --config and /etc/indra.toml." },
+      { k: "ssh_command", label: "ssh client", placeholder: "ssh" }]; },
+      summary: function (n) { return n.ssh + "  -  " + (n.targets || []).length + " targets, " + (n.max_parallel || 2) + " agents at once"; } },
+    preset: { tab: "presets", noun: "preset", fields: function (c) { return [
+      { k: "name", label: "Name", req: true },
+      { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} becomes the target path, {node} the node name." },
+      { k: "harness", label: "Only for harness", type: "select", options: opts(cfgHarnessNames(c), "Any harness") },
+      { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") }]; },
+      summary: function (p) { return p.prompt; } },
+    workflow: { tab: "workflows", noun: "workflow", fields: function (c) { return [
+      { k: "name", label: "Name", req: true, help: "Run it from the Workflows page or with `indra run <name>`." },
+      { k: "description", label: "Description" },
+      { k: "harness", label: "Harness", type: "select", options: opts(cfgHarnessNames(c), "The first one") },
+      { k: "task", label: "Tasks", type: "rows", noun: "task", fields: [
+        { k: "id", label: "Id", req: true },
+        { k: "node", label: "Node", type: "select", options: opts(cfgNodeNames(c)), dflt: "local" },
+        { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c)), dflt: "claude" },
+        { k: "target", label: "Target", req: true, help: "A directory on that node. Local paths are relative to the config file." },
+        { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} and {node} are filled in." },
+        { k: "needs", label: "Runs after", type: "words", help: "Task ids, separated by spaces or commas. It runs only if they all succeed." },
+        { k: "retries", label: "Retries", type: "number", placeholder: "0" }] }]; },
+      summary: function (w) { return (w.task || []).map(function (t) { return t.id + "@" + (t.node || "local"); }).join(", "); } },
+    harness: { tab: "harnesses", noun: "harness", fields: function () { return [
+      { k: "name", label: "Name", req: true, help: "A built-in name (indra, claude-code) replaces the built-in profile." },
+      { k: "description", label: "Description" },
+      { k: "root", label: "Root", placeholder: ".", help: "Base folder for the globs below, relative to the config file." },
+      { k: "agents", label: "Agent files", type: "list", help: "Globs, one per line, e.g. agents/*.md" },
+      { k: "skills", label: "Skill files", type: "list", help: "e.g. skills/*/SKILL.md" },
+      { k: "prompts", label: "Prompt files", type: "list", help: "e.g. prompts/**/*.md" },
+      { k: "memory", label: "Memory vaults", type: "list", help: "{target} expands to each target, e.g. {target}/.memory" },
+      { k: "targets", label: "Targets", type: "list", help: "Codebases whose runs are shown and where agents run. --target on the command line overrides these." },
+      { k: "runs", label: "Run directories", placeholder: ".runs/*", help: "A glob under each target, one directory per run." },
+      { k: "findings", label: "Results files", type: "list", help: "JSONL files inside a run, e.g. results.jsonl" },
+      { k: "group_by", label: "Group results by", placeholder: "agent" },
+      { k: "stages", label: "Stages", type: "rows", noun: "stage", fields: [
+        { k: "name", label: "Name", req: true }, { k: "agent", label: "Agent" }, { k: "done_when", label: "Done when this file exists" }] }]; },
+      summary: function (x) { return x.description || x.root || "."; } }
+  };
+
+  // One form control per field; get() returns the value to send, or undefined to leave it out.
+  function control(f, val) {
+    var el, get;
+    var ph = f.placeholder || "";
+    if (f.type === "textarea") {
+      el = h("textarea", { placeholder: ph }); el.value = val || "";
+      get = function () { return el.value.trim() ? el.value : (f.req ? "" : undefined); };
+    } else if (f.type === "list") {
+      el = h("textarea", { class: "list", rows: "3", placeholder: ph }); el.value = (val || []).join("\n");
+      get = function () { var v = el.value.split("\n").map(function (x) { return x.trim(); }).filter(Boolean); return v.length || f.req ? v : undefined; };
+    } else if (f.type === "words") {
+      el = h("input", { type: "text", placeholder: ph }); el.value = (val || []).join(", ");
+      get = function () { var v = el.value.split(/[\s,]+/).filter(Boolean); return v.length ? v : undefined; };
+    } else if (f.type === "number") {
+      el = h("input", { type: "number", min: "0", step: "1", placeholder: ph }); el.value = val == null ? "" : String(val);
+      get = function () { return el.value === "" ? undefined : Number(el.value); };
+    } else if (f.type === "bool") {
+      el = h("input", { type: "checkbox" }); el.checked = !!val;
+      get = function () { return el.checked; };
+    } else if (f.type === "select") {
+      el = h("select", null, f.options.map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
+      var v = val == null ? (f.dflt || "") : val;
+      if (v && !f.options.some(function (o) { return o[0] === v; })) el.appendChild(h("option", { value: v, text: v + " (not defined here)" }));
+      el.value = v;
+      get = function () { return el.value || undefined; };
+    } else if (f.type === "rows") {
+      return rowsControl(f, val || []);
+    } else {
+      el = h("input", { type: "text", placeholder: ph }); el.value = val == null ? "" : String(val);
+      get = function () { return el.value.trim() ? el.value.trim() : (f.req ? "" : undefined); };
+    }
+    if (f.req) el.setAttribute("required", "");
+    var label = f.type === "bool"
+      ? h("label", { class: "check" }, el, h("span", null, f.label, f.help ? h("small", { text: " " + f.help }) : null))
+      : h("label", null, h("span", null, f.label, f.req ? h("b", { class: "req", text: " *" }) : null), f.help ? h("small", { text: f.help }) : null, el);
+    return { el: label, get: get };
+  }
+
+  function rowsControl(f, items) {
+    var list = h("div", { class: "rows" }), rows = [];
+    function add(item) {
+      var ctl = f.fields.map(function (sf) { return { k: sf.k, c: control(sf, item[sf.k]) }; });
+      var box = h("fieldset", { class: "rowbox" });
+      var row = { ctl: ctl, box: box };
+      box.appendChild(h("legend", null, f.noun + " " + (rows.length + 1)));
+      ctl.forEach(function (x) { box.appendChild(x.c.el); });
+      box.appendChild(h("div", { class: "row" }, h("button", { type: "button", class: "ghost danger", onclick: function () {
+        rows.splice(rows.indexOf(row), 1); box.remove();
+        rows.forEach(function (r, i) { r.box.querySelector("legend").textContent = f.noun + " " + (i + 1); });
+      } }, "Remove " + f.noun)));
+      rows.push(row); list.appendChild(box);
+    }
+    items.forEach(add);
+    var wrap = h("div", { class: "rowsfield" }, h("span", { class: "flabel", text: f.label }), list,
+      h("button", { type: "button", onclick: function () { add({}); } }, "Add " + f.noun));
+    return { el: wrap, get: function () {
+      var out = rows.map(function (r) { var o = {}; r.ctl.forEach(function (x) { var v = x.c.get(); if (v !== undefined) o[x.k] = v; }); return o; });
+      return out.length ? out : undefined;
+    } };
+  }
+
+  function itemForm(fields, item, title, onSave, onCancel) {
+    var ctl = fields.map(function (f) { return { k: f.k, c: control(f, item[f.k]) }; });
+    var err = h("div", { class: "note bad", hidden: true, role: "alert" });
+    var save = h("button", { class: "primary", type: "submit" }, "Save");
+    var form = h("form", { class: "form card cfgform", onsubmit: function (e) {
+      e.preventDefault();
+      var o = {}; ctl.forEach(function (x) { var v = x.c.get(); if (v !== undefined) o[x.k] = v; });
+      save.disabled = true; err.hidden = true;
+      onSave(o).catch(function (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; });
+    } }, h("h2", { text: title }), ctl.map(function (x) { return x.c.el; }), err,
+      h("div", { class: "row" }, save, h("button", { type: "button", onclick: onCancel }, "Cancel")));
+    return form;
+  }
+
+  function pageSettings(m, tab) {
+    tab = TABS.some(function (t) { return t[0] === tab; }) ? tab : "general";
+    m.appendChild(header("Settings", "Everything in indra.toml, edited here. Each save is checked first and applies at once; agents already running are not affected."));
+    var tabs = h("nav", { class: "tabs", "aria-label": "Settings sections" }, TABS.map(function (t) {
+      return h("a", { href: "#/settings/" + t[0], class: t[0] === tab ? "on" : "", "aria-current": t[0] === tab ? "page" : null, text: t[1] });
+    }));
+    var info = h("div"), body = h("div");
+    m.appendChild(tabs); m.appendChild(info); m.appendChild(body);
+    var c = null;
+
+    function load() { return api("/api/config").then(function (x) { c = x; render(); }); }
+    function save(payload, what) {
+      payload.version = c.version;
+      return api("/api/config", { method: "PUT", body: payload }).then(function (x) {
+        c = x; toast((what || "Saved") + ". Applied now."); refreshOverview(); render();
+      }).catch(function (e) {
+        if (e.status === 409) { toast("The file changed outside this page; reloaded it.", true); load(); }
+        throw e;
+      });
+    }
+    function saveSection(section, value, what) { return save({ section: section, value: value }, what); }
+
+    function render() {
+      info.textContent = ""; body.textContent = "";
+      info.appendChild(h("p", { class: "muted small cfgpath" }, "File: ", h("code", { text: c.path }),
+        c.exists ? null : " (created when you first save)"));
+      if (!c.editable) info.appendChild(h("div", { class: "note warn", text: "Settings are read-only here: " + c.locked + "." }));
+      if (c.error && tab !== "file") {
+        body.appendChild(h("div", { class: "note bad" }, "The file has an error, so the forms are off until it is fixed in the ", h("a", { href: "#/settings/file", text: "File" }), " tab: " + c.error));
+        return;
+      }
+      ({ general: general, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
+        workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
+        harnesses: function () { list("harness", c.builtin.harnesses); }, file: file })[tab]();
+    }
+
+    function general() {
+      var cf = c.config, fields = [
+        { k: "builtins", label: "Show the built-in profiles (the indra plugin, and Claude Code projects)", type: "bool" },
+        { k: "max_parallel", label: "Agents at once on this machine", type: "number", placeholder: "4", help: "Workflows and fan-outs wait for room; a manual Launch always starts." },
+        { k: "bind", label: "Listen on", placeholder: "127.0.0.1:7878", help: "Used the next time indra serve starts (now: " + c.startup.bind + "). Keep it on loopback." },
+        { k: "read_only", label: "Start read-only (no launching, no editing)", type: "bool", help: "Used the next time indra serve starts." }];
+      var vals = { builtins: cf.builtins !== false, max_parallel: cf.local.max_parallel, bind: cf.server.bind, read_only: !!cf.server.read_only };
+      var form = itemForm(fields, vals, "General", function (o) {
+        // One section at a time; each save returns the version the next one needs.
+        return saveSection("builtins", o.builtins ? null : false, "Saved")
+          .then(function () { return saveSection("local", o.max_parallel === undefined ? {} : { max_parallel: o.max_parallel }); })
+          .then(function () { var sv = {}; if (o.bind) sv.bind = o.bind; if (o.read_only) sv.read_only = true; return saveSection("server", sv); });
+      }, function () { render(); });
+      if (!c.editable) Array.prototype.forEach.call(form.querySelectorAll("input,select,textarea,button"), function (x) { x.disabled = true; });
+      body.appendChild(form);
+      if (c.startup.targets.length) body.appendChild(h("div", { class: "note", text: "This console was started with --target " + c.startup.targets.join(", ") + ", which overrides every harness's targets until it restarts." }));
+    }
+
+    function list(section, builtins) {
+      var d = SCHEMA[section], items = (c.config[section] || []).slice();
+      var names = items.map(function (x) { return x.name; });
+      function edit(i, item, title) {
+        body.textContent = "";
+        body.appendChild(itemForm(d.fields(c), item, title, function (o) {
+          var next = items.slice();
+          if (i === null) next.push(o); else next[i] = o;
+          return saveSection(section, next, "Saved " + d.noun + " " + o.name);
+        }, render));
+        var first = body.querySelector("input,textarea,select"); if (first) first.focus();
+      }
+      var add = h("button", { class: "primary", type: "button", disabled: !c.editable, onclick: function () { edit(null, {}, "New " + d.noun); } }, "Add " + d.noun);
+      body.appendChild(h("div", { class: "row cfgbar" }, add));
+      var grid = h("div", { class: "grid" });
+      items.forEach(function (it, i) {
+        var inst = section === "runner" ? c.installed.find(function (r) { return r.name === it.name; }) : null;
+        grid.appendChild(h("div", { class: "card cfgitem" },
+          h("div", { class: "row" }, h("h4", { text: it.name }),
+            inst ? h("span", { class: "pill " + (inst.available ? "ok" : "warn"), text: inst.available ? "installed" : "not found on PATH" }) : null,
+            builtins && builtins.some(function (b) { return b.name === it.name; }) ? h("span", { class: "pill", text: "replaces built-in" }) : null),
+          h("p", { class: "muted clip", text: d.summary(it) }),
+          h("div", { class: "row" },
+            h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(i, it, "Edit " + d.noun + " " + it.name); } }, "Edit"),
+            h("button", { type: "button", disabled: !c.editable, onclick: function () {
+              var copy = JSON.parse(JSON.stringify(it)); copy.name = it.name + "-copy"; edit(null, copy, "New " + d.noun);
+            } }, "Duplicate"),
+            h("button", { type: "button", class: "danger", disabled: !c.editable, onclick: function () {
+              if (!window.confirm("Delete " + d.noun + " " + it.name + "?")) return;
+              saveSection(section, items.filter(function (_, j) { return j !== i; }), "Deleted " + it.name).catch(function (e) { toast(e.message, true); });
+            } }, "Delete"))));
+      });
+      (builtins || []).filter(function (b) { return names.indexOf(b.name) < 0; }).forEach(function (b) {
+        var inst = section === "runner" ? c.installed.find(function (r) { return r.name === b.name; }) : null;
+        grid.appendChild(h("div", { class: "card cfgitem builtin" },
+          h("div", { class: "row" }, h("h4", { text: b.name }), h("span", { class: "pill", text: "built in" }),
+            inst ? h("span", { class: "pill " + (inst.available ? "ok" : ""), text: inst.available ? "installed" : "not installed" }) : null),
+          h("p", { class: "muted clip", text: d.summary(b) }),
+          h("div", { class: "row" }, h("button", { type: "button", disabled: !c.editable, onclick: function () {
+            edit(null, JSON.parse(JSON.stringify(b)), "Customize " + d.noun + " " + b.name);
+          } }, "Customize"))));
+      });
+      if (!grid.childNodes.length) grid.appendChild(h("div", { class: "card" }, h("p", { class: "muted", text: "No " + d.noun + "s yet." })));
+      body.appendChild(grid);
+    }
+
+    function file() {
+      var ta = h("textarea", { class: "code", spellcheck: "false", "aria-label": "indra.toml" }); ta.value = c.text;
+      var out = h("div", { class: "note", hidden: true, role: "status" });
+      function show(msg, bad) { out.textContent = msg; out.className = "note" + (bad ? " bad" : " ok"); out.hidden = false; }
+      var check = h("button", { type: "button", onclick: function () {
+        api("/api/config/check", { method: "POST", body: { text: ta.value } })
+          .then(function (r) { show("Looks good: " + r.harnesses + " harnesses, " + r.runners + " runners, " + r.presets + " presets, " + r.nodes + " nodes, " + r.workflows + " workflows."); })
+          .catch(function (e) { show(e.message, true); });
+      } }, "Check");
+      var saveBtn = h("button", { class: "primary", type: "button", disabled: !c.editable, onclick: function () {
+        saveBtn.disabled = true;
+        save({ text: ta.value }, "Saved the file").catch(function (e) { show(e.message, true); saveBtn.disabled = false; });
+      } }, "Save");
+      if (!c.editable) ta.readOnly = true;
+      body.appendChild(h("p", { class: "muted", text: "The whole file. Comments and layout are yours; the forms keep them too, except inside the section they rewrite. `indra init` writes a starter with every option explained." }));
+      body.appendChild(ta); body.appendChild(out);
+      body.appendChild(h("div", { class: "row" }, check, saveBtn));
+    }
+
+    load().catch(function (e) { body.textContent = ""; body.appendChild(empty(e.status === 404 ? "This console was started without access to a config file." : e.message)); });
+  }
+
   // ---- router --------------------------------------------------------------------
   function setHarness(name) {
     S.h = name; store("indra.h", name);
@@ -902,7 +1194,10 @@
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
     var m = $("main"); m.textContent = ""; m.scrollTop = 0;
+    // A newer navigation wins: a slower, earlier one must not render too.
+    var gen = S.gen = (S.gen || 0) + 1;
     refreshOverview().then(function () {
+      if (gen !== S.gen) return;
       if (page === "def" && arg) {
         var kind = arg.split(":")[0];
         Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) { a.classList.toggle("on", a.dataset.route === KIND_ROUTE[kind]); });
@@ -922,7 +1217,8 @@
         workflow: function () { pageWorkflowRun(m, arg); },
         launch: function () { pageLaunch(m); },
         procs: function () { pageProcs(m); },
-        proc: function () { pageProc(m, arg); }
+        proc: function () { pageProc(m, arg); },
+        settings: function () { pageSettings(m, arg); }
       };
       (pages[page] || pages.overview)();
     }).catch(function (e) { if (e.message !== "unauthorized") { m.appendChild(empty(e.message)); } });

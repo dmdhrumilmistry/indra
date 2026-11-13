@@ -10,7 +10,7 @@
 //!   - a failed task is retried up to `retries` more times;
 //!   - cancel stops running agents and cancels everything not yet started.
 
-use crate::deck::config::{self, Settings, TaskCfg, WorkflowCfg};
+use crate::deck::config::{self, TaskCfg, WorkflowCfg};
 use crate::deck::nodes::LOCAL;
 use crate::deck::procs::{Launch, Procs};
 use crate::deck::runs::now;
@@ -66,11 +66,11 @@ pub struct Engine {
     cancelled: Mutex<HashSet<u64>>,
     next: AtomicU64,
     procs: Arc<Procs>,
-    settings: Arc<Settings>,
+    settings: config::Shared,
 }
 
 impl Engine {
-    pub fn new(procs: Arc<Procs>, settings: Arc<Settings>) -> Arc<Engine> {
+    pub fn new(procs: Arc<Procs>, settings: config::Shared) -> Arc<Engine> {
         Arc::new(Engine {
             runs: Mutex::new(BTreeMap::new()),
             cancelled: Mutex::new(HashSet::new()),
@@ -112,6 +112,7 @@ impl Engine {
     pub fn start_named(self: &Arc<Self>, name: &str) -> Result<u64, String> {
         let wf = self
             .settings
+            .get()
             .workflows
             .iter()
             .find(|w| w.name == name)
@@ -122,12 +123,13 @@ impl Engine {
 
     /// Start any validated workflow (configured, or an ad-hoc fan-out).
     pub fn start(self: &Arc<Self>, wf: WorkflowCfg) -> Result<u64, String> {
-        let names: Vec<String> = self.settings.nodes.iter().map(|n| n.name.clone()).collect();
+        let settings = self.settings.get();
+        let names: Vec<String> = settings.nodes.iter().map(|n| n.name.clone()).collect();
         config::validate_workflow(&wf, &names)?;
         let harness = wf
             .harness
             .clone()
-            .or_else(|| self.settings.harnesses.first().map(|h| h.name.clone()))
+            .or_else(|| settings.harnesses.first().map(|h| h.name.clone()))
             .unwrap_or_default();
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let run = WfRun {
@@ -224,8 +226,9 @@ impl Engine {
         // 3. Start queued tasks while their node has room. A started agent
         // counts as running at once, so the next check already sees it.
         let harness = r.harness.clone();
+        let settings = self.settings.get();
         for t in r.tasks.iter_mut().filter(|t| t.state == "queued") {
-            if self.procs.running_on(&t.node) >= self.settings.capacity(&t.node) {
+            if self.procs.running_on(&t.node) >= settings.capacity(&t.node) {
                 continue;
             }
             t.attempts += 1;
@@ -264,9 +267,11 @@ impl Engine {
 
     fn launch(&self, t: &TaskRun, harness: &str) -> Result<u64, String> {
         let prompt = t.prompt.replace("{node}", &t.node);
+        // The settings now, so a node or runner edited in the console applies
+        // to tasks that have not started yet.
+        let settings = self.settings.get();
         if t.node == LOCAL {
-            let runner = self
-                .settings
+            let runner = settings
                 .runners
                 .iter()
                 .find(|r| r.name == t.runner)
@@ -281,8 +286,7 @@ impl Engine {
                 target: &target,
             })
         } else {
-            let node = self
-                .settings
+            let node = settings
                 .node(&t.node)
                 .ok_or_else(|| format!("unknown node '{}'", t.node))?;
             self.procs.start(Launch::Remote {

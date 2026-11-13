@@ -37,6 +37,13 @@ pub struct ServeArgs {
     /// Open the console in the default browser
     #[arg(long)]
     open: bool,
+    /// Do not let the console edit the config file (Settings page)
+    #[arg(long)]
+    lock_config: bool,
+    /// Let the console edit the config file even when listening beyond this
+    /// machine (editing runners is equivalent to running any command)
+    #[arg(long)]
+    allow_remote_config: bool,
 }
 
 #[derive(Args)]
@@ -64,15 +71,30 @@ pub struct InitArgs {
     force: bool,
 }
 
-fn load(opts: DeckOpts, bind: Option<String>, read_only: bool) -> config::Result<config::Settings> {
+fn load_options(
+    opts: DeckOpts,
+    bind: Option<String>,
+    read_only: bool,
+) -> config::Result<config::LoadOptions> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    config::load(config::LoadOptions {
+    Ok(config::LoadOptions {
         config: opts.config,
         targets: opts.targets,
         bind,
         read_only,
         cwd,
     })
+}
+
+fn load(opts: DeckOpts, bind: Option<String>, read_only: bool) -> config::Result<config::Settings> {
+    config::load(load_options(opts, bind, read_only)?)
+}
+
+/// How the console may edit the config file.
+struct Editing {
+    opts: config::LoadOptions,
+    lock: bool,
+    allow_remote: bool,
 }
 
 pub fn init(a: InitArgs) -> Result<ExitCode, String> {
@@ -100,12 +122,18 @@ pub fn run_check(a: CheckArgs) -> Result<ExitCode, String> {
 }
 
 pub fn run_serve(a: ServeArgs) -> Result<ExitCode, String> {
-    let s = load(a.opts, a.bind, a.read_only)?;
+    let opts = load_options(a.opts, a.bind, a.read_only)?;
+    let s = config::load(opts.clone())?;
+    let editing = Editing {
+        opts,
+        lock: a.lock_config,
+        allow_remote: a.allow_remote_config,
+    };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    rt.block_on(serve(s, a.token, a.open))?;
+    rt.block_on(serve(s, a.token, a.open, editing))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -115,7 +143,12 @@ fn new_token() -> Result<String, String> {
     Ok(b.iter().map(|x| format!("{:02x}", x)).collect())
 }
 
-async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result<(), String> {
+async fn serve(
+    s: config::Settings,
+    token: Option<String>,
+    open: bool,
+    editing: Editing,
+) -> Result<(), String> {
     let token = match token.filter(|t| !t.is_empty()) {
         Some(t) if t.len() < 16 => return Err("--token must be at least 16 characters".into()),
         Some(t) => t,
@@ -160,6 +193,25 @@ async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result
             available.join(", ")
         }
     );
+    let config_path = config::edit_path(&editing.opts, s.config_path.as_deref());
+    let locked = if s.read_only {
+        Some("indra is running read-only".to_string())
+    } else if editing.lock {
+        Some("indra serve was started with --lock-config".to_string())
+    } else if !loopback && !editing.allow_remote {
+        Some("the console listens beyond this machine; start it with --allow-remote-config to edit settings from a browser".to_string())
+    } else {
+        None
+    };
+    println!(
+        "  settings {}  ({})",
+        config_path.display(),
+        match &locked {
+            None if config_path.is_file() => "editable in the console",
+            None => "created when you first save in the console",
+            Some(_) => "locked",
+        }
+    );
     if !loopback {
         eprintln!("indra: WARNING listening on {} - anyone who can reach it and has the token can run agents on this machine", addr);
     }
@@ -171,7 +223,17 @@ async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result
     if open {
         open_browser(&url);
     }
-    let app = web::App::new(s, token, loopback);
+    let app = web::App::with_config(
+        s,
+        token,
+        loopback,
+        Some(web::ConfigAccess {
+            opts: editing.opts,
+            path: config_path,
+            locked,
+            saving: std::sync::Mutex::new(()),
+        }),
+    );
     let (procs, engine) = (app.procs.clone(), app.engine.clone());
     tokio::select! {
         r = axum::serve(listener, web::router(app)) => r.map_err(|e| e.to_string()),
@@ -490,7 +552,7 @@ pub fn run_workflow(a: RunArgs) -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?;
     rt.block_on(async move {
         let procs = crate::deck::procs::Procs::new(s.data_dir.join("logs"));
-        let engine = workflows::Engine::new(procs.clone(), s.clone());
+        let engine = workflows::Engine::new(procs.clone(), config::Shared::new((*s).clone()));
         let id = engine.start_named(&name)?;
         println!("{} workflow '{}' started", clock(), name);
         let mut seen: std::collections::HashMap<String, (&'static str, u32)> =

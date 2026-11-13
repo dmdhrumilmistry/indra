@@ -16,6 +16,7 @@ pub type Result<T> = std::result::Result<T, String>;
 pub struct ConfigFile {
     pub server: ServerCfg,
     /// Also load the auto-detected built-in profiles (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub builtins: Option<bool>,
     pub harness: Vec<HarnessCfg>,
     pub runner: Vec<RunnerCfg>,
@@ -39,7 +40,7 @@ pub struct LocalCfg {
 #[serde(deny_unknown_fields)]
 pub struct NodeCfg {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// SSH destination: host, user@host, or a Host alias from ~/.ssh/config.
     pub ssh: String,
@@ -52,13 +53,13 @@ pub struct NodeCfg {
     #[serde(default)]
     pub indra: Option<String>,
     /// Extra arguments for remote `indra node ...`, e.g. ["--config", "/etc/indra.toml"].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// Agents allowed to run at once on this node (default 2).
     #[serde(default)]
     pub max_parallel: Option<usize>,
     /// Codebases on the remote, as remote paths.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<String>,
     /// ssh client to run (default "ssh").
     #[serde(default)]
@@ -69,12 +70,12 @@ pub struct NodeCfg {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowCfg {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// Harness whose name is recorded with each task (default: the first).
     #[serde(default)]
     pub harness: Option<String>,
-    #[serde(default, rename = "task")]
+    #[serde(default, rename = "task", skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<TaskCfg>,
 }
 
@@ -92,13 +93,16 @@ pub struct TaskCfg {
     /// `{target}` and `{node}` are filled in.
     pub prompt: String,
     /// Task ids that must succeed first.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     /// Extra attempts after a failure.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub retries: u32,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
 fn local_node() -> String {
     crate::deck::nodes::LOCAL.into()
 }
@@ -117,37 +121,37 @@ pub struct ServerCfg {
 #[serde(deny_unknown_fields)]
 pub struct HarnessCfg {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// Base directory for the globs below (relative to the config file).
     #[serde(default = "dot")]
     pub root: String,
     /// Globs for agent definitions (Markdown with frontmatter).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
     /// Globs for skills (`SKILL.md` files or any Markdown).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     /// Globs for other prompt files: system prompts, references, templates.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompts: Vec<String>,
     /// Memory vaults (`indra mem`) to show as graphs. `{target}` expands per target.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory: Vec<String>,
     /// Codebases whose runs are monitored (relative to the config file).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<String>,
     /// Glob, relative to each target, matching one directory per run.
     #[serde(default)]
     pub runs: Option<String>,
     /// JSONL files inside a run holding findings or results; first that exists wins.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<String>,
     /// Field of a findings record that names the agent or class producing it.
     #[serde(default)]
     pub group_by: Option<String>,
     /// Pipeline stages, in order, for progress and the graph map.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<StageCfg>,
 }
 
@@ -170,18 +174,18 @@ pub struct RunnerCfg {
     /// Program to execute. Run directly, never through a shell.
     pub command: String,
     /// Arguments. `{prompt}` and `{target}` are substituted as whole values.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// `claude-stream-json` (Claude Code `--output-format stream-json`) or `text`.
     #[serde(default)]
     pub format: Option<String>,
     /// Extra arguments that continue an earlier session (`{session}` is its id).
     /// Enables "continue" pivots, e.g. ["--resume", "{session}"] for Claude Code.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resume_args: Vec<String>,
     /// Added after `resume_args` to branch the session instead of continuing it
     /// in place, used when the original agent keeps running.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fork_args: Vec<String>,
 }
 
@@ -266,6 +270,25 @@ pub struct Settings {
     pub local_max_parallel: usize,
     pub nodes: Vec<crate::deck::nodes::Node>,
     pub workflows: Vec<WorkflowCfg>,
+}
+
+/// Settings that the console can replace while it runs (after a config
+/// edit). Readers take a snapshot; work already started keeps its own.
+#[derive(Clone)]
+pub struct Shared(std::sync::Arc<std::sync::RwLock<std::sync::Arc<Settings>>>);
+
+impl Shared {
+    pub fn new(s: Settings) -> Shared {
+        Shared(std::sync::Arc::new(std::sync::RwLock::new(
+            std::sync::Arc::new(s),
+        )))
+    }
+    pub fn get(&self) -> std::sync::Arc<Settings> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    pub fn set(&self, s: Settings) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = std::sync::Arc::new(s);
+    }
 }
 
 impl Settings {
@@ -507,7 +530,7 @@ pub fn claude_code_profile(root: &Path, targets: &[PathBuf]) -> Harness {
     }
 }
 
-fn default_runners() -> Vec<RunnerCfg> {
+pub fn default_runners() -> Vec<RunnerCfg> {
     let r = |name: &str, command: &str, args: &[&str], format: &str| RunnerCfg {
         name: name.into(),
         command: command.into(),
@@ -537,7 +560,7 @@ fn default_runners() -> Vec<RunnerCfg> {
     ]
 }
 
-fn default_presets() -> Vec<PresetCfg> {
+pub fn default_presets() -> Vec<PresetCfg> {
     let p = |name: &str, prompt: &str| PresetCfg {
         name: name.into(),
         prompt: prompt.into(),
@@ -561,6 +584,7 @@ fn default_presets() -> Vec<PresetCfg> {
     ]
 }
 
+#[derive(Debug, Clone)]
 pub struct LoadOptions {
     pub config: Option<PathBuf>,
     pub targets: Vec<PathBuf>,
@@ -589,12 +613,56 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
         }
         None => ConfigFile::default(),
     };
+    build_settings(&opts, path, &file)
+}
+
+/// Names pick things out (on Launch, in workflows), so each must be unique.
+fn unique<'a>(what: &str, names: impl Iterator<Item = &'a str>) -> Result<()> {
+    let mut seen: Vec<&str> = Vec::new();
+    for n in names {
+        if n.trim().is_empty() {
+            return Err(format!("every [[{}]] needs a name", what));
+        }
+        if seen.contains(&n) {
+            return Err(format!("{} name '{}' is used twice", what, n));
+        }
+        seen.push(n);
+    }
+    Ok(())
+}
+
+/// The file the console saves settings to: the one that was loaded, or
+/// `--config`, or the per-user `indra.toml` when there is none yet.
+pub fn edit_path(opts: &LoadOptions, loaded: Option<&Path>) -> PathBuf {
+    if let Some(p) = loaded {
+        return p.to_path_buf();
+    }
+    if let Some(p) = &opts.config {
+        return p.clone();
+    }
+    crate::paths::config_dirs()
+        .into_iter()
+        .next()
+        .map(|d| d.join("indra.toml"))
+        .unwrap_or_else(|| opts.cwd.join("indra.toml"))
+}
+
+/// Resolve a parsed config file into settings: paths, built-in profiles,
+/// runners, nodes and workflows, every one of them checked.
+pub fn build_settings(
+    opts: &LoadOptions,
+    path: Option<PathBuf>,
+    file: &ConfigFile,
+) -> Result<Settings> {
     let base = path
         .as_ref()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| opts.cwd.clone());
     let abs = |p: PathBuf| -> PathBuf { std::fs::canonicalize(&p).unwrap_or(p) };
+    unique("harness", file.harness.iter().map(|h| h.name.as_str()))?;
+    unique("runner", file.runner.iter().map(|r| r.name.as_str()))?;
+    unique("preset", file.preset.iter().map(|p| p.name.as_str()))?;
 
     let cli_targets: Vec<PathBuf> = opts.targets.iter().map(|t| abs(opts.cwd.join(t))).collect();
     let default_targets = if cli_targets.is_empty() {
@@ -752,6 +820,7 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
         workflows,
         bind: opts
             .bind
+            .clone()
             .or(file.server.bind.clone())
             .unwrap_or_else(|| DEFAULT_BIND.into()),
         read_only: opts.read_only || file.server.read_only.unwrap_or(false),

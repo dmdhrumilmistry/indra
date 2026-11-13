@@ -287,6 +287,7 @@ open the browser for you, `--read-only` to turn off launching and editing.
 | **Memory** | The `indra mem` vaults the harness reads and writes, as graphs. |
 | **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
 | **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, and the final cost. Stop ends the whole process tree. |
+| **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. See [Settings](#settings). |
 
 The same picture without a browser:
 
@@ -306,7 +307,8 @@ automatically:
 | `claude-code` | the project or `~/.claude` has agents, skills or commands | `.claude/agents/*.md` | `.claude/skills/*/SKILL.md` | `CLAUDE.md`, `AGENTS.md`, commands | - |
 
 A custom harness is a few lines of TOML, in `indra.toml` (current directory), then
-`~/.config/indra/indra.toml`, or `--config FILE`. `indra init` writes a commented starter.
+`~/.config/indra/indra.toml`, or `--config FILE`. `indra init` writes a commented starter, and
+the console's **Settings** page edits all of it.
 
 ```toml
 [[harness]]
@@ -363,6 +365,41 @@ Stop sends SIGTERM to the runner's process group (Windows: ends the process tree
 after 5 s. Output is kept in memory for the live view and written to `logs/` in the indra data
 directory.
 
+### Settings
+
+Everything the config file holds can be changed from the console, without a restart:
+
+![The Settings page: editing a workflow and its tasks](../../assets/screenshots/settings.png)
+
+| Tab | What you set |
+|---|---|
+| **General** | whether the built-in profiles load, how many agents run at once on this machine, and (for the next start) the listen address and read-only mode |
+| **Runners** | add, edit, duplicate or delete runners; **Customize** a built-in one (`claude`, `codex`, `gemini`) to change its arguments |
+| **Nodes** | remote machines: SSH destination, port, key, capacity, targets |
+| **Workflows** | workflows and their tasks: node, runner, target, prompt, what each runs after, retries |
+| **Presets** | saved prompts for Launch (Launch also has **Save as preset**) |
+| **Harnesses** | custom harnesses, or **Customize** a built-in profile |
+| **File** | the whole `indra.toml` as text, with **Check** before **Save** |
+
+How a save works:
+
+- **Checked first.** The new file is loaded exactly as `indra serve` would load it (names
+  unique, runners contain `{prompt}`, workflows have no cycles, SSH destinations are valid, ...).
+  If it would not load, nothing is written and the page says why.
+- **Applied at once.** Launch, Nodes and Workflows use the new settings straight away. Agents
+  that are running keep going as they were.
+- **Your file stays yours.** A form rewrites only its own section: comments, order and
+  formatting elsewhere in the file are kept, as is the comment above the section. Writes are
+  atomic (a temporary file, then a rename).
+- **No lost edits.** If the file changed on disk after the page loaded it, the save is refused
+  and the page reloads the file.
+- **Where it is saved:** the config file that was loaded, or `--config`, or, if there was none,
+  a new `~/.config/indra/indra.toml` (`%APPDATA%\indra\indra.toml` on Windows). Relative paths
+  in it are relative to that file's folder.
+
+The listen address, read-only mode and `--target` are fixed while the console runs; they are
+shown, and General saves the first two for the next start.
+
 ### Security model
 
 The console can start programs and rewrite prompts, so it is built like a remote shell:
@@ -376,6 +413,10 @@ The console can start programs and rewrite prompts, so it is built like a remote
 - **No CSRF.** State-changing requests must be same-origin (`Origin`, `Sec-Fetch-Site`) and JSON.
 - **No shell.** A runner's program runs directly with an argument vector and the prompt is a
   single argument, so `; rm -rf ~` in a prompt is just text. Runners come only from the config.
+- **Settings are as powerful as a shell, and guarded like one.** Defining a runner means choosing
+  a program to run, so editing settings needs everything above (token, same origin, loopback
+  Host) and is off when indra is `--read-only`, when started with `--lock-config`, and when the
+  console listens beyond this machine unless you also pass `--allow-remote-config`.
 - **Confined files.** Prompts are read and written only if discovery found them; run files
   resolve only inside their run directory (`..`, absolute paths and escaping symlinks refused).
 - **No injected markup.** The UI renders every string with `textContent`, under a strict
