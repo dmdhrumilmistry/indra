@@ -42,6 +42,20 @@ State-changing route handlers (`POST`/`PUT`/`PATCH`/`DELETE`, or `GET` that muta
   note residual risk for top-level GET navigations under Lax.
 - Auth is a header token the browser won't auto-attach cross-site (Bearer), not a cookie.
 - Endpoint requires a custom header (forces CORS preflight) and CORS is not permissive.
+- Server rejects non-safe methods when `Sec-Fetch-Site: cross-site`, with a strict full-origin
+  `Origin`/`Referer` fallback (`example.org` must not match `example.org.attacker.com`; `Origin: null` and
+  missing headers are not proof of same-origin).
+
+## Residual-risk checks (do not dismiss on SameSite alone)
+- `SameSite` scope is the registrable domain: sibling subdomains are same-site, so XSS or a subdomain
+  takeover on any sibling bypasses it.
+- Browsers that default to `Lax` (Chromium) may still send cookies on cross-site top-level POSTs for about
+  two minutes after the cookie is set; Firefox/Safari do not default to `Lax`.
+- Login CSRF: login forms without a pre-session token let an attacker sign the victim into the attacker's
+  account (victim data then lands there).
+- Client-side CSRF: same-origin JS builds a request from attacker-controlled input (URL hash/query), so
+  tokens and SameSite do not help. Look for `fetch`/`XMLHttpRequest` URLs or bodies derived from `location`.
+- CSRF tokens in URLs leak via history, logs, and Referer.
 
 ## CWE / OWASP / severity
 CWE-352. OWASP A01:2021. Severity by action impact: account/email/password change or money transfer ->
