@@ -172,11 +172,21 @@ fn workflow_orders_retries_skips_and_never_shells_the_prompt() {
         !Path::new(&pwned).exists(),
         "the prompt must never reach a shell"
     );
-    let logs = fs::read_dir(e.dir.join("data/indra/logs"))
-        .unwrap()
-        .map(|f| fs::read_to_string(f.unwrap().path()).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The run's summary names each task's log; the data directory differs by
+    // OS (XDG on Linux, ~/Library/Application Support on macOS).
+    let log_of = |id: &str| -> String {
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .unwrap_or_else(|| panic!("no summary line for {}:\n{}", id, text));
+        let path = line
+            .split_whitespace()
+            .nth(3)
+            .unwrap_or_else(|| panic!("no log path for {}: {}", id, line));
+        fs::read_to_string(path).unwrap_or_else(|err| panic!("cannot read {}: {}", path, err))
+    };
+    let logs = format!("{}\n{}", log_of("api"), log_of("web"));
     assert!(
         logs.contains(&format!(
             "remote says: review {} on box; $(touch {})",
