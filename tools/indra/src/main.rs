@@ -55,6 +55,8 @@ enum Cmd {
     Run(deck::cli::RunArgs),
     /// The remote side of a node; the hub runs `indra node ...` over SSH
     Node(deck::cli::NodeArgs),
+    /// Secrets for agents' profiles: set (value from stdin), list, rm
+    Secret(deck::cli::SecretArgs),
 }
 
 fn main() -> ExitCode {
@@ -68,6 +70,7 @@ fn main() -> ExitCode {
         Cmd::Nodes(a) => deck::cli::run_nodes(a),
         Cmd::Run(a) => deck::cli::run_workflow(a),
         Cmd::Node(a) => deck::cli::run_node(a),
+        Cmd::Secret(a) => deck::cli::run_secret(a),
     };
     match res {
         Ok(code) => code,

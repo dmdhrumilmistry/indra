@@ -32,7 +32,7 @@ workflows. Each part says what exists now and what comes next.
   takes a prompt). **Profile**: a runner plus model, permission mode, effort, tool rules and
   environment, under one name.
 
-## Agent control
+## Agent control (built)
 
 An agent started through a `claude-stream-json` runner is driven over Claude Code's control
 channel (`--input-format stream-json`, the same channel the Agent SDK uses), so while it runs the
@@ -51,7 +51,7 @@ so the agent exits as before. Remote agents get the same controls: the hub forwa
 messages to the node, which writes them to the agent. Runners that are not Claude Code keep the
 simpler model (launch, watch, stop, pivot).
 
-## Profiles and model routing
+## Profiles and model routing (built)
 
 A profile is the unit of delegation: "plan with a strong model, do the work with the model I
 choose, try small jobs on a local model".
@@ -81,12 +81,13 @@ Launch, presets, workflow tasks and board items name a profile; the model and mo
 overridden per launch and changed live. Ollama serves the Anthropic Messages API (v0.14 and
 later), so Claude Code runs unchanged on a local model.
 
-## Secrets
+## Secrets (built)
 
 Agents need tokens (tracker APIs, cloud credentials, model keys). The rules:
 
-1. **One store, encrypted at rest.** Secrets live in the hub's data directory, encrypted with a
-   key held by the OS keychain (or a key file with `0600` permissions where there is none).
+1. **One store, encrypted at rest.** Secrets live in the hub's data directory, encrypted
+   (XChaCha20-Poly1305) with a key from `INDRA_SECRETS_KEY` or a key file with `0600`
+   permissions. An OS keychain backend is a possible later addition.
    `indra.toml` never holds a secret value, only a reference: `env = { JIRA_TOKEN = "secret:jira" }`.
 2. **Write-only from the console.** The Secrets page can set, rotate and delete a secret and
    shows its name, scope and last use, never its value.
@@ -164,8 +165,8 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 
 ## Order of work
 
-1. Agent control and profiles (including Ollama), and this document.
-2. Secrets.
+1. Agent control and profiles (including Ollama), and this document. Done.
+2. Secrets. Done.
 3. Board and tracker connectors.
 4. Graph workflow editor with components.
 5. WebRTC transport with reconnection, SSH kept as the fallback.

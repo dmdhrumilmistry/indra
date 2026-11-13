@@ -841,6 +841,12 @@ pub fn build_settings(
             crate::deck::nodes::validate_name(r)
                 .map_err(|e| format!("profile '{}': {}", p.name, e))?;
         }
+        for (k, v) in &p.env {
+            if let Some(name) = crate::deck::secrets::reference(v) {
+                crate::deck::secrets::validate_name(name)
+                    .map_err(|e| format!("profile '{}' env {}: {}", p.name, k, e))?;
+            }
+        }
     }
     let known = |p: &Option<String>, what: &str| -> Result<()> {
         match p {

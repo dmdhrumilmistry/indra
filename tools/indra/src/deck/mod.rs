@@ -8,5 +8,6 @@ pub mod discover;
 pub mod nodes;
 pub mod procs;
 pub mod runs;
+pub mod secrets;
 pub mod web;
 pub mod workflows;

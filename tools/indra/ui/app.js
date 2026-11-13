@@ -1002,7 +1002,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"],
-    ["presets", "Presets"], ["harnesses", "Harnesses"], ["file", "File"]];
+    ["presets", "Presets"], ["harnesses", "Harnesses"], ["secrets", "Secrets"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -1032,7 +1032,7 @@
       { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
-      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 to use a local model through Ollama." }]; },
+      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." }]; },
       summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : ""); } },
     runner: { tab: "runners", noun: "runner", fields: function () { return [
       { k: "name", label: "Name", req: true, help: "How you pick it on Launch and in workflows. A built-in name (claude, codex, gemini) replaces the built-in." },
@@ -1211,7 +1211,7 @@
       }
       ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, secrets: secrets, file: file })[tab]();
     }
 
     function general() {
@@ -1280,6 +1280,62 @@
       });
       if (!grid.childNodes.length) grid.appendChild(h("div", { class: "card" }, h("p", { class: "muted", text: "No " + d.noun + "s yet." })));
       body.appendChild(grid);
+    }
+
+    // Secrets live in an encrypted store, not in indra.toml: this tab talks to /api/secrets.
+    function secrets() {
+      var box = h("div", { class: "muted", text: "Loading secrets..." });
+      body.appendChild(h("p", { class: "muted", text: "Tokens and keys for agents, encrypted on this machine and never shown again once saved. A profile uses one through its environment, as KEY=secret:<name>; the agent gets the value when it starts, only if the secret's scope allows that profile and node, and its output shows [secret:<name>] instead." }));
+      body.appendChild(box);
+      function form(sec) {
+        var isNew = !sec;
+        sec = sec || { profiles: [], nodes: [] };
+        var name = h("input", { type: "text", placeholder: "jira", value: sec.name || "", required: isNew });
+        if (!isNew) name.readOnly = true;
+        var value = h("input", { type: "password", autocomplete: "new-password", placeholder: isNew ? "the value" : "leave empty to keep the current value" });
+        var desc = h("input", { type: "text", value: sec.description || "" });
+        var profs = h("textarea", { class: "list", rows: "2", placeholder: "any profile" }); profs.value = (sec.profiles || []).join("\n");
+        var nodesF = h("textarea", { class: "list", rows: "2", placeholder: "any node" }); nodesF.value = (sec.nodes || []).join("\n");
+        var err = h("div", { class: "note bad", hidden: true, role: "alert" });
+        var lines = function (t) { return t.value.split("\n").map(function (x) { return x.trim(); }).filter(Boolean); };
+        var f = h("form", { class: "form card cfgform", onsubmit: function (e) {
+          e.preventDefault();
+          var body2 = { description: desc.value, profiles: lines(profs), nodes: lines(nodesF) };
+          if (value.value) body2.value = value.value;
+          api("/api/secrets/" + encodeURIComponent(name.value.trim()), { method: "PUT", body: body2 })
+            .then(function () { value.value = ""; toast("Saved secret " + name.value.trim()); render(); })
+            .catch(function (ex) { err.textContent = ex.message; err.hidden = false; });
+        } }, h("h2", { text: isNew ? "New secret" : "Secret " + sec.name }),
+          h("label", null, "Name", h("small", { text: "Referenced as secret:<name>." }), name),
+          h("label", null, "Value", h("small", { text: "Write-only: it is encrypted and never shown again." }), value),
+          h("label", null, "Description", desc),
+          h("label", null, "Only these profiles", h("small", { text: "One per line; empty means any profile." }), profs),
+          h("label", null, "Only these nodes", h("small", { text: "One per line (local is this machine); empty means any node." }), nodesF),
+          err, h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Save"), h("button", { type: "button", onclick: render }, "Cancel")));
+        body.textContent = ""; body.appendChild(f); name.focus();
+      }
+      api("/api/secrets").then(function (r) {
+        box.textContent = ""; box.className = "";
+        if (!r.editable) box.appendChild(h("div", { class: "note warn", text: "Secrets are read-only here: " + r.locked + "." }));
+        box.appendChild(h("div", { class: "row cfgbar" }, h("button", { class: "primary", type: "button", disabled: !r.editable, onclick: function () { form(null); } }, "Add secret")));
+        var grid = h("div", { class: "grid" });
+        r.secrets.forEach(function (sec) {
+          var scope = (sec.profiles.length ? "profiles " + sec.profiles.join(", ") : "any profile") + "; " + (sec.nodes.length ? "nodes " + sec.nodes.join(", ") : "any node");
+          grid.appendChild(h("div", { class: "card cfgitem" },
+            h("div", { class: "row" }, h("h4", { text: sec.name }), h("span", { class: "pill", text: "secret:" + sec.name })),
+            sec.description ? h("p", { class: "muted", text: sec.description }) : null,
+            h("p", { class: "muted small", text: scope }),
+            h("p", { class: "muted small", text: "Used " + sec.uses + " times" + (sec.last_used ? ", last " + ago(sec.last_used) : "") + ". Updated " + ago(sec.updated) + "." }),
+            h("div", { class: "row" },
+              h("button", { type: "button", disabled: !r.editable, onclick: function () { form(sec); } }, "Change value or scope"),
+              h("button", { type: "button", class: "danger", disabled: !r.editable, onclick: function () {
+                if (!window.confirm("Delete secret " + sec.name + "? Profiles that use it will fail to launch.")) return;
+                api("/api/secrets/" + encodeURIComponent(sec.name), { method: "DELETE" }).then(function () { toast("Deleted " + sec.name); render(); }).catch(function (e) { toast(e.message, true); });
+              } }, "Delete"))));
+        });
+        if (!r.secrets.length) grid.appendChild(h("div", { class: "card" }, h("p", { class: "muted", text: "No secrets yet." })));
+        box.appendChild(grid);
+      }).catch(function (e) { box.textContent = e.message; });
     }
 
     function file() {

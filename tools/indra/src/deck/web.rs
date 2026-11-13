@@ -568,6 +568,7 @@ async fn proc_start(
     let (runner_name, agent) = resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
     let start = StartOpts {
         agent,
+        profile: r.profile.clone().filter(|p| !p.is_empty()),
         ..StartOpts::default()
     };
     let id = if node == LOCAL {
@@ -761,6 +762,7 @@ async fn proc_pivot(
         parent: Some(id),
         // The same model, mode and environment as the agent it continues.
         agent: p.opts().clone(),
+        profile: p.profile().map(String::from),
     };
     let harness = p.harness_name().to_string();
     let new = if p.node_name() == LOCAL {
@@ -1072,6 +1074,52 @@ async fn proc_message(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- secrets ---------------------------------------------------------------------
+
+/// Why secrets cannot be changed here, if they cannot: the same rules as
+/// settings (read-only, --lock-config, a non-loopback bind).
+fn secrets_locked(app: &App) -> Option<String> {
+    if app.settings().read_only {
+        return Some("indra is running read-only".into());
+    }
+    app.config.as_ref().and_then(|c| c.locked.clone())
+}
+
+/// Names, descriptions, scopes and use; never values.
+async fn secrets_list(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
+    let list = app.procs.vault().list().map_err(internal)?;
+    let locked = secrets_locked(&app);
+    Ok(Json(
+        json!({ "editable": locked.is_none(), "locked": locked, "secrets": list }),
+    ))
+}
+
+/// Create a secret, or change its value, description or scope (write-only).
+async fn secret_put(
+    State(app): State<Arc<App>>,
+    UrlPath(name): UrlPath<String>,
+    Json(c): Json<crate::deck::secrets::Change>,
+) -> ApiResult<Json<Value>> {
+    if let Some(why) = secrets_locked(&app) {
+        return Err(forbidden(why));
+    }
+    app.procs.vault().set(&name, c).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn secret_delete(
+    State(app): State<Arc<App>>,
+    UrlPath(name): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    if let Some(why) = secrets_locked(&app) {
+        return Err(forbidden(why));
+    }
+    if !app.procs.vault().remove(&name).map_err(bad)? {
+        return Err(not_found("no such secret"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---- settings (the config file) ------------------------------------------------
 
 fn config_access(app: &App) -> ApiResult<&ConfigAccess> {
@@ -1234,6 +1282,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/check", post(config_check))
+        .route("/api/secrets", get(secrets_list))
+        .route(
+            "/api/secrets/{name}",
+            axum::routing::put(secret_put).delete(secret_delete),
+        )
         .route("/api/defs", get(defs))
         .route("/api/def", get(def_get).put(def_put))
         .route("/api/graph", get(graph))
@@ -2205,6 +2258,140 @@ while True:
         )
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Secrets: set write-only, delivered to the agent that may have them,
+    /// redacted from everything it prints, refused outside their scope.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn secrets_reach_only_their_agents_and_never_show() {
+        let (base, dir) = fixture("secrets", false);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "env".into(),
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo \"token=$INDRA_TOK\"".into(),
+                "{prompt}".into(),
+            ],
+            format: "text".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: crate::deck::config::which("sh"),
+        });
+        let prof = |name: &str| config::ProfileCfg {
+            name: name.into(),
+            runner: Some("env".into()),
+            env: [("INDRA_TOK".to_string(), "secret:tok".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        settings.profiles.push(prof("deploy"));
+        settings.profiles.push(prof("other"));
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        const VALUE: &str = "sk-live-0123456789";
+
+        let launch = |profile: &'static str| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/api/procs",
+                    &[AUTH, origin],
+                    Some(json!({ "profile": profile, "prompt": "x", "target": 0 })),
+                )
+                .await
+            }
+        };
+        // Not set yet: refused before anything starts.
+        let (s, _, body) = launch("deploy").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("secret 'tok'") && body.contains("is not set"),
+            "{}",
+            body
+        );
+
+        let (s, _, body) = call(
+            &app,
+            "PUT",
+            "/api/secrets/tok",
+            &[AUTH, origin],
+            Some(json!({ "value": VALUE, "description": "deploy token", "profiles": ["deploy"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let (_, _, body) = call(&app, "GET", "/api/secrets", &[AUTH], None).await;
+        assert!(
+            body.contains("deploy token") && !body.contains(VALUE),
+            "never listed: {}",
+            body
+        );
+
+        // The allowed profile gets it; its output shows only the name.
+        let (s, _, body) = launch("deploy").await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let v = wait_done(&app, id).await;
+        assert_eq!(v["status"], "exited", "{}", v);
+        let (_, _, view) = call(&app, "GET", &format!("/api/procs/{}", id), &[AUTH], None).await;
+        assert!(!view.contains(VALUE), "{}", view);
+        assert!(
+            view.contains("secret:tok"),
+            "the process shows the reference: {}",
+            view
+        );
+        let (events, _) = app.procs.get(id).unwrap().subscribe(0);
+        let feed: Vec<&str> = events.iter().map(|e| e.text.as_str()).collect();
+        assert!(feed.contains(&"token=[secret:tok]"), "{:?}", feed);
+        let log = std::fs::read_to_string(v["log"].as_str().unwrap()).unwrap();
+        assert!(
+            log.contains("token=[secret:tok]") && !log.contains(VALUE),
+            "{}",
+            log
+        );
+        let (_, _, body) = call(&app, "GET", "/api/secrets", &[AUTH], None).await;
+        assert!(body.contains("\"uses\":1"), "{}", body);
+
+        // Another profile may not have it.
+        let (s, _, body) = launch("other").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(body.contains("may only be used by"), "{}", body);
+
+        let (s, _, _) = call(&app, "DELETE", "/api/secrets/tok", &[AUTH, origin], None).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _, _) = call(
+            &app,
+            "PUT",
+            "/api/secrets/..%2Fx",
+            &[AUTH, origin],
+            Some(json!({ "value": "v" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (ro, ro_dir) = fixture("secrets-ro", true);
+        let (s, _, _) = call(
+            &ro,
+            "PUT",
+            "/api/secrets/tok",
+            &[AUTH, origin],
+            Some(json!({ "value": "v" })),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "read-only consoles cannot change secrets"
+        );
+        let _ = std::fs::remove_dir_all(ro_dir);
         let _ = std::fs::remove_dir_all(dir);
     }
 
