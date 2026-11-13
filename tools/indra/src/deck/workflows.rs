@@ -386,6 +386,9 @@ pub fn fan_out(runner: &str, prompt: &str, targets: &[(String, String)]) -> Work
                 needs: Vec::new(),
                 retries: 0,
                 profile: None,
+                component: None,
+                workflow: None,
+                pos: None,
             }
         })
         .collect();
@@ -412,6 +415,9 @@ mod tests {
             needs: needs.iter().map(|s| s.to_string()).collect(),
             retries: 0,
             profile: None,
+            component: None,
+            workflow: None,
+            pos: None,
         }
     }
 

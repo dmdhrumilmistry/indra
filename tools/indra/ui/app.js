@@ -682,7 +682,8 @@
 
   function pageWorkflows(m) {
     var ov = S.ov, hs = harness();
-    m.appendChild(header("Workflows", "Multi-step agent work across nodes: tasks run in dependency order, within each node's capacity, with retries. Run them here or with `indra run <name>`."));
+    m.appendChild(header("Workflows", "Multi-step agent work across nodes: tasks run in dependency order, within each node's capacity, with retries. Run them here or with `indra run <name>`.",
+      [canEdit() ? h("a", { class: "btn", href: "#/wfedit/", text: "New workflow" }) : null]));
     var runsBox = h("div"), defsBox = h("div", { class: "grid" });
     m.appendChild(h("h2", { text: "Runs" })); m.appendChild(runsBox);
     m.appendChild(h("h2", { text: "Configured workflows" })); m.appendChild(defsBox);
@@ -703,7 +704,7 @@
         defsBox.textContent = "";
         if (!w.defs.length) defsBox.appendChild(h("div", { class: "card" }, h("h4", { text: "No workflows configured" }),
           h("p", { class: "muted", text: "Chain agent tasks across machines, in dependency order. Or use a fan-out below." }),
-          canEdit() ? h("a", { class: "btn", href: "#/settings/workflows", text: "Create a workflow" }) : null));
+          canEdit() ? h("a", { class: "btn", href: "#/wfedit/", text: "Create a workflow" }) : null));
         w.defs.forEach(function (d) {
           defsBox.appendChild(h("div", { class: "card" },
             h("div", { class: "row" }, h("h4", { text: d.name }), h("span", { class: "pill", text: d.task.length + " tasks" })),
@@ -715,7 +716,7 @@
               e.target.disabled = true;
               api("/api/workflows", { method: "POST", body: { name: d.name } }).then(function (r) { location.hash = "#/workflow/" + r.id; })
                 .catch(function (err) { toast(err.message, true); e.target.disabled = false; });
-            } }, "Run"), canEdit() ? h("a", { href: "#/settings/workflows", text: "Edit" }) : null)));
+            } }, "Run"), canEdit() ? h("a", { href: "#/wfedit/" + encodeURIComponent(d.name), text: "Edit graph" }) : null)));
         });
       }).catch(function (e) { runsBox.textContent = e.message; });
     }
@@ -1099,11 +1100,263 @@
     load(); every(3000, function () { if (!document.querySelector(".lane.over")) load(); });
   }
 
+  // ---- workflow editor: a graph of tasks, dragged and connected -------------------
+  // Tasks are boxes; an arrow from A to B means B runs after A (B.needs has A).
+  // The palette adds blank tasks, components (reusable tasks) and other
+  // workflows (run as one step). Saving writes ordinary [[workflow]] TOML,
+  // positions included, so `indra run` and the text editor keep working.
+  function pageWorkflowEditor(m, name) {
+    var c = null, wf = null, original = name || null, sel = null, selEdge = null, dirty = false;
+    var palette = h("div", { class: "palette", "aria-label": "Add to the workflow" });
+    var scroller = h("div", { class: "canvas-scroll" });
+    var canvas = h("div", { class: "canvas", role: "application", "aria-label": "Workflow graph" });
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("class", "edges");
+    canvas.appendChild(svg); scroller.appendChild(canvas);
+    var inspector = h("div", { class: "inspector card" });
+    var status = h("span", { class: "muted small" });
+    var save = h("button", { class: "primary", type: "button" }, "Save");
+    var layoutBtn = h("button", { type: "button" }, "Tidy layout");
+    m.appendChild(header(original ? "Edit workflow " + original : "New workflow", "Drag tasks, components and workflows in from the left. Drag from a task's right edge to another task to make the second run after the first. Select an arrow and press Delete to remove it.", [status, layoutBtn, save]));
+    m.appendChild(h("div", { class: "wfedit" }, palette, scroller, inspector));
+
+    function changed() { dirty = true; status.textContent = "Unsaved changes"; }
+    function task(id) { return wf.task.find(function (t) { return t.id === id; }); }
+    function uniqueId(base) { var i = 1, id = base; while (task(id)) { i++; id = base + "-" + i; } return id; }
+    function depth() {
+      var memo = {};
+      function d(id, seen) { if (memo[id] != null) return memo[id]; var t = task(id); if (!t || seen[id]) return 0; seen[id] = 1;
+        memo[id] = (t.needs || []).length ? 1 + Math.max.apply(null, t.needs.map(function (n) { return d(n, seen); })) : 0; return memo[id]; }
+      wf.task.forEach(function (t) { d(t.id, {}); });
+      return memo;
+    }
+    function tidy(all) {
+      var dp = depth(), rows = {};
+      wf.task.forEach(function (t) {
+        if (!all && t.pos) return;
+        var col = dp[t.id] || 0; rows[col] = (rows[col] || 0) + 1;
+        t.pos = [40 + col * 280, 30 + (rows[col] - 1) * 130];
+      });
+    }
+    function reaches(from, to) { // does `to` (transitively) need `from`? then from->to... used to stop cycles
+      var seen = {}, stack = [to];
+      while (stack.length) { var id = stack.pop(); if (id === from) return true; if (seen[id]) continue; seen[id] = 1; var t = task(id); if (t) stack = stack.concat(t.needs || []); }
+      return false;
+    }
+    function kind(t) { return t.workflow ? "workflow " + t.workflow : t.component ? "component " + t.component : "task"; }
+
+    function draw() {
+      Array.prototype.slice.call(canvas.querySelectorAll(".gnode")).forEach(function (n) { n.remove(); });
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      var maxX = 900, maxY = 500;
+      wf.task.forEach(function (t) {
+        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (t.workflow ? " sub" : t.component ? " comp" : ""), tabindex: "0", "data-id": t.id },
+          h("span", { class: "port in", title: "runs after" }),
+          h("b", { text: t.id }), h("small", { text: kind(t) }),
+          h("small", { class: "muted", text: [t.node || "local", t.profile || t.runner || ""].filter(Boolean).join(" - ") }),
+          h("span", { class: "port out", title: "drag to the task that runs after this one" }));
+        n.style.left = t.pos[0] + "px"; n.style.top = t.pos[1] + "px";
+        canvas.appendChild(n);
+        maxX = Math.max(maxX, t.pos[0] + 400); maxY = Math.max(maxY, t.pos[1] + 260);
+        n.addEventListener("pointerdown", function (e) {
+          if (e.target.classList.contains("out")) return connect(e, t);
+          select(t.id); e.preventDefault();
+          var sx = e.clientX, sy = e.clientY, ox = t.pos[0], oy = t.pos[1];
+          try { n.setPointerCapture(e.pointerId); } catch (x) { /* a synthetic or ended pointer */ }
+          function mv(ev) { t.pos = [Math.max(0, Math.round(ox + ev.clientX - sx)), Math.max(0, Math.round(oy + ev.clientY - sy))]; n.style.left = t.pos[0] + "px"; n.style.top = t.pos[1] + "px"; edges(); }
+          function up() { n.removeEventListener("pointermove", mv); n.removeEventListener("pointerup", up); if (t.pos[0] !== ox || t.pos[1] !== oy) changed(); }
+          n.addEventListener("pointermove", mv); n.addEventListener("pointerup", up);
+        });
+        n.addEventListener("keydown", function (e) { if (e.key === "Delete" || e.key === "Backspace") { removeTask(t.id); e.preventDefault(); } });
+      });
+      canvas.style.width = maxX + "px"; canvas.style.height = maxY + "px";
+      svg.setAttribute("width", maxX); svg.setAttribute("height", maxY);
+      edges();
+    }
+    function center(id, side) {
+      var n = canvas.querySelector('.gnode[data-id="' + CSS.escape(id) + '"]'); if (!n) return null;
+      return { x: n.offsetLeft + (side === "out" ? n.offsetWidth : 0), y: n.offsetTop + n.offsetHeight / 2 };
+    }
+    function path(a, b) { var dx = Math.max(40, Math.abs(b.x - a.x) / 2); return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " " + (b.x - dx) + "," + b.y + " " + b.x + "," + b.y; }
+    function edges() {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      wf.task.forEach(function (t) {
+        (t.needs || []).forEach(function (from) {
+          var a = center(from, "out"), b = center(t.id, "in"); if (!a || !b) return;
+          var on = selEdge && selEdge[0] === from && selEdge[1] === t.id;
+          var hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          hit.setAttribute("d", path(a, b)); hit.setAttribute("class", "hit");
+          hit.addEventListener("pointerdown", function (e) { e.stopPropagation(); selEdge = [from, t.id]; sel = null; inspect(); edges(); });
+          var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          p.setAttribute("d", path(a, b)); p.setAttribute("class", "edge" + (on ? " on" : ""));
+          svg.appendChild(p); svg.appendChild(hit);
+        });
+      });
+    }
+    function connect(e, from) {
+      e.preventDefault(); e.stopPropagation();
+      var line = document.createElementNS("http://www.w3.org/2000/svg", "path"); line.setAttribute("class", "edge draft"); svg.appendChild(line);
+      var a = center(from.id, "out"), box = canvas.getBoundingClientRect();
+      function mv(ev) { line.setAttribute("d", path(a, { x: ev.clientX - box.left, y: ev.clientY - box.top })); }
+      function up(ev) {
+        document.removeEventListener("pointermove", mv); document.removeEventListener("pointerup", up); line.remove();
+        var el = document.elementFromPoint(ev.clientX, ev.clientY), n = el && el.closest(".gnode");
+        if (!n) return;
+        var to = task(n.getAttribute("data-id"));
+        if (!to || to.id === from.id) return;
+        if ((to.needs || []).indexOf(from.id) >= 0) return;
+        if (reaches(to.id, from.id)) { toast("That would make a loop: " + from.id + " already runs after " + to.id, true); return; }
+        to.needs = (to.needs || []).concat([from.id]); changed(); draw(); select(to.id);
+      }
+      document.addEventListener("pointermove", mv); document.addEventListener("pointerup", up);
+    }
+    function removeTask(id) {
+      wf.task = wf.task.filter(function (t) { return t.id !== id; });
+      wf.task.forEach(function (t) { t.needs = (t.needs || []).filter(function (n) { return n !== id; }); });
+      sel = null; changed(); draw(); inspect();
+    }
+    function select(id) { sel = id; selEdge = null; Array.prototype.forEach.call(canvas.querySelectorAll(".gnode"), function (n) { n.classList.toggle("sel", n.getAttribute("data-id") === id); }); edges(); inspect(); }
+    document.addEventListener("keydown", function onKey(e) {
+      if (!document.body.contains(canvas)) { document.removeEventListener("keydown", onKey); return; }
+      if (selEdge && (e.key === "Delete" || e.key === "Backspace") && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+        var t = task(selEdge[1]); if (t) t.needs = t.needs.filter(function (n) { return n !== selEdge[0]; });
+        selEdge = null; changed(); draw(); inspect(); e.preventDefault();
+      }
+    });
+    scroller.addEventListener("pointerdown", function (e) { if (e.target === canvas || e.target === svg || e.target === scroller) { sel = null; selEdge = null; draw(); inspect(); } });
+
+    function field(label, el, help) { return h("label", null, label, help ? h("small", { text: help }) : null, el); }
+    function inspect() {
+      inspector.textContent = "";
+      if (selEdge) {
+        inspector.appendChild(h("h3", { text: "Link" }));
+        inspector.appendChild(h("p", { text: selEdge[1] + " runs after " + selEdge[0] + "." }));
+        inspector.appendChild(h("button", { type: "button", class: "danger", onclick: function () {
+          var t = task(selEdge[1]); t.needs = t.needs.filter(function (n) { return n !== selEdge[0]; }); selEdge = null; changed(); draw(); inspect();
+        } }, "Remove link"));
+        return;
+      }
+      var t = sel && task(sel);
+      if (!t) {
+        var nm = h("input", { type: "text", value: wf.name, required: true }), ds = h("input", { type: "text", value: wf.description || "" });
+        nm.addEventListener("input", function () { wf.name = nm.value.trim(); changed(); });
+        ds.addEventListener("input", function () { wf.description = ds.value; changed(); });
+        inspector.appendChild(h("div", { class: "form" }, h("h3", { text: "Workflow" }), field("Name", nm, "Run it with `indra run <name>` or from the Workflows page."), field("Description", ds),
+          h("p", { class: "muted small", text: wf.task.length + " steps. Select a step to edit it." })));
+        return;
+      }
+      var f = h("div", { class: "form" });
+      var idIn = h("input", { type: "text", value: t.id });
+      idIn.addEventListener("change", function () {
+        var v = idIn.value.trim();
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(v) || (v !== t.id && task(v))) { toast("Ids are unique: letters, digits, - and _", true); idIn.value = t.id; return; }
+        wf.task.forEach(function (x) { x.needs = (x.needs || []).map(function (n) { return n === t.id ? v : n; }); });
+        t.id = v; sel = v; changed(); draw();
+      });
+      f.appendChild(h("h3", { text: t.workflow ? "Sub-workflow step" : "Task" }));
+      f.appendChild(field("Id", idIn));
+      function sel_(k, options, blank, help) {
+        var s = h("select", null, (blank != null ? [h("option", { value: "", text: blank })] : []).concat(options.map(function (o) { return h("option", { value: o, text: o }); })));
+        s.value = t[k] || ""; s.addEventListener("change", function () { if (s.value) t[k] = s.value; else delete t[k]; changed(); draw(); select(t.id); });
+        return s;
+      }
+      function text(k, area, ph) {
+        var el = area ? h("textarea", { placeholder: ph || "" }) : h("input", { type: "text", placeholder: ph || "" });
+        el.value = t[k] == null ? "" : String(t[k]);
+        el.addEventListener("input", function () { if (el.value.trim()) t[k] = k === "retries" ? Number(el.value) || 0 : el.value; else delete t[k]; changed(); });
+        el.addEventListener("change", draw);
+        return el;
+      }
+      if (t.workflow) {
+        f.appendChild(field("Runs workflow", sel_("workflow", (c.config.workflow || []).map(function (w) { return w.name; }).filter(function (n) { return n !== wf.name; }), null),
+          "Its tasks run as this one step: they start after this step's links, and what runs after this step waits for them all."));
+      } else {
+        var comp = c.config.component || [], cc = t.component && comp.find(function (x) { return x.name === t.component; });
+        f.appendChild(field("Component", sel_("component", comp.map(function (x) { return x.name; }), "None"), "Fields left empty come from the component."));
+        f.appendChild(field("Node", sel_("node", cfgNodeNames(c), cc && cc.node ? "component: " + cc.node : "local")));
+        f.appendChild(field("Profile", sel_("profile", cfgProfileNames(c), cc && cc.profile ? "component: " + cc.profile : "None")));
+        f.appendChild(field("Runner", sel_("runner", cfgRunnerNames(c), cc && cc.runner ? "component: " + cc.runner : "claude (or the profile's)")));
+        f.appendChild(field("Target", text("target", false, cc && cc.target ? cc.target : "a directory on that node")));
+        f.appendChild(field("Prompt", text("prompt", true, cc && cc.prompt ? cc.prompt : "What should the agent do? {target} and {node} are filled in.")));
+        f.appendChild(field("Retries", text("retries", false, cc && cc.retries ? String(cc.retries) : "0")));
+      }
+      f.appendChild(h("p", { class: "muted small", text: (t.needs || []).length ? "Runs after: " + t.needs.join(", ") : "Runs first (nothing before it)." }));
+      f.appendChild(h("div", { class: "row" },
+        !t.workflow && canEdit() ? h("button", { type: "button", onclick: function () {
+          var n = window.prompt("Save this task as a reusable component named:", t.id); if (!n) return;
+          var comp = { name: n.trim() }; ["prompt", "profile", "runner", "node", "target"].forEach(function (k) { if (t[k]) comp[k] = t[k]; }); if (t.retries) comp.retries = t.retries;
+          addToSection("component", comp).then(function (r) { c = r; toast("Saved component " + comp.name); renderPalette(); }).catch(function (e) { toast(e.message, true); });
+        } }, "Save as component") : null,
+        h("button", { type: "button", class: "danger", onclick: function () { removeTask(t.id); } }, "Remove step")));
+      inspector.appendChild(f);
+    }
+
+    function add(spec, x, y) {
+      var t = { id: uniqueId(spec.workflow || spec.component || "task"), pos: [Math.round(x), Math.round(y)] };
+      if (spec.workflow) t.workflow = spec.workflow;
+      if (spec.component) t.component = spec.component;
+      wf.task.push(t); changed(); draw(); select(t.id);
+    }
+    function renderPalette() {
+      palette.textContent = "";
+      function item(label, sub, spec) {
+        var el = h("div", { class: "pitem", draggable: "true", tabindex: "0", role: "button", title: "Drag onto the canvas, or press Enter to add" }, h("b", { text: label }), sub ? h("small", { class: "muted", text: sub }) : null);
+        el.addEventListener("dragstart", function (e) { e.dataTransfer.setData("application/x-indra", JSON.stringify(spec)); });
+        el.addEventListener("keydown", function (e) { if (e.key === "Enter") add(spec, 40 + scroller.scrollLeft, 30 + scroller.scrollTop); });
+        el.addEventListener("dblclick", function () { add(spec, 40 + scroller.scrollLeft, 30 + scroller.scrollTop); });
+        return el;
+      }
+      palette.appendChild(h("h3", { text: "Add" }));
+      palette.appendChild(item("Task", "an agent with a prompt", {}));
+      var comps = c.config.component || [];
+      palette.appendChild(h("h3", { text: "Components" }));
+      if (!comps.length) palette.appendChild(h("p", { class: "muted small", text: "None yet. Select a task and press Save as component to reuse it." }));
+      comps.forEach(function (x) { palette.appendChild(item(x.name, x.description || x.prompt, { component: x.name })); });
+      var others = (c.config.workflow || []).filter(function (w) { return w.name !== original; });
+      palette.appendChild(h("h3", { text: "Workflows" }));
+      if (!others.length) palette.appendChild(h("p", { class: "muted small", text: "Other workflows appear here, to run as one step." }));
+      others.forEach(function (w) { palette.appendChild(item(w.name, (w.task || []).length + " steps", { workflow: w.name })); });
+    }
+    scroller.addEventListener("dragover", function (e) { e.preventDefault(); });
+    scroller.addEventListener("drop", function (e) {
+      var d = e.dataTransfer.getData("application/x-indra"); if (!d) return;
+      e.preventDefault(); var box = canvas.getBoundingClientRect();
+      add(JSON.parse(d), e.clientX - box.left - 90, e.clientY - box.top - 30);
+    });
+    layoutBtn.addEventListener("click", function () { tidy(true); changed(); draw(); });
+    save.addEventListener("click", function () {
+      if (!wf.name || !/^[A-Za-z0-9_-]{1,64}$/.test(wf.name)) { toast("Give the workflow a name: letters, digits, - and _", true); return; }
+      if (!wf.task.length) { toast("Add at least one step", true); return; }
+      var clean = JSON.parse(JSON.stringify(wf));
+      if (!clean.description) delete clean.description;
+      clean.task.forEach(function (t) { if (!t.needs || !t.needs.length) delete t.needs; if (!t.retries) delete t.retries; });
+      var list = (c.config.workflow || []).filter(function (w) { return w.name !== original && w.name !== clean.name; });
+      var at = (c.config.workflow || []).findIndex(function (w) { return w.name === original; });
+      if (at >= 0 && at <= list.length) list.splice(at, 0, clean); else list.push(clean);
+      save.disabled = true;
+      api("/api/config", { method: "PUT", body: { version: c.version, section: "workflow", value: list } }).then(function (r) {
+        c = r; original = clean.name; dirty = false; status.textContent = "Saved"; toast("Saved workflow " + clean.name + ". Applied now.");
+        var title = m.querySelector(".head h1"); if (title) title.textContent = "Edit workflow " + clean.name; renderPalette();
+        refreshOverview(); if (location.hash !== "#/wfedit/" + encodeURIComponent(clean.name)) history.replaceState(null, "", "#/wfedit/" + encodeURIComponent(clean.name));
+      }).catch(function (e) { toast(e.message, true); status.textContent = "Not saved: " + e.message; }).then(function () { save.disabled = !canEdit(); });
+    });
+    window.addEventListener("beforeunload", function warn(e) { if (!document.body.contains(canvas)) { window.removeEventListener("beforeunload", warn); return; } if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+    api("/api/config").then(function (x) {
+      c = x;
+      if (c.error) { inspector.textContent = "indra.toml has an error; fix it in Settings > File first."; return; }
+      var found = original && (c.config.workflow || []).find(function (w) { return w.name === original; });
+      wf = found ? JSON.parse(JSON.stringify(found)) : { name: original || "new-workflow", task: [] };
+      wf.task = wf.task || [];
+      tidy(false); renderPalette(); draw(); inspect();
+      save.disabled = !c.editable; status.textContent = c.editable ? "" : "Read-only: " + c.locked;
+    }).catch(function (e) { inspector.textContent = e.status === 404 ? "This console cannot edit indra.toml." : e.message; });
+  }
+
   // ---- settings: indra.toml, edited here ------------------------------------------
   // Each section of the config file has a schema; forms are built from it, and
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
-  var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"],
+  var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Components"],
     ["presets", "Presets"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
@@ -1125,6 +1378,16 @@
   ];
 
   var SCHEMA = {
+    component: { tab: "components", noun: "component", fields: function (c) { return [
+      { k: "name", label: "Name", req: true, help: "Drag it into a workflow from the editor's palette; a task's own fields override it." },
+      { k: "description", label: "Description" },
+      { k: "prompt", label: "Prompt", type: "textarea", help: "{target} and {node} are filled in." },
+      { k: "profile", label: "Profile", type: "select", options: opts(cfgProfileNames(c), "None") },
+      { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Default") },
+      { k: "node", label: "Node", type: "select", options: opts(cfgNodeNames(c), "Default (local)") },
+      { k: "target", label: "Target" },
+      { k: "retries", label: "Retries", type: "number", placeholder: "0" }]; },
+      summary: function (x) { return x.prompt || x.description || ""; } },
     connector: { tab: "connectors", noun: "connector", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
       { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"]] },
@@ -1329,7 +1592,7 @@
       }
       ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, secrets: secrets, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, secrets: secrets, file: file })[tab]();
     }
 
     function general() {
@@ -1377,7 +1640,8 @@
             builtins && builtins.some(function (b) { return b.name === it.name; }) ? h("span", { class: "pill", text: "replaces built-in" }) : null),
           h("p", { class: "muted clip", text: d.summary(it) }),
           h("div", { class: "row" },
-            h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(i, it, "Edit " + d.noun + " " + it.name); } }, "Edit"),
+            section === "workflow" ? h("a", { class: "btn", href: "#/wfedit/" + encodeURIComponent(it.name), text: "Edit graph" }) : null,
+            h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(i, it, "Edit " + d.noun + " " + it.name); } }, section === "workflow" ? "Edit as form" : "Edit"),
             h("button", { type: "button", disabled: !c.editable, onclick: function () {
               var copy = JSON.parse(JSON.stringify(it)); copy.name = it.name + "-copy"; edit(null, copy, "New " + d.noun);
             } }, "Duplicate"),
@@ -1505,7 +1769,7 @@
     S.cleanup = [];
     var parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
     var page = parts[0], arg = parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined;
-    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows" }[page] || page;
+    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows" }[page] || page;
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -1536,7 +1800,8 @@
         procs: function () { pageProcs(m); },
         proc: function () { pageProc(m, arg); },
         settings: function () { pageSettings(m, arg); },
-        board: function () { pageBoard(m); }
+        board: function () { pageBoard(m); },
+        wfedit: function () { pageWorkflowEditor(m, arg); }
       };
       (pages[page] || pages.overview)();
     }).catch(function (e) { if (e.message !== "unauthorized") { m.appendChild(empty(e.message)); } });

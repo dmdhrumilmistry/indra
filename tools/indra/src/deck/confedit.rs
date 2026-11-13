@@ -19,7 +19,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
 /// The top-level keys of `indra.toml`, in the order a new file gets them.
-pub const SECTIONS: [&str; 10] = [
+pub const SECTIONS: [&str; 11] = [
     "builtins",
     "server",
     "local",
@@ -28,6 +28,7 @@ pub const SECTIONS: [&str; 10] = [
     "profile",
     "preset",
     "node",
+    "component",
     "workflow",
     "connector",
 ];
@@ -86,6 +87,7 @@ fn fragment(section: &str, value: &Value) -> Result<Option<(String, Value)>> {
         "preset" => typed::<Vec<PresetCfg>>(section, value),
         "profile" => typed::<Vec<ProfileCfg>>(section, value),
         "connector" => typed::<Vec<crate::deck::config::ConnectorCfg>>(section, value),
+        "component" => typed::<Vec<crate::deck::config::ComponentCfg>>(section, value),
         "node" => typed::<Vec<NodeCfg>>(section, value),
         "workflow" => typed::<Vec<WorkflowCfg>>(section, value),
         _ => return Err(format!("unknown section '{}'", section)),
@@ -321,6 +323,22 @@ mod tests {
         let out = set_section("", "local", &json!({ "max_parallel": 6 })).unwrap();
         assert!(out.starts_with("# indra configuration"), "{}", out);
         assert_eq!(parse(&out).unwrap().local.max_parallel, Some(6));
+    }
+
+    /// Every top-level key of the config file can be edited from the console.
+    #[test]
+    fn every_section_is_editable() {
+        let keys = serde_json::to_value(ConfigFile::default()).unwrap();
+        let mut keys: Vec<String> = keys.as_object().unwrap().keys().cloned().collect();
+        keys.push("builtins".into()); // left out of the JSON while unset
+        for k in keys {
+            assert!(
+                SECTIONS.contains(&k.as_str()),
+                "section '{}' is not editable",
+                k
+            );
+            set_section("", &k, &Value::Null).unwrap_or_else(|e| panic!("{}: {}", k, e));
+        }
     }
 
     #[test]
