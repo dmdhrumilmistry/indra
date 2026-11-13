@@ -10,6 +10,7 @@ mod graph;
 mod note;
 mod search;
 mod time;
+mod tree;
 mod vault;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -165,6 +166,17 @@ enum Cmd {
     },
     /// Shortest path between two notes
     Path { from: String, to: String },
+    /// Draw the graph as a text tree in the terminal (one note, or the whole vault)
+    Tree {
+        /// Start here; omit to draw every connected group in the vault
+        note: Option<String>,
+        /// Hops to expand (default: 2 from a note, unlimited for the whole vault)
+        #[arg(short, long)]
+        depth: Option<usize>,
+        /// Follow only this relation type
+        #[arg(short, long)]
+        rel: Option<String>,
+    },
     /// Tags with note counts
     Tags,
     /// Vault statistics and hub notes
@@ -1032,6 +1044,62 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         v.notes[j].title,
                         v.notes[j].id
                     );
+                }
+            }
+        }
+        Cmd::Tree { note, depth, rel } => {
+            let rel = rel.map(|r| parse_rel(&r)).transpose()?;
+            let v = Vault::open(&root)?;
+            let g = Graph::build(&v);
+            let roots: Vec<usize> = match &note {
+                Some(n) => vec![v.require(n)?],
+                None => {
+                    // Biggest hubs first, so each group is drawn from its centre.
+                    let mut all: Vec<usize> = (0..v.notes.len()).collect();
+                    all.sort_by(|&a, &b| g.degree(b).cmp(&g.degree(a)).then(a.cmp(&b)));
+                    all
+                }
+            };
+            let depth = depth.unwrap_or(if note.is_some() { 2 } else { usize::MAX });
+            let mut drawn: HashSet<usize> = HashSet::new();
+            let mut trees = Vec::new();
+            let mut unlinked = Vec::new();
+            for r in roots {
+                if drawn.contains(&r) {
+                    continue;
+                }
+                if note.is_none() && g.degree(r) == 0 {
+                    unlinked.push(r);
+                    continue;
+                }
+                let t = tree::Tree::build(&g, r, depth, rel.as_deref());
+                drawn.extend(t.nodes());
+                trees.push(t);
+            }
+            if json {
+                let out: Vec<_> = trees.iter().map(|t| t.to_json(&v, &g)).collect();
+                print_json(&serde_json::json!({
+                    "trees": out,
+                    "unlinked": unlinked.iter().map(|&i| &v.notes[i].id).collect::<Vec<_>>(),
+                }))?;
+            } else {
+                if trees.is_empty() && unlinked.is_empty() {
+                    println!("(empty vault: {})", v.root.display());
+                }
+                for (k, t) in trees.iter().enumerate() {
+                    if k > 0 {
+                        println!();
+                    }
+                    print!("{}", t.render(&v, &g));
+                }
+                if !unlinked.is_empty() {
+                    if !trees.is_empty() {
+                        println!();
+                    }
+                    println!("Unlinked notes:");
+                    for i in unlinked {
+                        println!("  {}  ({})", v.notes[i].title, v.notes[i].id);
+                    }
                 }
             }
         }

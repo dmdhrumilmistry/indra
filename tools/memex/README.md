@@ -37,7 +37,7 @@ memex adds:
 |---|---|---|
 | Storage | Markdown folder | the same Markdown folder |
 | Links | untyped `[[links]]` | untyped **and** typed: `mitigated-by:: [[x]]` (Dataview syntax) |
-| Graph queries | visual only | `neighbors`, `path`, `--rel` filters, JSON output |
+| Graph queries | visual only | `tree`, `neighbors`, `path`, `--rel` filters, JSON output |
 | Retrieval | keyword search | BM25 search + spreading activation over the graph, with explanations |
 | Use from scripts and AI agents | plugins, GUI | a CLI with `--json` on every command |
 | Safe for parallel writers | no | cross-process lock, atomic writes |
@@ -74,7 +74,8 @@ memex add "Django extra() is a raw SQL sink" -t learning --tag django \
 memex recall "django raw sql"         # what do I know about this?
 memex show sqli                       # a note, its links and its backlinks
 memex path "Parameterized queries" "Django extra() is a raw SQL sink"
-memex export -o graph.html            # open in a browser
+memex tree sqli                       # the graph around a note, right in the terminal
+memex export -o graph.html            # optional: an interactive view in a browser
 ```
 
 ## Note format
@@ -143,6 +144,7 @@ Every command accepts `--vault DIR` and `--json`.
 | `recall QUERY [-n N] [-d DEPTH] [--max-chars N]` | graph-aware recall, formatted as context for an LLM |
 | `neighbors NOTE [-d DEPTH] [-r REL]` | the neighbourhood, either direction |
 | `path FROM TO` | the shortest chain of relations between two notes |
+| `tree [NOTE] [-d DEPTH] [-r REL]` | draw the graph as a text tree in the terminal: around one note, or every connected group in the vault |
 | `tags`, `stats` | tag counts; note, link, type, relation and hub counts |
 | `check [--strict]` | lint: unresolved links, ambiguous names (exit 1), orphans |
 | `export [-f html\|json\|dot\|mermaid] [-o FILE] [--no-body]` | export the graph |
@@ -178,7 +180,25 @@ creates it.
 
 ## Viewing the graph
 
-`memex export -o graph.html` writes one self-contained HTML file: no CDN, no network, works
+Everything works from the terminal. `memex tree` draws the graph as text:
+
+```text
+$ memex tree sqli
+SQL injection  (sql-injection)  [vuln-class]
+|-- <- defends-against  Parameterized queries
+|   `-- <- mitigated-by  Django extra() is a raw SQL sink  (*)
+|-- <- instance-of  Django extra() is a raw SQL sink
+|   |-- -> mitigated-by  Parameterized queries  (*)
+|   `-- <- instance-of  SH-SQLI-003 report export
+`-- <- refines  False positive: sanitize_sql helper
+```
+
+`->` is a link out, `<-` a backlink. Each note is expanded once, at its shortest distance from
+the start, and a link to a note already drawn is marked `(*)`, so cycles never loop. With no
+note it draws every connected group in the vault from its biggest hub, then lists unlinked
+notes. Connectors are plain ASCII, so it renders the same in any console.
+
+For a visual view, `memex export -o graph.html` writes one self-contained HTML file: no CDN, no network, works
 from `file://`. Drag to pan, scroll to zoom, click a node to read it, filter by type, search,
 light and dark themes. Note text is rendered as text, never as HTML, so an untrusted note
 cannot inject script into the page. `-f mermaid` renders in GitHub Markdown; `-f dot` feeds

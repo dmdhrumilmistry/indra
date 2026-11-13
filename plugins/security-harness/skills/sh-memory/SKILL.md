@@ -134,6 +134,8 @@ Note types: `vuln-class`, `finding`, `learning`, `pattern`, `technique`, `tool`,
 
 ```bash
 memex --vault "$TV" show "<name>"              # a note, its links and its backlinks
+memex --vault "$TV" tree "SQL injection"        # the graph around a note, as a text tree
+memex --vault "$TV" tree                         # the whole memory graph, in the terminal
 memex --vault "$TV" neighbors "file: app/db.py" -d 2
 memex --vault "$TV" path "SQL injection" "Parameterized queries"
 memex --vault "$TV" link "<from>" "<to>" --rel mitigated-by

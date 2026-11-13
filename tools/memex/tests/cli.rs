@@ -424,3 +424,52 @@ fn missing_vault_reads_as_empty() {
     assert!(out.status.success());
     assert!(!nowhere.exists(), "reads must not create the vault");
 }
+
+#[test]
+fn tree_draws_the_graph_in_the_terminal() {
+    let v = Vault::new();
+    seed(&v);
+    v.ok(&["add", "Loner"]);
+    let t = v.ok(&["tree", "sqli"]);
+    assert_eq!(
+        t,
+        "SQL injection  (sql-injection)  [vuln-class]\n\
+         `-- <- instance-of  Django extra() bypasses the ORM\n    \
+         `-- -> mitigated-by  Parameterized queries\n"
+    );
+    // Depth limits expansion; a cycle back to a drawn note is a (*) leaf.
+    v.ok(&[
+        "link",
+        "parameterized queries",
+        "sqli",
+        "--rel",
+        "defends-against",
+    ]);
+    let t = v.ok(&["tree", "sqli", "-d", "1"]);
+    assert_eq!(t.lines().count(), 3);
+    let t = v.ok(&["tree", "sqli"]);
+    assert!(t.contains("(*)"), "{}", t);
+    // Whole vault: every linked note appears, unlinked ones are listed apart.
+    let all = v.ok(&["tree"]);
+    for title in [
+        "SQL injection",
+        "Parameterized queries",
+        "Django extra() bypasses the ORM",
+    ] {
+        assert!(all.contains(title), "{}", all);
+    }
+    assert!(
+        all.ends_with("Unlinked notes:\n  Loner  (loner)\n"),
+        "{}",
+        all
+    );
+    let j = v.json(&["tree", "sqli", "--rel", "instance-of"]);
+    assert_eq!(j["trees"][0]["children"][0]["rel"], "instance-of");
+    assert_eq!(
+        j["trees"][0]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
