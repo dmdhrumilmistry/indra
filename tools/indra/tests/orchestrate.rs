@@ -62,7 +62,8 @@ impl Env {
     fn indra(&self, args: &[&str]) -> Command {
         let mut c = Command::new(INDRA);
         c.args(args)
-            .env("XDG_DATA_HOME", self.dir.join("data"))
+            // A space in the data path, as on macOS (~/Library/Application Support).
+            .env("XDG_DATA_HOME", self.dir.join("app data"))
             .env("HOME", &self.dir)
             .current_dir(&self.dir);
         c
@@ -180,10 +181,16 @@ fn workflow_orders_retries_skips_and_never_shells_the_prompt() {
             .rev()
             .find(|l| l.split_whitespace().next() == Some(id))
             .unwrap_or_else(|| panic!("no summary line for {}:\n{}", id, text));
-        let path = line
-            .split_whitespace()
-            .nth(3)
-            .unwrap_or_else(|| panic!("no log path for {}: {}", id, line));
+        // id, node and state are single words; the path is the rest of the
+        // line and may contain spaces (~/Library/Application Support).
+        let mut rest = line.trim_start();
+        for _ in 0..3 {
+            rest = rest
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r.trim_start())
+                .unwrap_or_else(|| panic!("no log path for {}: {}", id, line));
+        }
+        let path = rest.trim_end();
         fs::read_to_string(path).unwrap_or_else(|err| panic!("cannot read {}: {}", path, err))
     };
     let logs = format!("{}\n{}", log_of("api"), log_of("web"));
