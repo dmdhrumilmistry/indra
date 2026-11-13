@@ -17,7 +17,7 @@ security-harness/                         # a plugin marketplace
     │   ├── sh-router            # single entry point - routes any appsec request
     │   ├── sh-security-review   # the pipeline orchestrator (Stages 0-6)
     │   ├── sh-pr-review         # review one pull request, post inline comments
-    │   ├── sh-memory            # long-term graph memory across runs (via memex)
+    │   ├── sh-memory            # long-term graph memory across runs (via indra)
     │   └── sh-kb-*  (15)        # per-vuln-class knowledge bases
     ├── agents/
     │   ├── sh-recon             # map: Graft graph + stack/SBOM/CVE + attack surface
@@ -26,8 +26,7 @@ security-harness/                         # a plugin marketplace
     │   ├── sh-verifier          # confirm: offensive + seceng + dev verification + PoC
     │   └── sh-reporter          # deliver: README/JSON/SARIF/HTML/PDF/doc
     └── references/              # shared contracts (finding schema, SARIF map, state files, rubrics)
-tools/memex/                              # the memex CLI: Rust, graph-based Markdown memory
-tools/agentdeck/                          # agentdeck: web console to view, monitor and run agent harnesses
+tools/indra/                              # indra: one Rust CLI for graph memory and the agent web console
 ```
 
 ### Vulnerability classes covered (the `sh-kb-*` skills)
@@ -144,12 +143,23 @@ Everything lands under `<target>/.security-harness/<run-id>/`:
 Each published finding carries a payload, a PoC, the verification verdict, CWE/OWASP ids, CVSS, and a
 code-level mitigation.
 
-## Long-term memory
+## indra: memory and agent console
+
+[`indra`](tools/indra/README.md) is one small Rust CLI (~2.5 MB, Linux / macOS / Windows) that
+ships in this repo. It is named for Indra's net: an endless net with a jewel at every knot, each
+reflecting all the others.
+
+```bash
+cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra
+```
+
+or download a binary from an `indra-v*` [release](https://github.com/dmdhrumilmistry/security-harness/releases).
+
+### Long-term memory (`indra mem`)
 
 Without memory, every review starts from zero: it re-flags the sanitizer that was cleared last
 week and re-learns the same framework quirk on every codebase. The `sh-memory` skill gives the
-harness a memory that persists across runs, stored as a graph of small Markdown notes by
-[`memex`](tools/memex/README.md), a ~1 MB Rust CLI that ships in this repo.
+harness a memory that persists across runs, stored as a graph of small Markdown notes.
 
 - **After recon**, the pipeline recalls what earlier runs learned about each class it is about to
   hunt (past findings, known guards, confirmed false positives) and hands it to that hunter.
@@ -158,40 +168,30 @@ harness a memory that persists across runs, stored as a graph of small Markdown 
 - **Two vaults:** `<target>/.security-harness/memory/` for codebase-specific knowledge (gitignored
   with the rest), and a per-user global vault for portable techniques only.
 
-Memory is optional. Without `memex` installed, or with `memory:off`, the pipeline runs exactly as
-before. Install it from a [release binary](https://github.com/dmdhrumilmistry/security-harness/releases)
-or with Cargo:
-
-```bash
-cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness memex
-```
-
-You can also use memory directly:
+Memory is optional. Without `indra` installed, or with `memory:off`, the pipeline runs exactly as
+before. You can also use it directly:
 
 ```
 /sh-memory what do we know about SSRF in this codebase
-memex --vault .security-harness/memory export -o graph.html     # interactive graph, offline
+indra mem --vault .security-harness/memory tree          # the memory graph, in the terminal
+indra mem recall "django raw sql"                        # what do we know about this?
 ```
 
-The vault is an ordinary Obsidian-compatible folder, so you can also open it in Obsidian.
-memex works fine on its own as a general-purpose note graph for people and agents. See
-[`tools/memex/README.md`](tools/memex/README.md).
+A vault is an ordinary Obsidian-compatible folder, so you can also open it in Obsidian.
 
-## Agent console (agentdeck)
+### Agent console (`indra serve`)
 
-[`agentdeck`](tools/agentdeck/README.md) is a local web console for the harness, and for any
-other agent harness. It is a ~2 MB Rust binary with the UI embedded.
+A local web console for the harness, and for any other agent harness:
 
 ```bash
-cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness agentdeck
-cd security-harness && agentdeck --target ~/code/my-api      # prints a URL with an access token
+cd security-harness && indra serve --target ~/code/my-api     # prints a URL with an access token
 ```
 
 - **Agents, skills, prompts:** read and edit every definition the harness is made of, and see
   what each one uses and is used by.
 - **Graph map:** stages run agents, agents spawn agents and load the `sh-kb-*` skills,
   everything reads its references.
-- **Memory:** the memex vaults drawn as graphs.
+- **Memory:** the memory vaults drawn as graphs.
 - **Runs:** each `.security-harness/run-*` with stage progress, findings per class, severity and
   status counts, and every file it wrote, live.
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
@@ -201,8 +201,8 @@ cd security-harness && agentdeck --target ~/code/my-api      # prints a URL with
 The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
 `.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.
 It is locked down like a remote shell: loopback only, a token on every call, DNS-rebinding and
-CSRF checks, no shell, and file access confined to the harness. `agentdeck ls` and
-`agentdeck check` give the same picture in the terminal.
+CSRF checks, no shell, and file access confined to the harness. `indra ls` and `indra check`
+give the same picture in the terminal.
 
 ## Pull request review
 
@@ -375,7 +375,7 @@ actually introduces or aggravates can fail it.
 3. **Hunt** (`sh-hunter` ×N, parallel) - one hunter per relevant class loads its `sh-kb-*` knowledge base,
    traces attacker input from source to sink, and records candidates. A shared **attempts ledger** stops
    agents from repeating each other's probes.
-   With `memex` available, the orchestrator first recalls each class's past findings, guards and
+   With `indra` available, the orchestrator first recalls each class's past findings, guards and
    false positives from long-term memory and hands them to that hunter.
 4. **Chain** (`sh-chainer`) - compose findings into higher-severity attack paths.
 5. **Verify** (`sh-verifier`) - refute first, then confirm exploitability from evidence, build PoCs, assign

@@ -14,7 +14,7 @@ struct Vault {
 impl Vault {
     fn new() -> Vault {
         let dir = std::env::temp_dir().join(format!(
-            "memex-test-{}-{}",
+            "indra-mem-test-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::SeqCst)
         ));
@@ -24,9 +24,9 @@ impl Vault {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_memex"));
-        c.arg("--vault").arg(&self.dir).args(args);
-        c.env_remove("MEMEX_VAULT");
+        let mut c = Command::new(env!("CARGO_BIN_EXE_indra"));
+        c.arg("mem").arg("--vault").arg(&self.dir).args(args);
+        c.env_remove("INDRA_VAULT");
         c
     }
 
@@ -39,7 +39,7 @@ impl Vault {
         let o = self.run(args);
         assert!(
             o.status.success(),
-            "memex {:?} failed:\n{}{}",
+            "indra mem {:?} failed:\n{}{}",
             args,
             String::from_utf8_lossy(&o.stdout),
             String::from_utf8_lossy(&o.stderr)
@@ -120,7 +120,7 @@ fn add_writes_obsidian_compatible_markdown() {
     ));
     // Resolved targets are written by id, which is the file name Obsidian matches.
     assert!(doc.contains("## Relations\n- instance-of:: [[sql-injection]]\n- mitigated-by:: [[parameterized-queries]]\n"));
-    assert!(v.path(".memex").is_dir());
+    assert!(v.path(".indra").is_dir());
     let out = v.run(&["add", "sql injection"]);
     assert!(!out.status.success(), "duplicate title must be refused");
 }
@@ -219,7 +219,7 @@ fn upsert_merges_body_tags_and_relations() {
 #[test]
 fn append_goes_above_relations_and_preserves_crlf() {
     let v = Vault::new();
-    fs::create_dir_all(v.path(".memex")).unwrap();
+    fs::create_dir_all(v.path(".indra")).unwrap();
     let crlf = "---\r\ntitle: Win\r\ncustom: keep\r\n---\r\n# Win\r\n\r\nfirst\r\n\r\n## Relations\r\n- x:: [[y]]\r\n";
     fs::write(v.path("win.md"), crlf).unwrap();
     v.ok(&["append", "win", "second", "line"]);
@@ -326,7 +326,7 @@ fn exports_are_well_formed_and_html_is_injection_safe() {
         "add",
         "</script><img src=x onerror=alert(1)>",
         "-b",
-        "__MEMEX_DATA__ \u{2028} <b>&amp;</b>",
+        "__INDRA_DATA__ \u{2028} <b>&amp;</b>",
         "--link",
         "ghost target",
     ]);
@@ -351,14 +351,14 @@ fn exports_are_well_formed_and_html_is_injection_safe() {
     assert!(!html.contains("innerHTML"));
 
     let dot = v.ok(&["export", "-f", "dot"]);
-    assert!(dot.starts_with("digraph memex {") && dot.contains("[label=\"mitigated-by\"]"));
+    assert!(dot.starts_with("digraph indra {") && dot.contains("[label=\"mitigated-by\"]"));
     let mm = v.ok(&["export", "-f", "mermaid"]);
     assert!(mm.starts_with("graph LR\n") && mm.contains("-->|instance-of|"));
     assert!(!mm.contains("<img"));
 
     let out = v.path("graph.html");
     v.ok(&["export", "-o", out.to_str().unwrap()]);
-    assert!(fs::read_to_string(out).unwrap().contains("memex-data"));
+    assert!(fs::read_to_string(out).unwrap().contains("indra-data"));
 }
 
 #[test]
@@ -407,13 +407,14 @@ fn parallel_writers_do_not_lose_updates() {
             doc
         );
     }
-    assert!(!v.path(".memex/lock").exists());
+    assert!(!v.path(".indra/lock").exists());
 }
 
 #[test]
 fn missing_vault_reads_as_empty() {
     let v = Vault::new();
-    let mut c = Command::new(env!("CARGO_BIN_EXE_memex"));
+    let mut c = Command::new(env!("CARGO_BIN_EXE_indra"));
+    c.arg("mem");
     let nowhere = v.dir.join("does-not-exist");
     let out = c
         .arg("--vault")

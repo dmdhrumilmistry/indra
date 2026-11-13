@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__MEMEX_TITLE__</title>
+<title>__INDRA_TITLE__</title>
 <style>
 :root {
   --bg: #f7f7f5; --panel: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4;
@@ -69,7 +69,7 @@ aside .close { position: absolute; top: 10px; right: 10px; }
 </head>
 <body>
 <header>
-  <h1 id="title">__MEMEX_TITLE__</h1>
+  <h1 id="title">__INDRA_TITLE__</h1>
   <input id="q" type="search" placeholder="Search notes, tags, types..." autocomplete="off">
   <span class="stats" id="stats"></span>
   <button class="ghostbtn" id="labels" aria-pressed="true">Labels</button>
@@ -88,11 +88,11 @@ aside .close { position: absolute; top: 10px; right: 10px; }
   <h3>Backlinks</h3><ul id="p-in"></ul>
 </aside>
 <div class="hint">Drag to pan, scroll to zoom, click a node to read it.</div>
-<script id="memex-data" type="application/json">__MEMEX_DATA__</script>
+<script id="indra-data" type="application/json">__INDRA_DATA__</script>
 <script>
 (function () {
   "use strict";
-  var DATA = JSON.parse(document.getElementById("memex-data").textContent);
+  var DATA = JSON.parse(document.getElementById("indra-data").textContent);
   var PALETTE = ["#2f6fdf", "#d9622b", "#2a9d6f", "#b8459c", "#c79a1e", "#5b6ad0", "#c2434a", "#3a9fb5", "#7a8b2a", "#8a5a3c"];
   var root = document.documentElement;
   var canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
@@ -277,7 +277,7 @@ aside .close { position: absolute; top: 10px; right: 10px; }
       (n.updated ? "  -  updated " + n.updated : "");
     var tags = $("p-tags"); tags.textContent = "";
     n.tags.forEach(function (t) { var s = document.createElement("span"); s.className = "chip"; s.textContent = "#" + t; tags.appendChild(s); });
-    $("p-body").textContent = cleanBody(n) || (n.ghost ? "Nothing here yet. Create it with: memex add \"" + n.title + "\"" : "");
+    $("p-body").textContent = cleanBody(n) || (n.ghost ? "Nothing here yet. Create it with: indra mem add \"" + n.title + "\"" : "");
     $("p-body").style.display = $("p-body").textContent ? "" : "none";
     fill($("p-out"), n.out, "->"); fill($("p-in"), n.inc, "<-");
     panel.classList.add("open"); draw();

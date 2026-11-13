@@ -7,7 +7,7 @@
 //! text, tool calls and subagent (Task/Agent tool) spawns, so the console can
 //! show which agents a run started and what each one is doing.
 
-use crate::config::Runner;
+use crate::deck::config::Runner;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -93,7 +93,7 @@ pub struct Proc {
 }
 
 fn now() -> u64 {
-    crate::runs::now()
+    crate::deck::runs::now()
 }
 
 fn clip(s: &str, n: usize) -> String {

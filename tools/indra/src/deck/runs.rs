@@ -2,8 +2,8 @@
 //! harness, `<target>/.security-harness/run-*`). Progress comes from which
 //! stage files exist, results from a JSONL file, activity from timestamps.
 
-use crate::config::Harness;
-use crate::discover::{glob, mtime};
+use crate::deck::config::Harness;
+use crate::deck::discover::{glob, mtime};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -256,11 +256,10 @@ pub fn tail(p: &Path, max_bytes: u64) -> std::io::Result<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::security_harness_profile;
+    use crate::deck::config::security_harness_profile;
 
     fn tmp(name: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("agentdeck-runs-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("indra-runs-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

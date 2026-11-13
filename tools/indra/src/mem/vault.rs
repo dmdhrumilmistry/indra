@@ -1,15 +1,15 @@
-//! A vault is a directory of Markdown notes, marked by a `.memex/` folder.
+//! A vault is a directory of Markdown notes, marked by a `.indra/` folder.
 //! The notes are the only source of truth: there is no database to drift out
 //! of sync, and the folder opens as-is in Obsidian or any Markdown editor.
 
-use crate::note::{slugify, Note};
+use crate::mem::note::{slugify, Note};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-pub const MARKER: &str = ".memex";
+pub const MARKER: &str = ".indra";
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -23,15 +23,16 @@ pub struct Vault {
     pub ambiguous: HashMap<String, Vec<usize>>,
 }
 
-/// Where the vault lives: `--vault`, then `$MEMEX_VAULT`, then the nearest
-/// ancestor of the working directory holding a `.memex/` folder, then the
-/// per-user default (`$XDG_DATA_HOME/memex`, `~/Library/Application
-/// Support/memex`, or `%APPDATA%\memex`).
+/// Where the vault lives: `--vault`, then `$INDRA_VAULT`, then the nearest
+/// ancestor of the working directory holding a `.indra/` folder, then the
+/// per-user default: `memory/` in the indra data directory
+/// (`~/.local/share/indra`, `~/Library/Application Support/indra` or
+/// `%LOCALAPPDATA%\indra`).
 pub fn locate(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(p) = explicit {
         return p;
     }
-    if let Some(p) = std::env::var_os("MEMEX_VAULT").filter(|v| !v.is_empty()) {
+    if let Some(p) = std::env::var_os("INDRA_VAULT").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
     if let Ok(mut dir) = std::env::current_dir() {
@@ -48,26 +49,7 @@ pub fn locate(explicit: Option<PathBuf>) -> PathBuf {
 }
 
 fn default_vault() -> PathBuf {
-    let env = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let home = env("HOME")
-        .or_else(|| env("USERPROFILE"))
-        .unwrap_or_else(|| PathBuf::from("."));
-    if cfg!(windows) {
-        return env("APPDATA").unwrap_or(home).join("memex");
-    }
-    if cfg!(target_os = "macos") {
-        return home
-            .join("Library")
-            .join("Application Support")
-            .join("memex");
-    }
-    env("XDG_DATA_HOME")
-        .unwrap_or_else(|| home.join(".local").join("share"))
-        .join("memex")
+    crate::paths::data_dir().join("memory")
 }
 
 /// Create the vault directory and its marker. Idempotent.
@@ -85,7 +67,7 @@ pub fn init(root: &Path) -> Result<bool> {
 
 impl Vault {
     /// Load every `*.md` under `root`. Hidden directories (`.obsidian`,
-    /// `.git`, `.memex`, `.trash`) and symlinks are skipped. A missing vault
+    /// `.git`, `.indra`, `.trash`) and symlinks are skipped. A missing vault
     /// loads as empty so read commands work before the first write.
     pub fn open(root: &Path) -> Result<Vault> {
         let mut files = Vec::new();
@@ -205,7 +187,7 @@ impl Vault {
         if base.is_empty() {
             base = format!(
                 "note-{}",
-                crate::time::now_iso()
+                crate::mem::time::now_iso()
                     .replace([':', '-'], "")
                     .to_lowercase()
             );
@@ -262,7 +244,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>, depth: usize)
     Ok(())
 }
 
-/// A cross-process advisory lock (`.memex/lock`) so parallel agents writing
+/// A cross-process advisory lock (`.indra/lock`) so parallel agents writing
 /// to one vault do not lose each other's edits. Stale locks (> 30 s) are
 /// broken. Released on drop.
 pub struct Lock {
@@ -297,7 +279,7 @@ impl Lock {
                     }
                     if start.elapsed() > Duration::from_secs(10) {
                         return Err(format!(
-                            "vault is locked by another writer ({}); retry, or delete it if no memex is running",
+                            "vault is locked by another writer ({}); retry, or delete it if no indra is running",
                             path.display()
                         ));
                     }

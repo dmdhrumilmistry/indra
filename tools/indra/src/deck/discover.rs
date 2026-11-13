@@ -1,9 +1,9 @@
 //! Finding a harness's agents, skills and prompts on disk, and the graph of
 //! which one mentions (spawns, invokes, reads) which.
 
-use crate::config::{expand, Harness};
-use memex::export::{GraphData, GraphEdge, GraphNode};
-use memex::frontmatter;
+use crate::deck::config::{expand, Harness};
+use crate::mem::export::{GraphData, GraphEdge, GraphNode};
+use crate::mem::frontmatter;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -219,7 +219,7 @@ fn parse_def(h: &Harness, kind: Kind, path: &Path) -> Option<Def> {
             body.lines()
                 .map(str::trim)
                 .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--"))
-                .map(|l| memex::search::truncate(l, 200))
+                .map(|l| crate::mem::search::truncate(l, 200))
                 .unwrap_or_default()
         });
     let mut tools = list_field(&fm, "tools");

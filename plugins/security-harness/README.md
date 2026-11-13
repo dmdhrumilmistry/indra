@@ -41,11 +41,11 @@ review PR 42
 
 ## Long-term memory
 
-With the [`memex`](https://github.com/dmdhrumilmistry/security-harness/tree/main/tools/memex)
+With the [`indra`](https://github.com/dmdhrumilmistry/security-harness/tree/main/tools/indra)
 CLI installed, reviews remember. Before hunting, each hunter gets what earlier runs learned
 about its class (past findings, known guards, confirmed false positives). After the report,
 the run's results and a few learnings are recorded as a graph of Obsidian-compatible
-Markdown notes in `<target>/.security-harness/memory/`. Without memex, or with `memory:off`,
+Markdown notes in `<target>/.security-harness/memory/`. Without indra, or with `memory:off`,
 nothing changes. Ask `what do we know about SSRF here` to query it directly.
 
 ## Pull request review

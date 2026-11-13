@@ -1,8 +1,7 @@
-name: tools
+name: indra
 
-# Tests the Rust tools in tools/ (memex, agentdeck) on Linux, macOS and
-# Windows. A `memex-v*` or `agentdeck-v*` tag publishes that tool's prebuilt
-# binaries to a GitHub release.
+# Tests the indra CLI (tools/indra) on Linux, macOS and Windows, and on an
+# `indra-v*` tag publishes prebuilt binaries to a GitHub release.
 #
 # No third-party actions: the runners already ship rustup, and `gh` uploads the
 # release assets, so the only code that runs here is this repository's.
@@ -10,23 +9,23 @@ name: tools
 on:
   push:
     branches: [main]
-    paths: ["tools/**", ".github/workflows/tools.yml"]
-    tags: ["memex-v*", "agentdeck-v*"]
+    paths: ["tools/**", ".github/workflows/indra.yml"]
+    tags: ["indra-v*"]
   pull_request:
-    paths: ["tools/**", ".github/workflows/tools.yml"]
+    paths: ["tools/**", ".github/workflows/indra.yml"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: tools-${{ github.ref }}
+  group: indra-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 defaults:
   run:
     shell: bash
-    working-directory: tools
+    working-directory: tools/indra
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,15 +48,15 @@ jobs:
           rustup default stable
       - name: Format
         if: runner.os == 'Linux'
-        run: cargo fmt --all --check
+        run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked --workspace
+        run: cargo test --locked
 
   release:
     name: release (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/memex-v') || startsWith(github.ref, 'refs/tags/agentdeck-v')
+    if: startsWith(github.ref, 'refs/tags/indra-v')
     needs: test
     runs-on: ${{ matrix.os }}
     permissions:
@@ -83,20 +82,12 @@ jobs:
         if: matrix.musl
         run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
       - name: Build
-        id: build
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          bin="${TAG%%-v*}"   # memex-v0.1.0 -> memex
-          cargo build --locked --release -p "$bin" --target ${{ matrix.target }}
-          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+        run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Package
         id: pkg
-        env:
-          BIN: ${{ steps.build.outputs.bin }}
         run: |
-          name="$BIN-${{ matrix.target }}${{ matrix.exe }}"
-          cp "target/${{ matrix.target }}/release/$BIN${{ matrix.exe }}" "$name"
+          name="indra-${{ matrix.target }}${{ matrix.exe }}"
+          cp "target/${{ matrix.target }}/release/indra${{ matrix.exe }}" "$name"
           if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - name: Upload to release
@@ -108,6 +99,6 @@ jobs:
           # Every matrix job races to create the release; losing that race is fine.
           export GH_REPO="$GITHUB_REPOSITORY"
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --notes "Prebuilt binaries. See tools/README.md." \
+            || gh release create "$TAG" --title "$TAG" --notes "indra prebuilt binaries. See tools/indra/README.md." \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber

@@ -47,7 +47,7 @@ pub struct HarnessCfg {
     /// Globs for other prompt files: system prompts, references, templates.
     #[serde(default)]
     pub prompts: Vec<String>,
-    /// memex vaults to show as memory graphs. `{target}` expands per target.
+    /// Memory vaults (`indra mem`) to show as graphs. `{target}` expands per target.
     #[serde(default)]
     pub memory: Vec<String>,
     /// Codebases whose runs are monitored (relative to the config file).
@@ -173,12 +173,7 @@ pub struct Settings {
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:7878";
 
-pub fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
-        .map(PathBuf::from)
-}
+pub use crate::paths::home;
 
 /// `~/x` to the home directory, relative paths against `base`.
 pub fn expand(base: &Path, p: &str) -> PathBuf {
@@ -195,44 +190,19 @@ pub fn expand(base: &Path, p: &str) -> PathBuf {
     }
 }
 
-/// Logs and other state agentdeck writes, per user.
+/// Logs and other state indra writes, per user.
 pub fn data_dir() -> PathBuf {
-    let env = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let h = home().unwrap_or_else(|| PathBuf::from("."));
-    if cfg!(windows) {
-        return env("LOCALAPPDATA").unwrap_or(h).join("agentdeck");
-    }
-    if cfg!(target_os = "macos") {
-        return h
-            .join("Library")
-            .join("Application Support")
-            .join("agentdeck");
-    }
-    env("XDG_DATA_HOME")
-        .unwrap_or_else(|| h.join(".local").join("share"))
-        .join("agentdeck")
+    crate::paths::data_dir()
 }
 
 /// Where a config file is looked for when `--config` is not given.
 pub fn default_config_paths(cwd: &Path) -> Vec<PathBuf> {
-    let mut v = vec![cwd.join("agentdeck.toml")];
-    let env = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    if let Some(x) = env("XDG_CONFIG_HOME").or_else(|| home().map(|h| h.join(".config"))) {
-        v.push(x.join("agentdeck").join("agentdeck.toml"));
-    }
-    if cfg!(windows) {
-        if let Some(a) = env("APPDATA") {
-            v.push(a.join("agentdeck").join("agentdeck.toml"));
-        }
-    }
+    let mut v = vec![cwd.join("indra.toml")];
+    v.extend(
+        crate::paths::config_dirs()
+            .into_iter()
+            .map(|d| d.join("indra.toml")),
+    );
     v
 }
 
@@ -308,7 +278,7 @@ pub fn security_harness_profile(plugin: &Path, targets: &[PathBuf]) -> Harness {
         agent: agent.map(String::from),
         done_when: Some(done.into()),
     };
-    let global_memory = memex::vault::locate(None);
+    let global_memory = crate::mem::vault::locate(None);
     Harness {
         name: "security-harness".into(),
         description: "Multi-agent application-security review: recon, parallel hunters, chain, verify, report.".into(),
@@ -491,7 +461,7 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
             builtins.push(security_harness_profile(&abs(plugin), &default_targets));
         }
         let cc = claude_code_profile(&abs(opts.cwd.clone()), &default_targets);
-        if !crate::discover::discover(&cc).is_empty() {
+        if !crate::deck::discover::discover(&cc).is_empty() {
             builtins.push(cc);
         }
         for b in builtins {
@@ -551,8 +521,8 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
     })
 }
 
-/// The commented starter file `agentdeck init` writes.
-pub const SAMPLE: &str = r#"# agentdeck configuration.
+/// The commented starter file `indra init` writes.
+pub const SAMPLE: &str = r#"# indra configuration.
 #
 # Two harness profiles are built in and detected automatically:
 #   security-harness  - this repository's plugin (or the installed plugin)
@@ -572,7 +542,7 @@ bind = "127.0.0.1:7878"     # keep it on loopback; a token is required either wa
 # agents      = ["agents/*.md"]                      # Markdown with frontmatter (name, description, model, tools)
 # skills      = ["skills/*/SKILL.md"]
 # prompts     = ["prompts/**/*.md", "system.md"]
-# memory      = ["{target}/.memory", "~/notes"]      # memex vaults to draw as graphs
+# memory      = ["{target}/.memory", "~/notes"]      # memory vaults to draw as graphs
 # targets     = ["../project-a", "../project-b"]     # where runs happen
 # runs        = ".runs/*"                            # one directory per run, under each target
 # findings    = ["results.jsonl"]                    # JSONL results inside a run

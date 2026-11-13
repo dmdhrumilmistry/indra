@@ -1,12 +1,8 @@
-//! memex - a lightweight, graph-based memory for people and AI agents.
-//!
-//! Notes are plain Markdown files with YAML frontmatter, `[[wikilinks]]` and
-//! typed `rel:: [[target]]` relations. The folder is a valid Obsidian vault;
-//! this CLI adds typed-graph queries, ranked recall and exports on top.
+//! The `indra mem` commands: add, link, recall, tree, export and friends.
 
-use memex::{export, frontmatter, graph, note, search, time, tree, vault};
+use crate::mem::{export, frontmatter, graph, note, search, time, tree, vault};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use graph::{Dir, Graph, Step};
 use note::{normalize_rel, slugify, Note, DEFAULT_REL};
 use serde::Serialize;
@@ -16,19 +12,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use vault::{Lock, Result, Vault};
 
-#[derive(Parser)]
-#[command(
-    name = "memex",
-    version,
-    about = "A lightweight, graph-based memory for people and AI agents",
-    long_about = "A lightweight, graph-based memory for people and AI agents.\n\n\
-        Notes are plain Markdown with [[wikilinks]] and typed relations (`mitigated-by:: [[note]]`). \
-        The vault is an ordinary folder that also opens in Obsidian.\n\n\
-        Vault location: --vault, else $MEMEX_VAULT, else the nearest parent folder holding `.memex/`, \
-        else a per-user default (see `memex where`)."
-)]
-struct Cli {
-    /// Vault directory (overrides $MEMEX_VAULT and discovery)
+/// `indra mem`: the memory commands.
+#[derive(Args)]
+pub struct MemArgs {
+    /// Vault directory (overrides $INDRA_VAULT and discovery)
     #[arg(long, global = true, value_name = "DIR")]
     vault: Option<PathBuf>,
     /// Machine-readable JSON output
@@ -40,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a vault (a folder with a `.memex/` marker)
+    /// Create a vault (a folder with a `.indra/` marker)
     Init {
         /// Directory to initialise (default: the resolved vault)
         dir: Option<PathBuf>,
@@ -203,17 +190,6 @@ enum Format {
     Html,
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("memex: {}", e);
-            ExitCode::FAILURE
-        }
-    }
-}
-
 fn print_json<T: Serialize>(v: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
     println!("{}", s);
@@ -268,7 +244,7 @@ fn link_target(v: &Vault, name: &str) -> String {
 }
 
 /// The `[[...]]` text for a relation. An unresolved target is written as
-/// `[[its-slug|As Typed]]`: the slug is the file name `memex add` will give
+/// `[[its-slug|As Typed]]`: the slug is the file name `indra mem add` will give
 /// that note later, so the link resolves in Obsidian too (which matches file
 /// names, not titles), while the label keeps the name readable.
 fn rel_line(v: &Vault, rel: &str, name: &str) -> String {
@@ -534,7 +510,7 @@ fn links_summary(v: &Vault, g: &Graph, i: usize, max: usize) -> String {
 
 // ---- commands -----------------------------------------------------------
 
-fn run(cli: Cli) -> Result<ExitCode> {
+pub fn run(cli: MemArgs) -> Result<ExitCode> {
     let root = vault::locate(cli.vault.clone());
     let json = cli.json;
     match cli.cmd {
@@ -644,7 +620,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 Some(i) => {
                     return Err(format!(
-                        "a note named '{}' already exists ({}). Use --upsert to merge, or `memex append`",
+                        "a note named '{}' already exists ({}). Use --upsert to merge, or `indra mem append`",
                         title, v.notes[i].id
                     ))
                 }
@@ -667,7 +643,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             for t in &unresolved {
                 eprintln!(
-                    "memex: note: '{}' does not exist yet; kept as an unresolved link",
+                    "indra: note: '{}' does not exist yet; kept as an unresolved link",
                     t
                 );
             }
@@ -728,7 +704,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             if target.is_none() {
                 eprintln!(
-                    "memex: note: '{}' does not exist yet; kept as an unresolved link",
+                    "indra: note: '{}' does not exist yet; kept as an unresolved link",
                     to.trim()
                 );
             }
@@ -1131,7 +1107,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 None => {
                     eprintln!(
-                        "memex: no path between '{}' and '{}'",
+                        "indra: no path between '{}' and '{}'",
                         v.notes[a].id, v.notes[b].id
                     );
                     return Ok(ExitCode::FAILURE);
@@ -1299,12 +1275,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .root
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "memex".into());
+                .unwrap_or_else(|| "indra".into());
             let text = match format {
                 Format::Json => serde_json::to_string_pretty(&d).map_err(|e| e.to_string())? + "\n",
                 Format::Dot => export::dot(&d),
                 Format::Mermaid => export::mermaid(&d),
-                Format::Html => export::html(&d, &format!("memex - {}", name)),
+                Format::Html => export::html(&d, &format!("indra - {}", name)),
             };
             match output {
                 Some(p) => {

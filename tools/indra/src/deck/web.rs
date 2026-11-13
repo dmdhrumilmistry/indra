@@ -14,10 +14,10 @@
 //!   when they resolve inside a run directory; runners come from config only;
 //! - a strict Content-Security-Policy: no inline script, no third parties.
 
-use crate::config::{Harness, Settings};
-use crate::discover::{self, Def};
-use crate::procs::{Launch, Procs};
-use crate::runs;
+use crate::deck::config::{Harness, Settings};
+use crate::deck::discover::{self, Def};
+use crate::deck::procs::{Launch, Procs};
+use crate::deck::runs;
 use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -39,11 +39,11 @@ pub struct App {
     pub loopback: bool,
 }
 
-const COOKIE: &str = "agentdeck_token";
-const INDEX: &str = include_str!("../ui/index.html");
-const APP_JS: &str = include_str!("../ui/app.js");
-const STYLE: &str = include_str!("../ui/style.css");
-const FAVICON: &str = include_str!("../ui/favicon.svg");
+const COOKIE: &str = "indra_token";
+const INDEX: &str = include_str!("../../ui/index.html");
+const APP_JS: &str = include_str!("../../ui/app.js");
+const STYLE: &str = include_str!("../../ui/style.css");
+const FAVICON: &str = include_str!("../../ui/favicon.svg");
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                    connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
@@ -120,7 +120,7 @@ async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Respons
         if !ok {
             return ApiError(
                 StatusCode::UNAUTHORIZED,
-                "missing or wrong token: open the URL agentdeck printed when it started".into(),
+                "missing or wrong token: open the URL `indra serve` printed when it started".into(),
             )
             .into_response();
         }
@@ -210,7 +210,7 @@ impl App {
                 .settings
                 .harnesses
                 .first()
-                .ok_or_else(|| not_found("no harness configured; see `agentdeck init`")),
+                .ok_or_else(|| not_found("no harness configured; see `indra init`")),
         }
     }
 }
@@ -319,7 +319,7 @@ struct SaveReq {
 
 async fn def_put(State(app): State<Arc<App>>, Json(r): Json<SaveReq>) -> ApiResult<Json<Value>> {
     if app.settings.read_only {
-        return Err(forbidden("agentdeck is running read-only"));
+        return Err(forbidden("indra is running read-only"));
     }
     if r.content.len() > 1_000_000 {
         return Err(bad("content is larger than 1 MB"));
@@ -333,7 +333,7 @@ async fn def_put(State(app): State<Arc<App>>, Json(r): Json<SaveReq>) -> ApiResu
             "the file changed on disk since you opened it; reload to see the new version".into(),
         ));
     }
-    memex::vault::write_atomic(&d.abs, &r.content)
+    crate::mem::vault::write_atomic(&d.abs, &r.content)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(
         json!({ "saved": d.path, "hash": fingerprint(&r.content) }),
@@ -353,9 +353,9 @@ async fn memory(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<J
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let (notes, links) = match memex::vault::Vault::open(p) {
+            let (notes, links) = match crate::mem::vault::Vault::open(p) {
                 Ok(v) if p.is_dir() => {
-                    let g = memex::graph::Graph::build(&v);
+                    let g = crate::mem::graph::Graph::build(&v);
                     (v.notes.len(), g.edge_count())
                 }
                 _ => (0, 0),
@@ -382,9 +382,9 @@ async fn memory_graph(
         .get(q.i)
         .cloned()
         .ok_or_else(|| not_found("no such memory vault"))?;
-    let v = memex::vault::Vault::open(&p).map_err(not_found)?;
-    let g = memex::graph::Graph::build(&v);
-    Ok(Json(json!(memex::export::data(&v, &g, true))))
+    let v = crate::mem::vault::Vault::open(&p).map_err(not_found)?;
+    let g = crate::mem::graph::Graph::build(&v);
+    Ok(Json(json!(crate::mem::export::data(&v, &g, true))))
 }
 
 async fn runs_list(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
@@ -432,7 +432,7 @@ async fn proc_start(
     Json(r): Json<LaunchReq>,
 ) -> ApiResult<Json<Value>> {
     if app.settings.read_only {
-        return Err(forbidden("agentdeck is running read-only"));
+        return Err(forbidden("indra is running read-only"));
     }
     let prompt = r.prompt.trim();
     if prompt.is_empty() || prompt.len() > 20_000 {
@@ -481,7 +481,7 @@ async fn proc_stop(
     UrlPath(id): UrlPath<u64>,
 ) -> ApiResult<Json<Value>> {
     if app.settings.read_only {
-        return Err(forbidden("agentdeck is running read-only"));
+        return Err(forbidden("indra is running read-only"));
     }
     let p = app
         .procs
@@ -507,7 +507,7 @@ async fn proc_events(
     let after = q.after.unwrap_or(0);
     let (backlog, rx) = p.subscribe(after);
     let last = backlog.last().map(|e| e.seq).unwrap_or(after);
-    let to_sse = |e: &crate::procs::Event| {
+    let to_sse = |e: &crate::deck::procs::Event| {
         SseEvent::default().data(serde_json::to_string(e).unwrap_or_default())
     };
     let first = stream::iter(backlog.iter().map(to_sse).map(Ok).collect::<Vec<_>>());
@@ -562,7 +562,7 @@ pub fn router(app: Arc<App>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Harness, Runner, StageCfg};
+    use crate::deck::config::{Harness, Runner, StageCfg};
     use axum::body::Body;
     use http_body_util::BodyExt;
     use std::path::PathBuf;
@@ -571,8 +571,7 @@ mod tests {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     fn fixture(name: &str, read_only: bool) -> (Arc<App>, PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("agentdeck-web-{}-{}", std::process::id(), name));
+        let dir = std::env::temp_dir().join(format!("indra-web-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         let w = |rel: &str, s: &str| {
             let p = dir.join(rel);
@@ -619,7 +618,7 @@ mod tests {
             command: "echo".into(),
             args: vec!["{prompt}".into()],
             format: "text".into(),
-            program: crate::config::which("echo"),
+            program: crate::deck::config::which("echo"),
         };
         let settings = Settings {
             harnesses: vec![h],
@@ -988,7 +987,7 @@ mod tests {
             command: "sleep".into(),
             args: vec!["{prompt}".into()],
             format: "text".into(),
-            program: crate::config::which("sleep"),
+            program: crate::deck::config::which("sleep"),
         };
         let h = &app.settings.harnesses[0];
         let id = app

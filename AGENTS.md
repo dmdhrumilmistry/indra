@@ -56,8 +56,7 @@ gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file
 skills/                             # GENERATED mirror of the canonical skills
 scripts/sync-agent-skills.py        # regenerates that mirror
-tools/memex/                        # memex: Rust CLI for the graph-based memory (sh-memory skill)
-tools/agentdeck/                    # agentdeck: Rust web console to view, monitor and run agent harnesses
+tools/indra/                        # indra: one Rust CLI - graph memory (indra mem) and agent web console (indra serve)
 docs/DISTRIBUTION.md                # packaging and public-listing steps
 .github/actions/ai-agent/           # pluggable agent runner (claude | codex | gemini | custom)
 .github/workflows/                  # KB stage 1 (open PR), stage 2 (review and merge)
@@ -75,24 +74,24 @@ python3 scripts/sync-agent-skills.py --check   # verify it is current
 It exists because Gemini CLI loads an extension's skills from the extension root,
 while the Claude Code plugin format fixes them under the plugin directory.
 
-## Rust tools (memex, agentdeck)
+## indra (Rust)
 
-`tools/` is a Cargo workspace: `memex` (graph memory CLI, also a library) and `agentdeck`
-(web console for agent harnesses, which uses memex). Before committing a change there, run:
+`tools/indra` is one Rust crate and one binary: `src/mem/` is the graph memory
+(`indra mem`), `src/deck/` the agent web console (`indra serve`, `ls`, `check`,
+`init`), and `ui/` the console's embedded front end. Before committing a change there, run:
 
 ```bash
-cd tools
-cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+cd tools/indra
+cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Keep both cross-platform: no Unix-only APIs outside `#[cfg(unix)]` with a Windows
-counterpart, paths built with `Path`, and tests that pass on Windows. memex notes must
-stay readable by Obsidian. agentdeck can start processes, so keep its security model
-intact (see `tools/agentdeck/README.md`): token on every API call, loopback Host check,
+Keep it cross-platform: no Unix-only APIs outside `#[cfg(unix)]` with a Windows
+counterpart, paths built with `Path`, and tests that pass on Windows. Memory notes must
+stay readable by Obsidian. The console can start processes, so keep its security model
+intact (see `tools/indra/README.md`): token on every API call, loopback Host check,
 same-origin writes, no shell, files confined to what discovery found or to a run
-directory, and UI strings rendered with `textContent` only. `.github/workflows/tools.yml`
-tests the workspace on all three OSes and publishes binaries on a `memex-v*` or
-`agentdeck-v*` tag.
+directory, and UI strings rendered with `textContent` only. `.github/workflows/indra.yml`
+tests it on all three OSes and publishes binaries on an `indra-v*` tag.
 
 ## CI: the two-stage knowledge-base updater
 

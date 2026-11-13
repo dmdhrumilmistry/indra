@@ -1,4 +1,4 @@
-// agentdeck UI. Plain JavaScript, no build step, no third-party code.
+// indra UI. Plain JavaScript, no build step, no third-party code.
 // Every string from the server is rendered with textContent, never as HTML.
 (function () {
   "use strict";
@@ -52,7 +52,7 @@
     setTimeout(function () { t.remove(); }, bad ? 6000 : 2600);
   }
 
-  var S = { ov: null, h: store("agentdeck.h") || "", cleanup: [] };
+  var S = { ov: null, h: store("indra.h") || "", cleanup: [] };
 
   function api(path, opts) {
     opts = opts || {};
@@ -76,7 +76,7 @@
     m.textContent = "";
     m.appendChild(h("div", { class: "authwall card" },
       h("h1", { text: "Access token needed" }),
-      h("p", { text: "agentdeck printed a URL containing an access token when it started. Open that URL once in this browser; it sets a cookie and you will not need it again until agentdeck restarts." }),
+      h("p", { text: "indra printed a URL containing an access token when it started. Open that URL once in this browser; it sets a cookie and you will not need it again until indra restarts." }),
       h("p", { class: "muted", text: "The token protects the console because it can start agents and edit prompts on this machine." })));
   }
 
@@ -275,7 +275,7 @@
 
   function pageOverview(m) {
     var ov = S.ov;
-    m.appendChild(header("Overview", "Harnesses agentdeck found, what they contain, and what is running."));
+    m.appendChild(header("Overview", "Harnesses indra found, what they contain, and what is running."));
     var grid = h("div", { class: "grid" });
     ov.harnesses.forEach(function (x) {
       var c = x.counts;
@@ -290,7 +290,7 @@
           })));
       grid.appendChild(card);
     });
-    if (!ov.harnesses.length) grid.appendChild(empty("No harness found. Run agentdeck inside a project, pass --target, or create a config with `agentdeck init`."));
+    if (!ov.harnesses.length) grid.appendChild(empty("No harness found. Run indra inside a project, pass --target, or create a config with `indra init`."));
     m.appendChild(grid);
 
     var hs = harness();
@@ -395,7 +395,7 @@
   }
 
   function pageMemory(m, idx) {
-    m.appendChild(header("Memory", "memex vaults this harness reads and writes: past findings, learnings and their relations."));
+    m.appendChild(header("Memory", "Memory vaults this harness reads and writes: past findings, learnings and their relations."));
     api("/api/memory" + hq()).then(function (list) {
       if (!list.length) { m.appendChild(empty("This harness has no memory vaults configured.")); return; }
       var cur = idx === undefined ? (list.find(function (v) { return v.exists && v.notes; }) || list[0]).index : Number(idx);
@@ -506,10 +506,10 @@
   function pageLaunch(m) {
     var ov = S.ov, hs = harness();
     m.appendChild(header("Launch an agent", "Runs a configured runner in a target directory with your prompt, and streams what it does."));
-    if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "agentdeck is running read-only, so launching is disabled." })); return; }
+    if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
     if (!hs) { m.appendChild(empty("No harness configured.")); return; }
     var avail = ov.runners.filter(function (r) { return r.available; });
-    if (!avail.length) { m.appendChild(h("div", { class: "note warn", text: "No runner is installed. Install Claude Code, Codex or Gemini CLI, or add a [[runner]] to agentdeck.toml." })); return; }
+    if (!avail.length) { m.appendChild(h("div", { class: "note warn", text: "No runner is installed. Install Claude Code, Codex or Gemini CLI, or add a [[runner]] to indra.toml." })); return; }
     var runner = h("select", { "aria-label": "Runner" }, avail.map(function (r) { return h("option", { value: r.name, text: r.name + "  (" + r.command + ")" }); }));
     var target = h("select", { "aria-label": "Target" }, hs.targets.map(function (t, i) { return h("option", { value: String(i), text: t }); }));
     var presets = ov.presets.filter(function (p) { return !p.harness || p.harness === hs.name; });
@@ -619,7 +619,7 @@
 
   // ---- router --------------------------------------------------------------------
   function setHarness(name) {
-    S.h = name; store("agentdeck.h", name);
+    S.h = name; store("indra.h", name);
     $("harness").value = name;
     route();
   }
@@ -675,10 +675,10 @@
   $("theme").addEventListener("click", function () {
     var dark = cssVar("--bg") === "#131312";
     var t = dark ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", t); store("agentdeck.theme", t);
+    document.documentElement.setAttribute("data-theme", t); store("indra.theme", t);
     route();
   });
-  var savedTheme = store("agentdeck.theme");
+  var savedTheme = store("indra.theme");
   if (savedTheme === "light" || savedTheme === "dark") document.documentElement.setAttribute("data-theme", savedTheme);
   window.addEventListener("hashchange", route);
   route();

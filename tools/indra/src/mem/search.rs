@@ -1,7 +1,7 @@
 //! Ranked full-text search: BM25 over title, aliases, tags, type and body,
 //! with field boosts, light plural stemming and prefix matching.
 
-use crate::note::Note;
+use crate::mem::note::Note;
 use std::collections::HashMap;
 
 const K1: f64 = 1.2;
@@ -162,7 +162,7 @@ pub fn snippet(body: &str, query: &str, max: usize) -> String {
     let mut fallback = None;
     for line in body.lines() {
         let t = line.trim();
-        let relation = t.contains("[[") && crate::note::inline_field(t).is_some();
+        let relation = t.contains("[[") && crate::mem::note::inline_field(t).is_some();
         if t.is_empty() || t.starts_with('#') || t == "---" || relation {
             continue;
         }

@@ -34,7 +34,7 @@ Parse `$ARGUMENTS` (all optional):
 - **`stage:<name>`**: run only one stage against an existing run (`recon`|`hunt`|`chain`|`verify`|`report`|`remember`).
   Requires a prior run (reads `latest`). Default: run all stages 0->6.
 - **`memory:off`**: neither read nor write long-term memory (the `sh-memory` skill) for this run. Default:
-  on whenever `memex` is available.
+  on whenever `indra` is available.
 - **`depth:quick|deep`**: `deep` -> `graft build --deep` and larger hunter budgets. `quick` -> structural
   graft only, tighter budgets. Default: `deep` if the repo is small (< ~1500 files), else `quick`.
 - **`models:<preset>` and/or `models:<stage>=<model>,...`**: override the model each stage runs on
@@ -111,8 +111,8 @@ Stage 0 announcement so the user sees exactly what each stage will run on.
    non-interactive installs; never launch an elevation prompt. If an install fails or no installer exists,
    mark the tool `false` and continue - **nothing here blocks the run.** Re-check `<tool> --version` after
    installing.
-   Also probe `memex --version` (long-term memory, see the `sh-memory` skill). If it is missing, install it
-   per the `memex` section of tooling-setup.md under the same rules. Skip the probe when `memory:off`.
+   Also probe `indra --version` (long-term memory, see the `sh-memory` skill). If it is missing, install it
+   per the `indra` section of tooling-setup.md under the same rules. Skip the probe when `memory:off`.
 6. **Write `capabilities.json`** (see state-files.md) from the post-install probes, recording which tools
    were installed this run and any that could not be (with a short reason in `notes`). Also note whether
    claude-in-chrome browser tools are available (Chrome PDF fallback).
@@ -139,7 +139,7 @@ After it returns: read `recon.md`. Decide the **class list** to hunt - the user'
 else the classes whose sinks/surface recon actually found (don't hunt XXE if there's no XML parsing).
 Log the decision to the user.
 
-### Memory recall (orchestrator, only when `capabilities.memex` is true)
+### Memory recall (orchestrator, only when `capabilities.indra` is true)
 
 Long-term memory turns past runs into leads. Follow the `sh-memory` skill. For each selected class, build a
 query from the class slug, the frameworks recon found, and the names of that class's sinks in
@@ -147,8 +147,8 @@ query from the class slug, the frameworks recon found, and the names of that cla
 
 ```bash
 TV="<TARGET>/.security-harness/memory"
-{ memex --vault "$TV" recall "<class> <frameworks> <sinks>" -n 8 --max-chars 5000
-  memex recall "<class> <frameworks>" -n 5 --max-chars 2500; } > "<run_dir>/recall-<class>.md"
+{ indra mem --vault "$TV" recall "<class> <frameworks> <sinks>" -n 8 --max-chars 5000
+  indra mem recall "<class> <frameworks>" -n 5 --max-chars 2500; } > "<run_dir>/recall-<class>.md"
 ```
 
 The first command reads the target vault (this codebase's past findings, guards and false positives), the
@@ -202,7 +202,7 @@ chains, appendix), `findings.json` (array of all findings), `results.sarif` (SAR
 (via the capability fallback chain: wkhtmltopdf -> pandoc -> headless Chrome; else keep HTML and note
 PDF skipped). Emit `report.docx` if pandoc is present.
 
-## Stage 6 - Remember (orchestrator, only when `capabilities.memex` is true)
+## Stage 6 - Remember (orchestrator, only when `capabilities.indra` is true)
 
 Follow the `sh-memory` skill. First the mechanical part, which records every verified / needs-runtime
 finding and every false positive into the target vault (no evidence, payloads or secrets are copied):
@@ -222,7 +222,7 @@ A failure here is reported, never fatal: the review's reports are already writte
 Print to the user: run directory path, counts (candidates found / verified / false-positive /
 needs-runtime), top findings by severity, chains, and the paths of the generated reports. If memory was
 used, also say how many notes were recalled and recorded, and that
-`memex --vault <TARGET>/.security-harness/memory export -o graph.html` renders the memory as an
+`indra mem --vault <TARGET>/.security-harness/memory export -o graph.html` renders the memory as an
 interactive graph (or open that folder in Obsidian). If any stage
 degraded (Graft/SCA/PDF absent), say so plainly and how it affected coverage/confidence.
 

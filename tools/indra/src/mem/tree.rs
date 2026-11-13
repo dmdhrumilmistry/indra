@@ -12,8 +12,8 @@
 //! back to a note already drawn elsewhere is shown as a leaf marked `(*)`, so
 //! every link of an expanded note is visible without the drawing looping.
 
-use crate::graph::{Dir, Graph};
-use crate::vault::Vault;
+use crate::mem::graph::{Dir, Graph};
+use crate::mem::vault::Vault;
 use std::collections::{HashMap, VecDeque};
 
 /// The step that discovered a note: (parent, rel, direction from parent).

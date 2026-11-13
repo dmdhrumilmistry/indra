@@ -3,24 +3,6 @@
 version = 3
 
 [[package]]
-name = "agentdeck"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "futures-util",
- "getrandom",
- "http-body-util",
- "libc",
- "memex",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tower",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,6 +331,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "indra"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "getrandom",
+ "http-body-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tower",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -383,15 +382,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "memex"
-version = "0.1.0"
-dependencies = [
- "clap",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "mime"

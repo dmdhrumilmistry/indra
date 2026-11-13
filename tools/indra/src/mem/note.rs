@@ -6,7 +6,7 @@
 //!   `[label](other-note.md)`                                -> rel `related`
 //!   a frontmatter key whose value holds `[[target]]`        -> rel = that key
 
-use crate::frontmatter::{self, Frontmatter, Value};
+use crate::mem::frontmatter::{self, Frontmatter, Value};
 use serde::Serialize;
 use std::path::PathBuf;
 

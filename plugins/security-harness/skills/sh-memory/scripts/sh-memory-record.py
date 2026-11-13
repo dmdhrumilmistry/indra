@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Record a finished security-harness run into a memex memory vault.
+"""Record a finished security-harness run into an indra memory vault.
 
 Why a script and not the model: turning verified.jsonl into notes is exact
 bookkeeping. Doing it deterministically means a finding is never "remembered"
 with a different title, a false positive is never silently dropped, and a
 re-run of the same issue lands on the same note instead of a near-duplicate.
 
-What it writes (all through the `memex` CLI, never by editing files itself):
+What it writes (all through `indra mem`, never by editing files itself):
   - one hub note per vulnerability class      (type: vuln-class)
   - one hub note per affected file            (type: file)
   - verified / needs-runtime findings         (type: finding)
@@ -26,12 +26,12 @@ not belong in a long-lived store. Notes keep the location, verdict, rationale
 and mitigation, which is what a future reviewer needs.
 
 Usage:
-  sh-memory-record.py <run_dir> [--vault DIR] [--memex PATH] [--dry-run]
+  sh-memory-record.py <run_dir> [--vault DIR] [--indra PATH] [--dry-run]
 
   <run_dir>   <TARGET>/.security-harness/<run-id>
   --vault     default: <TARGET>/.security-harness/memory (the target vault)
-  --memex     memex binary (default: `memex` on PATH)
-  --dry-run   print the memex commands instead of running them
+  --indra     indra binary (default: `indra` on PATH)
+  --dry-run   print the indra commands instead of running them
 
 Exit codes: 0 success, 1 error, 2 bad usage.
 """
@@ -82,19 +82,19 @@ def fingerprint(f):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
-class Memex:
+class Indra:
     def __init__(self, binary, vault, dry_run):
-        self.base = [binary, "--vault", vault]
+        self.base = [binary, "mem", "--vault", vault]
         self.dry = dry_run
 
     def run(self, *args, check=True):
         cmd = self.base + list(args)
         if self.dry:
-            print("memex " + " ".join(_shell_quote(a) for a in cmd[1:]))
+            print("indra " + " ".join(_shell_quote(a) for a in cmd[1:]))
             return 0, "{}"
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
         if check and p.returncode != 0:
-            raise RuntimeError("memex %s failed: %s" % (args[0], p.stderr.strip()))
+            raise RuntimeError("indra mem %s failed: %s" % (args[0], p.stderr.strip()))
         return p.returncode, p.stdout
 
     def exists(self, name):
@@ -226,18 +226,18 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run_dir")
     ap.add_argument("--vault")
-    ap.add_argument("--memex", default="memex")
+    ap.add_argument("--indra", default="indra")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
     run_dir = os.path.abspath(a.run_dir)
     vault = a.vault or os.path.join(os.path.dirname(run_dir), "memory")
-    binary = a.memex if ("/" in a.memex or os.sep in a.memex) else shutil.which(a.memex)
+    binary = a.indra if ("/" in a.indra or os.sep in a.indra) else shutil.which(a.indra)
     if not binary and not a.dry_run:
-        print("memex not found on PATH; install it (see the sh-memory skill) or pass --memex", file=sys.stderr)
+        print("indra not found on PATH; install it (see the sh-memory skill) or pass --indra", file=sys.stderr)
         return 1
     try:
-        counts = record(run_dir, Memex(binary or a.memex, vault, a.dry_run))
+        counts = record(run_dir, Indra(binary or a.indra, vault, a.dry_run))
     except (OSError, RuntimeError) as e:
         print("sh-memory-record: %s" % e, file=sys.stderr)
         return 1

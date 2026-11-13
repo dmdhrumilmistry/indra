@@ -2,7 +2,7 @@
 //! type. Links whose target does not exist are kept as `dangling` (Obsidian
 //! calls them unresolved links) and shown as ghost nodes in exports.
 
-use crate::vault::Vault;
+use crate::mem::vault::Vault;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

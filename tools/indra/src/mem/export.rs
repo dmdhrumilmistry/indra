@@ -1,8 +1,8 @@
 //! Graph exports: JSON (for tools), DOT (Graphviz), Mermaid (renders in
 //! GitHub Markdown) and a single self-contained interactive HTML file.
 
-use crate::graph::Graph;
-use crate::vault::Vault;
+use crate::mem::graph::Graph;
+use crate::mem::vault::Vault;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -61,7 +61,7 @@ pub fn data(v: &Vault, g: &Graph, with_body: bool) -> GraphData {
     }
     let mut ghosts: BTreeMap<String, String> = BTreeMap::new();
     for d in &g.dangling {
-        let slug = crate::note::slugify(&d.target);
+        let slug = crate::mem::note::slugify(&d.target);
         let key = format!(
             "?{}",
             if slug.is_empty() {
@@ -105,7 +105,7 @@ fn dot_escape(s: &str) -> String {
 
 pub fn dot(d: &GraphData) -> String {
     let mut s =
-        String::from("digraph memex {\n  rankdir=LR;\n  node [shape=box, style=rounded];\n");
+        String::from("digraph indra {\n  rankdir=LR;\n  node [shape=box, style=rounded];\n");
     for n in &d.nodes {
         let style = if n.ghost {
             ", style=\"rounded,dashed\""
@@ -180,11 +180,11 @@ pub fn html(d: &GraphData, title: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;");
-    let (head, tail) = VIEWER.split_once("__MEMEX_DATA__").unwrap_or((VIEWER, ""));
+    let (head, tail) = VIEWER.split_once("__INDRA_DATA__").unwrap_or((VIEWER, ""));
     format!(
         "{}{}{}",
-        head.replace("__MEMEX_TITLE__", &title),
+        head.replace("__INDRA_TITLE__", &title),
         json,
-        tail.replace("__MEMEX_TITLE__", &title)
+        tail.replace("__INDRA_TITLE__", &title)
     )
 }

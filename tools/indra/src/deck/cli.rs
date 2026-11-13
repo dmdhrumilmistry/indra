@@ -1,144 +1,113 @@
-//! agentdeck - a local web console for AI agent harnesses.
+//! The console commands: `indra serve`, `indra ls`, `indra check`, `indra init`.
 //!
 //! View a harness's agents, skills and prompts (and edit them), see how they
-//! connect, browse memex memory graphs, monitor runs, and launch agents and
-//! watch them work. Ships with the security-harness profile as its default
-//! and works with any harness described by a few globs.
+//! connect, browse memory graphs, monitor runs, and launch agents and watch
+//! them work. The security-harness profile is the default; any harness
+//! described by a few globs works too.
 
-mod config;
-mod discover;
-mod procs;
-mod runs;
-mod web;
-
-use clap::{Parser, Subcommand};
+use crate::deck::{config, discover, procs, runs, web};
+use clap::Args;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-#[derive(Parser)]
-#[command(
-    name = "agentdeck",
-    version,
-    about = "A local web console to view, monitor and run AI agent harnesses"
-)]
-struct Cli {
-    /// Config file (default: ./agentdeck.toml, then ~/.config/agentdeck/agentdeck.toml)
-    #[arg(long, global = true, value_name = "FILE")]
+/// Which harnesses to load. Shared by every console command.
+#[derive(Args)]
+pub struct DeckOpts {
+    /// Config file (default: ./indra.toml, then ~/.config/indra/indra.toml)
+    #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
     /// Codebase whose runs to monitor and where agents run (repeatable; default: .)
-    #[arg(long = "target", global = true, value_name = "DIR")]
+    #[arg(long = "target", value_name = "DIR")]
     targets: Vec<PathBuf>,
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
 }
 
-#[derive(Subcommand)]
-enum Cmd {
-    /// Start the web console (the default command)
-    Serve {
-        /// Address to listen on (default 127.0.0.1:7878; port 0 picks a free one)
-        #[arg(long)]
-        bind: Option<String>,
-        /// Disable launching agents and editing prompts
-        #[arg(long)]
-        read_only: bool,
-        /// Use this access token instead of a random one (or set AGENTDECK_TOKEN)
-        #[arg(long, env = "AGENTDECK_TOKEN", hide_env_values = true)]
-        token: Option<String>,
-        /// Open the console in the default browser
-        #[arg(long)]
-        open: bool,
-    },
-    /// Write a commented starter agentdeck.toml
-    Init {
-        #[arg(default_value = "agentdeck.toml")]
-        path: PathBuf,
-        #[arg(long)]
-        force: bool,
-    },
-    /// Summarise harnesses, agents and runs in the terminal
-    Ls {
-        /// Also list every agent, skill and prompt
-        #[arg(long)]
-        defs: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Validate the configuration and report what was found
-    Check,
-}
-
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("agentdeck: {}", e);
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn load(
-    cli_config: Option<PathBuf>,
-    targets: Vec<PathBuf>,
+#[derive(Args)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+    /// Address to listen on (default 127.0.0.1:7878; port 0 picks a free one)
+    #[arg(long)]
     bind: Option<String>,
+    /// Disable launching agents and editing prompts
+    #[arg(long)]
     read_only: bool,
-) -> config::Result<config::Settings> {
+    /// Use this access token instead of a random one (or set INDRA_TOKEN)
+    #[arg(long, env = "INDRA_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+    /// Open the console in the default browser
+    #[arg(long)]
+    open: bool,
+}
+
+#[derive(Args)]
+pub struct LsArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+    /// Also list every agent, skill and prompt
+    #[arg(long)]
+    defs: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+pub struct CheckArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+}
+
+#[derive(Args)]
+pub struct InitArgs {
+    #[arg(default_value = "indra.toml")]
+    path: PathBuf,
+    #[arg(long)]
+    force: bool,
+}
+
+fn load(opts: DeckOpts, bind: Option<String>, read_only: bool) -> config::Result<config::Settings> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     config::load(config::LoadOptions {
-        config: cli_config,
-        targets,
+        config: opts.config,
+        targets: opts.targets,
         bind,
         read_only,
         cwd,
     })
 }
 
-fn run(cli: Cli) -> Result<ExitCode, String> {
-    match cli.cmd.unwrap_or(Cmd::Serve {
-        bind: None,
-        read_only: false,
-        token: None,
-        open: false,
-    }) {
-        Cmd::Init { path, force } => {
-            if path.exists() && !force {
-                return Err(format!(
-                    "{} exists; pass --force to overwrite",
-                    path.display()
-                ));
-            }
-            std::fs::write(&path, config::SAMPLE)
-                .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-            println!("wrote {}", path.display());
-            Ok(ExitCode::SUCCESS)
-        }
-        Cmd::Ls { defs, json } => {
-            let s = load(cli.config, cli.targets, None, false)?;
-            ls(&s, defs, json);
-            Ok(ExitCode::SUCCESS)
-        }
-        Cmd::Check => {
-            let s = load(cli.config, cli.targets, None, false)?;
-            Ok(check(&s))
-        }
-        Cmd::Serve {
-            bind,
-            read_only,
-            token,
-            open,
-        } => {
-            let s = load(cli.config, cli.targets, bind, read_only)?;
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())?;
-            rt.block_on(serve(s, token, open))?;
-            Ok(ExitCode::SUCCESS)
-        }
+pub fn init(a: InitArgs) -> Result<ExitCode, String> {
+    if a.path.exists() && !a.force {
+        return Err(format!(
+            "{} exists; pass --force to overwrite",
+            a.path.display()
+        ));
     }
+    std::fs::write(&a.path, config::SAMPLE)
+        .map_err(|e| format!("cannot write {}: {}", a.path.display(), e))?;
+    println!("wrote {}", a.path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn run_ls(a: LsArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, None, false)?;
+    ls(&s, a.defs, a.json);
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn run_check(a: CheckArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, None, false)?;
+    Ok(check(&s))
+}
+
+pub fn run_serve(a: ServeArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, a.bind, a.read_only)?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(serve(s, a.token, a.open))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn new_token() -> Result<String, String> {
@@ -169,12 +138,12 @@ async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result
     };
     let url = format!("http://{}/?token={}", host, token);
 
-    println!("agentdeck {}", env!("CARGO_PKG_VERSION"));
+    println!("indra {}", env!("CARGO_PKG_VERSION"));
     for h in &s.harnesses {
         println!("  harness  {}  ({})", h.name, h.root.display());
     }
     if s.harnesses.is_empty() {
-        println!("  no harness found: run inside a project, pass --target, or write one with `agentdeck init`");
+        println!("  no harness found: run inside a project, pass --target, or write one with `indra init`");
     }
     let available: Vec<&str> = s
         .runners
@@ -193,7 +162,7 @@ async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result
         }
     );
     if !loopback {
-        eprintln!("agentdeck: WARNING listening on {} - anyone who can reach it and has the token can run agents on this machine", addr);
+        eprintln!("indra: WARNING listening on {} - anyone who can reach it and has the token can run agents on this machine", addr);
     }
     println!(
         "\nOpen: {}\n(the token in this URL is the password; keep it private)",
@@ -271,7 +240,7 @@ fn ls(s: &config::Settings, with_defs: bool, json: bool) {
                     d.kind.as_str(),
                     d.name,
                     model,
-                    memex::search::truncate(&d.description, 70)
+                    crate::mem::search::truncate(&d.description, 70)
                 );
             }
         }

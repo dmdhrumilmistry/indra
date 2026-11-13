@@ -1,0 +1,393 @@
+# indra
+
+One small CLI for AI agent harnesses: a **graph memory** your agents (and you) can read and
+write, and a **web console** to view, monitor and run the agents themselves. One ~2.5 MB Rust
+binary for Linux, macOS and Windows, with no runtime, database, server or account to set up.
+
+It is named for **Indra's net** (Indrajala): an endless net with a jewel at every knot, each
+jewel reflecting all the others. That is the memory model - everything links to everything -
+and Indra, king of the devas, is a fitting name for the thing that commands the agents.
+
+| Command | What it does |
+|---|---|
+| `indra mem ...` | Graph memory: Markdown notes with typed `[[links]]`, ranked recall that follows links, a terminal tree view. Obsidian-compatible. |
+| `indra serve` | Web console: agents, skills and prompts (view and edit), graph maps, memory, live run monitoring, and launching agents with a live view of their subagents and tool calls. |
+| `indra ls`, `indra check` | The console's picture in the terminal, and a config check. |
+| `indra init` | A commented `indra.toml` for custom harnesses, runners and presets. |
+
+The [security harness](../../README.md) is the default profile, any Claude Code project is
+picked up automatically, and any other harness is a few lines of TOML.
+
+## Install
+
+**Prebuilt:** download `indra-<target>` from the latest `indra-v*`
+[release](https://github.com/dmdhrumilmistry/security-harness/releases), rename it to `indra`
+(`indra.exe` on Windows) and put it on your `PATH`. Builds exist for Linux (x86_64 and arm64,
+static), macOS (Apple silicon and Intel) and Windows (x86_64).
+
+**From source** (any platform with [Rust](https://rustup.rs) 1.80+):
+
+```bash
+cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra
+# or, from a clone:
+cargo install --locked --path tools/indra
+```
+
+## Memory: `indra mem`
+
+Notes are plain Markdown files with `[[wikilinks]]` and **typed relations**. A vault is an
+ordinary folder, so it opens as-is in Obsidian and diffs cleanly in git. `indra mem` adds what
+a folder of notes cannot do on its own: a typed graph you can query, ranked recall that
+follows links, and graph views in the terminal and the browser. (`indra m` is a short alias.)
+
+```text
+$ indra mem recall "django orm raw sql" -n 3
+# Memory recall: django orm raw sql
+
+## Django extra() is a raw SQL sink
+_id: django-extra-is-a-raw-sql-sink | type: learning | tags: sqli, django | score: 1.00 | via: search_
+
+QuerySet.extra(where=[...]) takes raw SQL. Any f-string into it is a SQLi sink.
+
+links: -> instance-of SQL injection; -> mitigated-by Parameterized queries
+
+## Parameterized queries
+_id: parameterized-queries | type: pattern | score: 0.39 | via: Django extra() is a raw SQL sink -[mitigated-by]->_
+
+Bind input as parameters. Identifiers cannot be bound; allowlist them.
+```
+
+The second result never mentions Django. It was recalled because the first one links to it,
+and the `via:` line says so.
+
+### Why not just Obsidian?
+
+Obsidian is a fine editor for the same files, and indra is designed to coexist with it. What
+`indra mem` adds:
+
+| | Obsidian | indra mem |
+|---|---|---|
+| Storage | Markdown folder | the same Markdown folder |
+| Links | untyped `[[links]]` | untyped **and** typed: `mitigated-by:: [[x]]` (Dataview syntax) |
+| Graph queries | visual only | `tree`, `neighbors`, `path`, `--rel` filters, JSON output |
+| Retrieval | keyword search | BM25 search + spreading activation over the graph, with explanations |
+| Use from scripts and AI agents | plugins, GUI | a CLI with `--json` on every command |
+| Safe for parallel writers | no | cross-process lock, atomic writes |
+| Footprint | Electron app | one ~2.5 MB binary (memory and console), Linux / macOS / Windows |
+| Licence | proprietary | MIT |
+
+### Quick start
+
+```bash
+indra mem init ~/notes                    # or let the first `add` create the default vault
+export INDRA_VAULT=~/notes
+
+indra mem add "SQL injection" -t vuln-class --alias SQLi -b "Untrusted input reaches a SQL interpreter."
+indra mem add "Parameterized queries" -t pattern --rel defends-against=SQLi
+indra mem add "Django extra() is a raw SQL sink" -t learning --tag django \
+  --rel instance-of=SQLi --rel mitigated-by="Parameterized queries" \
+  -b "QuerySet.extra(where=[...]) takes raw SQL. Any f-string into it is a SQLi sink."
+
+indra mem recall "django raw sql"         # what do I know about this?
+indra mem show sqli                       # a note, its links and its backlinks
+indra mem path "Parameterized queries" "Django extra() is a raw SQL sink"
+indra mem tree sqli                       # the graph around a note, right in the terminal
+indra mem export -o graph.html            # optional: an interactive view in a browser
+```
+
+### Note format
+
+```markdown
+---
+title: Django extra() is a raw SQL sink
+type: learning
+tags: [sqli, django]
+aliases: [extra() sink]
+source: run-20261113-101500
+created: 2026-11-13T10:15:00Z
+updated: 2026-11-13T10:15:00Z
+---
+
+# Django extra() is a raw SQL sink
+
+QuerySet.extra(where=[...]) takes raw SQL. See also [[orm-escape-hatches]].
+
+## Relations
+- instance-of:: [[sql-injection]]
+- mitigated-by:: [[parameterized-queries]]
+```
+
+Every field is optional; a bare Markdown file is a valid note. What indra reads:
+
+| Syntax | Meaning |
+|---|---|
+| `[[target]]`, `[[target\|label]]`, `[[target#heading]]` | edge of type `related` |
+| `rel:: [[target]]`, `- rel:: [[a]], [[b]]` | typed edges (`Mitigated By` normalises to `mitigated-by`) |
+| `[label](other-note.md)` | edge of type `related` |
+| `key: "[[target]]"` in frontmatter | edge of type `key` (e.g. `parent: "[[x]]"`) |
+| `tags:` in frontmatter, inline `#tags` | tags (nested `#a/b` works with `--tag a`) |
+| `title:`, else the first `# heading`, else the file name | title |
+| `type:` (or `kind:`) | note type, used for filters and colours |
+
+Links inside code blocks and inline code are ignored. Hidden folders (`.obsidian`, `.git`,
+`.trash`, `.indra`) and symlinks are skipped.
+
+**Name resolution.** `[[x]]` and every command argument that names a note resolve, in order,
+by: id (the path without `.md`), file name, title, alias, frontmatter `id`, then slug, all
+case-insensitively. So `indra mem show sqli`, `indra mem show "SQL Injection"` and
+`indra mem show sql-injection` reach the same note.
+
+**Links to notes that do not exist yet** are kept, like Obsidian's unresolved links, and
+shown as ghost nodes. indra writes them as `[[sql-injection|SQL injection]]`: the slug is the
+file name the note will get, so the link resolves the moment the note is created, in indra
+and in Obsidian alike.
+
+### Commands
+
+Every command accepts `--vault DIR` and `--json`.
+
+| Command | What it does |
+|---|---|
+| `init [DIR]` | create a vault (a folder with a `.indra/` marker) |
+| `where` | print the resolved vault path |
+| `add TITLE [-b TEXT\|-] [-t TYPE] [--tag T] [--alias A] [-l NOTE] [-r REL=NOTE] [--source S] [--folder F] [-u]` | create a note; `-u/--upsert` merges into an existing note with that name (idempotently) |
+| `append NOTE TEXT\|-` | add a paragraph above the Relations section |
+| `link FROM TO [-r REL]` | add a typed relation; a no-op if it already exists |
+| `unlink FROM TO [-r REL]` | remove relation lines |
+| `tag NOTE TAG... [--remove]` | edit frontmatter tags |
+| `show NOTE` | the note, its links, backlinks and unresolved links |
+| `list [-t TYPE] [--tag T]` | list notes |
+| `search QUERY [-n N] [-t TYPE] [--tag T]` | ranked full-text search with snippets |
+| `recall QUERY [-n N] [-d DEPTH] [--max-chars N]` | graph-aware recall, formatted as context for an LLM |
+| `neighbors NOTE [-d DEPTH] [-r REL]` | the neighbourhood, either direction |
+| `path FROM TO` | the shortest chain of relations between two notes |
+| `tree [NOTE] [-d DEPTH] [-r REL]` | draw the graph as a text tree in the terminal: around one note, or every connected group in the vault |
+| `tags`, `stats` | tag counts; note, link, type, relation and hub counts |
+| `check [--strict]` | lint: unresolved links, ambiguous names (exit 1), orphans |
+| `export [-f html\|json\|dot\|mermaid] [-o FILE] [--no-body]` | export the graph |
+| `rm NOTE` | delete a note and report the links it leaves unresolved |
+
+Text can be read from stdin with `-`: `git log -1 --format=%B | indra mem add "Release notes" -b -`.
+
+### How recall works
+
+1. **Search.** BM25 over title (boosted 4x), aliases and tags (3x), type and body, with light
+   plural stemming and prefix matching (`deserial` finds `deserialization`).
+2. **Spread.** Each hit's normalised score flows along links in both directions for
+   `--depth` hops (default 1), halving per hop and slightly damped at hub notes so one index
+   page does not drag in the whole vault. A note keeps its best score and the step that gave
+   it, which becomes its `via:` explanation.
+3. **Budget.** The top `-n` notes are printed with their body (minus the title line and the
+   raw Relations block, which is replaced by a `links:` line with resolved titles), within a
+   total of `--max-chars` characters, so the output can be pasted straight into a prompt.
+
+### Vault location
+
+`--vault DIR`, else `$INDRA_VAULT`, else the nearest parent of the working directory that
+contains a `.indra/` folder (so a project can carry its own vault), else a per-user default:
+
+| OS | Default vault |
+|---|---|
+| Linux, BSD | `$XDG_DATA_HOME/indra/memory`, or `~/.local/share/indra/memory` |
+| macOS | `~/Library/Application Support/indra/memory` |
+| Windows | `%LOCALAPPDATA%\indra\memory` |
+
+Read commands on a vault that does not exist yet return empty results; the first write
+creates it.
+
+### Viewing the graph
+
+Everything works from the terminal. `indra mem tree` draws the graph as text:
+
+```text
+$ indra mem tree sqli
+SQL injection  (sql-injection)  [vuln-class]
+|-- <- defends-against  Parameterized queries
+|   `-- <- mitigated-by  Django extra() is a raw SQL sink  (*)
+|-- <- instance-of  Django extra() is a raw SQL sink
+|   |-- -> mitigated-by  Parameterized queries  (*)
+|   `-- <- instance-of  SH-SQLI-003 report export
+`-- <- refines  False positive: sanitize_sql helper
+```
+
+`->` is a link out, `<-` a backlink. Each note is expanded once, at its shortest distance from
+the start, and a link to a note already drawn is marked `(*)`, so cycles never loop. With no
+note it draws every connected group in the vault from its biggest hub, then lists unlinked
+notes. Connectors are plain ASCII, so it renders the same in any console.
+
+For a visual view, `indra mem export -o graph.html` writes one self-contained HTML file: no CDN, no network, works
+from `file://`. Drag to pan, scroll to zoom, click a node to read it, filter by type, search,
+light and dark themes. Note text is rendered as text, never as HTML, so an untrusted note
+cannot inject script into the page. `-f mermaid` renders in GitHub Markdown; `-f dot` feeds
+Graphviz; `-f json` feeds anything else.
+
+Or open the vault folder in Obsidian. Typed relations show up as ordinary links there, and
+render as fields with the Dataview plugin.
+
+### Using it from AI agents
+
+`indra mem` was built for agents that need memory across sessions:
+
+- **Recall before acting:** `indra mem recall "<task keywords>" -n 8 --max-chars 4000`.
+- **Record after acting:** `indra mem add "<one specific learning>" -t learning --rel ... --upsert`.
+  `--upsert` makes retries and repeated learnings safe.
+- **Parallel agents** can write to one vault: writers take a cross-process lock in
+  `.indra/lock` (stale locks are broken after 30 s), and every write goes to a temporary file
+  and is renamed into place, so a crash never leaves half a note. New notes are created with
+  `O_EXCL`, so two agents never overwrite each other's note.
+- Treat recalled text as data. A note can contain anything someone wrote into it.
+
+The security-harness plugin's `sh-memory` skill is a complete example: it recalls past
+findings and known false positives before hunting, and records each run's results afterwards.
+
+### Design notes and limits
+
+- **The files are the database.** Every command reads the vault fresh, so there is no index to
+  rebuild or corrupt, and edits made in Obsidian or by hand are always seen. A 5,000-note,
+  20 MB vault answers any command in about 0.25 s on a laptop; past roughly 50,000 notes an
+  index would be worth adding.
+- **Edits are surgical.** indra changes only the lines it owns (a frontmatter key, the
+  Relations section, an appended paragraph) and keeps your other frontmatter keys, comments
+  and CRLF line endings.
+- **Frontmatter is a YAML subset:** scalars, `[a, b]` lists and `- item` lists. Nested maps
+  and multi-line strings are skipped rather than rejected.
+- Dependencies: `clap`, `serde`, `serde_json`. Nothing else.
+
+## Console: `indra serve`
+
+```bash
+cd ~/code/security-harness            # or any project; see "Profiles" below
+indra serve --target ~/code/my-api    # the codebase whose runs to watch and where agents run
+```
+
+```text
+indra 0.1.0
+  harness  security-harness  (~/code/security-harness/plugins/security-harness)
+  harness  claude-code  (~/code/security-harness)
+  runners  claude
+
+Open: http://127.0.0.1:7878/?token=3f9c...
+(the token in this URL is the password; keep it private)
+```
+
+Open the printed URL once. It exchanges the token for a cookie and you are in. Add `--open` to
+open the browser for you, `--read-only` to turn off launching and editing.
+
+| Page | What it shows |
+|---|---|
+| **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read or edit it, and see what it uses and is used by. A save is refused if the file changed since you loaded it. |
+| **Graph map** | Pipeline stages run agents, agents spawn agents and invoke skills (a family reference such as `sh-kb-*` loads every member), and everything reads its prompts. |
+| **Memory** | The `indra mem` vaults the harness reads and writes, as graphs. |
+| **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
+| **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, and the final cost. Stop ends the whole process tree. |
+
+The same picture without a browser:
+
+```bash
+indra ls --defs        # harnesses, every agent/skill/prompt, recent runs with stage progress
+indra check            # globs that match nothing, unknown stage agents, missing runners
+```
+
+### Profiles
+
+A *profile* tells indra where a harness keeps its parts. Two are built in and detected
+automatically:
+
+| Profile | Found when | Agents | Skills | Prompts | Runs |
+|---|---|---|---|---|---|
+| `security-harness` | you run inside this repository, or the plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/run-*`, stages recon -> hunt -> chain -> verify -> report |
+| `claude-code` | the project or `~/.claude` has agents, skills or commands | `.claude/agents/*.md` | `.claude/skills/*/SKILL.md` | `CLAUDE.md`, `AGENTS.md`, commands | - |
+
+A custom harness is a few lines of TOML, in `indra.toml` (current directory), then
+`~/.config/indra/indra.toml`, or `--config FILE`. `indra init` writes a commented starter.
+
+```toml
+[[harness]]
+name     = "research-agents"
+root     = "."
+agents   = ["agents/*.md"]
+skills   = ["skills/*/SKILL.md"]
+prompts  = ["prompts/**/*.md"]
+memory   = ["{target}/.memory"]         # memory vaults; {target} expands per target
+targets  = ["../project-a"]
+runs     = ".runs/*"                    # one directory per run, under each target
+findings = ["results.jsonl"]            # JSONL results inside a run
+group_by = "agent"                      # which field names the agent that produced a result
+stages   = [
+  { name = "plan",     agent = "planner",    done_when = "plan.md" },
+  { name = "research", agent = "researcher", done_when = "results.jsonl" },
+  { name = "write",    agent = "writer",     done_when = "report.md" },
+]
+```
+
+Globs support `*`, `?`, `**`, `~/` and absolute paths. Agent and skill files are Markdown with
+optional frontmatter (`name`, `description`, `model`, `tools` or `allowed-tools`), the format
+Claude Code uses. A stage is *done* once its `done_when` file exists; while a run is live, the
+stage whose file changed last is shown as *running*. Graph edges come from the files
+themselves: if `planner.md` mentions `researcher`, the planner *spawns* the researcher.
+
+### Runners
+
+A runner is how indra starts an agent. Built-in runners are shown when installed:
+
+| Runner | Command | Live view |
+|---|---|---|
+| `claude` | `claude -p {prompt} --output-format stream-json --verbose` | text, every tool call, subagent spawns and results, permission refusals, cost |
+| `codex` | `codex exec {prompt}` | output lines |
+| `gemini` | `gemini -p {prompt}` | output lines |
+
+```toml
+[[runner]]
+name    = "claude-edits"
+command = "claude"
+args    = ["-p", "{prompt}", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"]
+format  = "claude-stream-json"          # or "text"
+
+[[preset]]                              # saved prompts on the Launch page
+name    = "Nightly quick review"
+harness = "security-harness"
+runner  = "claude"
+prompt  = "/sh-security-review {target} depth:quick"
+```
+
+The agent runs in the chosen target with your user's permissions and your agent CLI's own
+permission settings (for Claude Code, `.claude/settings.json`); indra does not loosen them.
+Stop sends SIGTERM to the runner's process group (Windows: ends the process tree) and kills it
+after 5 s. Output is kept in memory for the live view and written to `logs/` in the indra data
+directory.
+
+### Security model
+
+The console can start programs and rewrite prompts, so it is built like a remote shell:
+
+- **Loopback only by default.** Binding elsewhere prints a warning.
+- **A token on every API call**, random per start (or `--token` / `INDRA_TOKEN`, 16+
+  characters), sent as an `HttpOnly`, `SameSite=Strict` cookie or `Authorization: Bearer`, and
+  compared in constant time.
+- **No DNS rebinding.** On loopback, a request whose `Host` is not `localhost`, `127.0.0.1` or
+  `[::1]` is refused, token or not.
+- **No CSRF.** State-changing requests must be same-origin (`Origin`, `Sec-Fetch-Site`) and JSON.
+- **No shell.** A runner's program runs directly with an argument vector and the prompt is a
+  single argument, so `; rm -rf ~` in a prompt is just text. Runners come only from the config.
+- **Confined files.** Prompts are read and written only if discovery found them; run files
+  resolve only inside their run directory (`..`, absolute paths and escaping symlinks refused).
+- **No injected markup.** The UI renders every string with `textContent`, under a strict
+  `Content-Security-Policy` with nothing third-party.
+
+Processes are tracked while `indra serve` runs; their logs stay on disk after it exits.
+
+## Development
+
+```bash
+cd tools/indra
+cargo test            # unit tests, API security tests, and end-to-end tests of `indra mem`
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+cargo run -- serve --target /path/to/project
+```
+
+`src/mem/` is the memory engine, `src/deck/` the console, `ui/` its front end (plain
+JavaScript, embedded at build time). Dependencies: `axum`, `tokio`, `clap`, `serde`,
+`serde_json`, `toml`, `getrandom` (and `libc` on Unix).
+
+MIT licensed, like the rest of this repository.

@@ -1,13 +1,13 @@
 [package]
-name = "agentdeck"
+name = "indra"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "A local web console to view, monitor and run AI agent harnesses: agents, skills, prompts, graph maps, runs and live agent processes."
+description = "One CLI for AI agent harnesses: graph memory (Markdown notes with typed links, Obsidian-compatible) and a local web console to view, monitor and run agents."
 license = "MIT"
 repository = "https://github.com/dmdhrumilmistry/security-harness"
 readme = "README.md"
-keywords = ["ai-agents", "harness", "dashboard", "claude-code", "monitoring"]
+keywords = ["ai-agents", "knowledge-graph", "memory", "obsidian", "claude-code"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -15,15 +15,21 @@ axum = "0.8"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }
 getrandom = "0.3"
-memex = { path = "../memex" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "net", "signal", "fs"] }
 toml = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

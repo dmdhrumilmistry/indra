@@ -18,7 +18,7 @@ demand rather than loaded here, so this file stays short.
 - A request for the **full pipeline** or a written report: activate
   `sh-security-review`.
 - A request to **recall or record what earlier reviews learned** ("what do we
-  know about X", "remember this"): activate `sh-memory`. It needs the `memex`
+  know about X", "remember this"): activate `sh-memory`. It needs the `indra`
   CLI and is skipped cleanly without it.
 
 ## Pipeline shape
