@@ -22,8 +22,8 @@
       <a href="#memory">Memory</a>
       <a href="#console">Console</a>
       <a href="#orchestrate">Orchestrate</a>
-      <a href="#guides">Guides</a>
       <a href="#install">Install</a>
+      <a class="keep" href="docs/index.html">Docs</a>
       <a class="gh" href="https://github.com/dmdhrumilmistry/indra">GitHub</a>
     </nav>
   </div>
@@ -40,7 +40,8 @@
           findings into real attack paths, verifies impact, and reports. Every run teaches the next one, and a
           local console lets you watch every agent at work.</p>
         <div class="cta">
-          <a class="btn primary" href="#install">Get started</a>
+          <a class="btn primary" href="docs/index.html">Get started</a>
+          <a class="btn" href="#install">Install</a>
           <a class="btn" href="https://github.com/dmdhrumilmistry/indra">View on GitHub</a>
         </div>
         <div class="term" role="group" aria-label="Quick start">
@@ -139,10 +140,11 @@ needs  = ["api", "web"]</code></pre></div>
 
   <section class="wrap band" id="guides">
     <h2>Guides</h2>
+    <p class="sub">Everything else is in <a href="docs/index.html">the documentation</a>: installing, the review pipeline, pull request review, and the indra CLI.</p>
     <div class="cards">
-      <div class="card"><h3><a href="https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/processes.md">Handling agent processes</a></h3><p>Launch, watch, stop and clean up after agents, where logs go, capacity, permissions and troubleshooting.</p></div>
-      <div class="card"><h3><a href="https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/pivoting.md">Pivoting agents</a></h3><p>Redirect a running agent: continue its own session with a new instruction, or start fresh with a brief of what it found.</p></div>
-      <div class="card"><h3><a href="https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/knowledge-base.md">Knowledge base and integrations</a></h3><p>Obsidian, Notion and GitHub wikis into memory; findings out to Jira, Confluence, GitHub issues and Notion.</p></div>
+      <div class="card"><h3><a href="docs/processes.html">Handling agent processes</a></h3><p>Launch, watch, stop and clean up after agents, where logs go, capacity, permissions and troubleshooting.</p></div>
+      <div class="card"><h3><a href="docs/pivoting.html">Pivoting agents</a></h3><p>Redirect a running agent: continue its own session with a new instruction, or start fresh with a brief of what it found.</p></div>
+      <div class="card"><h3><a href="docs/knowledge-base.html">Knowledge base and integrations</a></h3><p>Obsidian, Notion and GitHub wikis into memory; findings out to Jira, Confluence, GitHub issues and Notion.</p></div>
     </div>
   </section>
 
@@ -159,7 +161,7 @@ needs  = ["api", "web"]</code></pre></div>
         <h3>Gemini CLI</h3>
         <pre><code>gemini extensions install \
   https://github.com/dmdhrumilmistry/indra</code></pre>
-        <p>Codex and opencode: see <a href="https://github.com/dmdhrumilmistry/indra#install">the README</a>.</p>
+        <p>Codex and opencode: see <a href="docs/index.html#install">the install guide</a>.</p>
       </div>
       <div class="card">
         <h3>The indra CLI</h3>
