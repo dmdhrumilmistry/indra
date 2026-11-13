@@ -325,6 +325,8 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
             "program": r.program.as_ref().map(|p| p.display().to_string()),
         })).collect::<Vec<_>>(),
         "presets": s.presets,
+        "profiles": s.profiles,
+        "approvals": app.procs.list().iter().map(|p| p.pending.len()).sum::<usize>(),
         "procs": app.procs.list(),
         "nodes": std::iter::once(LOCAL.to_string()).chain(s.nodes.iter().map(|n| n.name.clone())).collect::<Vec<_>>(),
         "workflows": s.workflows.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
@@ -491,10 +493,43 @@ struct LaunchReq {
     h: Option<String>,
     /// "local" (default) or a configured node.
     node: Option<String>,
+    /// Runner; may be left out when the profile names one.
+    #[serde(default)]
     runner: String,
     prompt: String,
     /// Index into that node's targets (see /api/nodes).
     target: usize,
+    /// Profile to launch with.
+    profile: Option<String>,
+    /// Per-launch changes on top of the profile (model, permission mode, ...).
+    #[serde(default)]
+    opts: nodes::AgentOpts,
+}
+
+/// A profile and per-launch overrides, resolved into a runner and options.
+fn resolve_agent(
+    settings: &Settings,
+    profile: Option<&str>,
+    runner: &str,
+    overrides: &nodes::AgentOpts,
+) -> ApiResult<(String, nodes::AgentOpts)> {
+    let (prof_runner, base) = match profile.filter(|p| !p.is_empty()) {
+        Some(name) => {
+            let p = settings
+                .profile(name)
+                .ok_or_else(|| bad(format!("no profile named '{}'", name)))?;
+            (p.runner.clone(), p.opts())
+        }
+        None => (None, nodes::AgentOpts::default()),
+    };
+    let runner = if !runner.is_empty() {
+        runner.to_string()
+    } else {
+        prof_runner.unwrap_or_else(|| "claude".into())
+    };
+    let opts = base.with(overrides);
+    opts.validate().map_err(bad)?;
+    Ok((runner, opts))
 }
 
 /// The directories agents may run in on a node: the harness targets for
@@ -529,31 +564,41 @@ async fn proc_start(
     let node = r.node.as_deref().unwrap_or(LOCAL);
     let targets = node_targets(&app, h, node)?;
     let target = targets.get(r.target).ok_or_else(|| bad("unknown target"))?;
+    let settings = app.settings();
+    let (runner_name, agent) = resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
+    let start = StartOpts {
+        agent,
+        ..StartOpts::default()
+    };
     let id = if node == LOCAL {
-        let settings = app.settings();
         let runner = settings
             .runners
             .iter()
-            .find(|x| x.name == r.runner)
-            .ok_or_else(|| bad("unknown runner"))?;
+            .find(|x| x.name == runner_name)
+            .ok_or_else(|| bad(format!("unknown runner '{}'", runner_name)))?;
         let target = std::path::PathBuf::from(target);
-        app.procs.start(Launch::Local {
-            runner,
-            harness: &h.name,
-            prompt,
-            target: &target,
-        })
+        app.procs.start_with(
+            Launch::Local {
+                runner,
+                harness: &h.name,
+                prompt,
+                target: &target,
+            },
+            start,
+        )
     } else {
-        let settings = app.settings();
         let n = settings.node(node).ok_or_else(|| bad("unknown node"))?;
-        nodes::validate_name(&r.runner).map_err(bad)?;
-        app.procs.start(Launch::Remote {
-            node: n,
-            runner: &r.runner,
-            harness: &h.name,
-            prompt,
-            target,
-        })
+        nodes::validate_name(&runner_name).map_err(bad)?;
+        app.procs.start_with(
+            Launch::Remote {
+                node: n,
+                runner: &runner_name,
+                harness: &h.name,
+                prompt,
+                target,
+            },
+            start,
+        )
     }
     .map_err(bad)?;
     Ok(Json(json!({ "id": id })))
@@ -714,6 +759,8 @@ async fn proc_pivot(
             None
         },
         parent: Some(id),
+        // The same model, mode and environment as the agent it continues.
+        agent: p.opts().clone(),
     };
     let harness = p.harness_name().to_string();
     let new = if p.node_name() == LOCAL {
@@ -878,6 +925,7 @@ struct FanOutReq {
     runner: String,
     prompt: String,
     targets: Vec<FanTarget>,
+    profile: Option<String>,
 }
 
 async fn workflow_fanout(
@@ -901,7 +949,15 @@ async fn workflow_fanout(
             .ok_or_else(|| bad(format!("unknown target on node '{}'", t.node)))?;
         pairs.push((t.node.clone(), path.clone()));
     }
+    if let Some(p) = r.profile.as_deref().filter(|p| !p.is_empty()) {
+        app.settings()
+            .profile(p)
+            .ok_or_else(|| bad(format!("no profile named '{}'", p)))?;
+    }
     let mut wf = workflows::fan_out(&r.runner, prompt, &pairs);
+    for t in &mut wf.tasks {
+        t.profile = r.profile.clone().filter(|p| !p.is_empty());
+    }
     wf.harness = Some(h.name.clone());
     let id = app.engine.start(wf).map_err(bad)?;
     Ok(Json(json!({ "id": id })))
@@ -928,6 +984,92 @@ async fn workflow_cancel(
         return Err(not_found("no such workflow run"));
     }
     Ok(Json(json!({ "cancelling": true })))
+}
+
+// ---- driving a running agent ------------------------------------------------------
+
+fn running_proc(app: &App, id: u64) -> ApiResult<Arc<crate::deck::procs::Proc>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    app.procs
+        .get(id)
+        .ok_or_else(|| not_found("no such process"))
+}
+
+#[derive(Deserialize)]
+struct PermissionReq {
+    request_id: String,
+    allow: bool,
+    #[serde(default)]
+    always: bool,
+    message: Option<String>,
+}
+
+/// Approve or deny a tool request the agent is waiting on.
+async fn proc_permission(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<PermissionReq>,
+) -> ApiResult<Json<Value>> {
+    let p = running_proc(&app, id)?;
+    p.answer(&r.request_id, r.allow, r.always, r.message.as_deref())
+        .map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ControlReq {
+    mode: Option<String>,
+    model: Option<String>,
+    #[serde(default)]
+    interrupt: bool,
+}
+
+/// Change the permission mode or model of a running agent, or interrupt it.
+async fn proc_control(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<ControlReq>,
+) -> ApiResult<Json<Value>> {
+    let p = running_proc(&app, id)?;
+    let check = nodes::AgentOpts {
+        model: r.model.clone(),
+        permission_mode: r.mode.clone(),
+        ..Default::default()
+    };
+    check.validate().map_err(bad)?;
+    if r.mode.is_none() && r.model.is_none() && !r.interrupt {
+        return Err(bad("nothing to change: send mode, model or interrupt"));
+    }
+    if let Some(m) = &r.mode {
+        p.control("set_permission_mode", json!({ "mode": m }))
+            .map_err(bad)?;
+    }
+    if let Some(m) = &r.model {
+        p.control("set_model", json!({ "model": m })).map_err(bad)?;
+    }
+    if r.interrupt {
+        p.control("interrupt", json!({})).map_err(bad)?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct MessageReq {
+    text: String,
+}
+
+/// A follow-up message to a running agent, in the same session.
+async fn proc_message(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<MessageReq>,
+) -> ApiResult<Json<Value>> {
+    let p = running_proc(&app, id)?;
+    let text = check_prompt(&r.text)?;
+    p.say(text).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- settings (the config file) ------------------------------------------------
@@ -1110,6 +1252,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/procs/{id}", get(proc_get))
         .route("/api/procs/{id}/stop", post(proc_stop))
         .route("/api/procs/{id}/pivot", post(proc_pivot))
+        .route("/api/procs/{id}/permission", post(proc_permission))
+        .route("/api/procs/{id}/control", post(proc_control))
+        .route("/api/procs/{id}/message", post(proc_message))
         .route("/api/procs/{id}/events", get(proc_events))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
@@ -1176,12 +1321,14 @@ mod tests {
             format: "text".into(),
             resume_args: vec![],
             fork_args: vec![],
+            model_args: vec![],
             program: crate::deck::config::which("echo"),
         };
         let settings = Settings {
             harnesses: vec![h],
             runners: vec![echo],
             presets: vec![],
+            profiles: vec![],
             bind: "127.0.0.1:0".into(),
             read_only,
             config_path: None,
@@ -1821,21 +1968,264 @@ mod tests {
         panic!("process {} did not finish", id);
     }
 
+    /// A stand-in for Claude Code's control channel (the protocol the Agent
+    /// SDK uses): it asks to run a tool, answers mode and model changes, and
+    /// takes follow-up messages.
+    #[cfg(unix)]
+    const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ["FAKE_LOG"], "a")
+log.write("ARGV " + json.dumps(sys.argv[1:]) + "\n")
+log.write("ENV " + os.environ.get("INDRA_TEST_ENV", "-") + "\n")
+log.flush()
+def out(o):
+    print(json.dumps(o), flush=True)
+def recv():
+    l = sys.stdin.readline()
+    if not l:
+        sys.exit(0)
+    log.write("IN " + l); log.flush()
+    return json.loads(l)
+m = recv()
+out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {}}})
+recv()
+out({"type": "system", "subtype": "init", "model": "claude-sonnet", "permissionMode": "manual", "session_id": "s-1"})
+out({"type": "control_request", "request_id": "perm-1", "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+     "input": {"command": "rm -rf build"},
+     "permission_suggestions": [{"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "allow", "destination": "session"}]}})
+while True:
+    m = recv()
+    if m["type"] == "control_request":
+        sub = m["request"]["subtype"]
+        if sub == "set_permission_mode":
+            out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {"mode": m["request"]["mode"]}}})
+            out({"type": "system", "subtype": "status", "permissionMode": m["request"]["mode"], "session_id": "s-1"})
+        elif sub == "set_model":
+            out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {"model": "claude-opus-x"}}})
+    elif m["type"] == "control_response":
+        r = m["response"]["response"]
+        said = "decision: " + r["behavior"] + (" always" if r.get("updatedPermissions") else "")
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": said}]}, "session_id": "s-1"})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": "turn done", "session_id": "s-1"})
+    elif m["type"] == "user":
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": "follow-up: " + m["message"]["content"]}]}})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": "follow-up done"})
+"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agents_are_approved_steered_and_finished_from_the_console() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, dir) = fixture("control", false);
+        let script = dir.join("fake-claude.py");
+        let log = dir.join("fake.log");
+        std::fs::write(&script, FAKE_CLAUDE).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("FAKE_LOG", &log);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "fake".into(),
+            command: script.display().to_string(),
+            args: vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+            format: "claude-stream-json".into(),
+            resume_args: vec!["--resume".into(), "{session}".into()],
+            fork_args: vec![],
+            model_args: vec![],
+            program: Some(script.clone()),
+        });
+        settings.profiles.push(config::ProfileCfg {
+            name: "careful".into(),
+            runner: Some("fake".into()),
+            model: Some("sonnet".into()),
+            permission_mode: Some("manual".into()),
+            effort: Some("high".into()),
+            allowed_tools: vec!["Read".into(), "Grep".into()],
+            env: [("INDRA_TEST_ENV".to_string(), "yes".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let post = |path: String, body: Value| {
+            let app = app.clone();
+            async move { call(&app, "POST", &path, &[AUTH, origin], Some(body)).await }
+        };
+        let view = |id: u64| {
+            let app = app.clone();
+            async move {
+                let (_, _, body) =
+                    call(&app, "GET", &format!("/api/procs/{}", id), &[AUTH], None).await;
+                serde_json::from_str::<Value>(&body).unwrap()
+            }
+        };
+        async fn until<F, Fut>(what: &str, mut f: F) -> Value
+        where
+            F: FnMut() -> Fut,
+            Fut: std::future::Future<Output = Option<Value>>,
+        {
+            for _ in 0..200 {
+                if let Some(v) = f().await {
+                    return v;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            panic!("timed out waiting for {}", what);
+        }
+
+        let (s, _, body) = post(
+            "/api/procs".into(),
+            json!({ "profile": "careful", "prompt": "clean up", "target": 0 }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+
+        // It asks before running a command, and the console shows the request.
+        let v = until("an approval request", || async {
+            let v = view(id).await;
+            (v["pending"].as_array().map(|a| a.len()) == Some(1)).then_some(v)
+        })
+        .await;
+        assert_eq!(v["pending"][0]["tool"], "Bash");
+        assert_eq!(v["pending"][0]["input"]["command"], "rm -rf build");
+        assert_eq!(v["interactive"], true);
+        assert_eq!(v["open"], true);
+        assert_eq!(v["mode"], "manual");
+        let (_, _, overview) = call(&app, "GET", "/api/overview", &[AUTH], None).await;
+        assert!(overview.contains("\"approvals\":1"), "{}", overview);
+
+        // Change its mode and model while it waits.
+        let (s, _, body) = post(
+            format!("/api/procs/{}/control", id),
+            json!({ "mode": "acceptEdits", "model": "opus" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        until("the new mode and model", || async {
+            let v = view(id).await;
+            (v["mode"] == "acceptEdits" && v["model"] == "claude-opus-x").then_some(v)
+        })
+        .await;
+        let (s, _, _) = post(
+            format!("/api/procs/{}/control", id),
+            json!({ "mode": "yolo" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "unknown modes are refused");
+
+        // A follow-up, then the answer: allow, and always for this session.
+        let (s, _, body) = post(
+            format!("/api/procs/{}/message", id),
+            json!({ "text": "also update the docs" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let (s, _, body) = post(
+            format!("/api/procs/{}/permission", id),
+            json!({ "request_id": "perm-1", "allow": true, "always": true }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let (s, _, _) = post(
+            format!("/api/procs/{}/permission", id),
+            json!({ "request_id": "perm-1", "allow": true }),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "an answered request cannot be answered again"
+        );
+
+        // Both turns finish, its input is closed, and it exits.
+        let v = until("the agent to exit", || async {
+            let v = view(id).await;
+            (v["status"] != "running").then_some(v)
+        })
+        .await;
+        assert_eq!(v["status"], "exited", "{}", v);
+        assert_eq!(v["open"], false);
+        let p = app.procs.get(id).unwrap();
+        let (events, _) = p.subscribe(0);
+        let text: Vec<String> = events
+            .iter()
+            .map(|e| format!("{}: {}", e.kind, e.text))
+            .collect();
+        let all = text.join("\n");
+        for want in [
+            "permission: asks to use Bash: rm -rf build",
+            "decision: allow always",
+            "follow-up: also update the docs",
+            "permission mode is now acceptEdits",
+            "model is now claude-opus-x",
+            "permission: allowed Bash (always, for this session)",
+        ] {
+            assert!(all.contains(want), "missing {:?} in:\n{}", want, all);
+        }
+        let seen = std::fs::read_to_string(&log).unwrap();
+        for want in [
+            "\"--model\", \"sonnet\"",
+            "\"--permission-mode\", \"manual\"",
+            "\"--effort\", \"high\"",
+            "\"--allowed-tools\", \"Read,Grep\"",
+            "\"--input-format\", \"stream-json\"",
+            "ENV yes",
+            "\"updatedPermissions\"",
+        ] {
+            assert!(seen.contains(want), "missing {:?} in:\n{}", want, seen);
+        }
+        assert!(
+            !seen.contains("\"clean up\", "),
+            "the prompt goes over stdin, not argv:\n{}",
+            seen
+        );
+
+        // Once it has finished, it takes no more input.
+        let (s, body) = {
+            let (s, _, b) = post(
+                format!("/api/procs/{}/message", id),
+                json!({ "text": "more" }),
+            )
+            .await;
+            (s, b)
+        };
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", body);
+        // An unknown profile is refused before anything starts.
+        let (s, _, _) = post(
+            "/api/procs".into(),
+            json!({ "profile": "nope", "prompt": "x", "target": 0 }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn pivot_continues_the_session_or_starts_fresh_with_context() {
         use std::os::unix::fs::PermissionsExt;
         let (base, dir) = fixture("pivot", false);
-        // A stand-in for Claude Code: records its argv, reports a session and a result.
+        // A stand-in for Claude Code: records its argv, reports a session and
+        // a result, then records what it was sent on stdin (the prompt arrives
+        // there, as stream-json) until indra closes it after the result.
         let script = dir.join("fake-claude");
         let argv = dir.join("argv.log");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '--call--' \"$@\" >> '{}'\n\
+                "#!/bin/sh\nprintf '%s\\n' '--call--' \"$@\" >> '{log}'\n\
                  echo '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",\"session_id\":\"sess-123\"}}'\n\
-                 echo '{{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":1,\"duration_ms\":5,\"result\":\"found 2 issues in auth\"}}'\n",
-                argv.display()
+                 echo '{{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":1,\"duration_ms\":5,\"result\":\"found 2 issues in auth\"}}'\n\
+                 cat >> '{log}'\n",
+                log = argv.display()
             ),
         )
         .unwrap();
@@ -1848,6 +2238,7 @@ mod tests {
             format: "claude-stream-json".into(),
             resume_args: vec!["--resume".into(), "{session}".into()],
             fork_args: vec!["--fork-session".into()],
+            model_args: vec![],
             program: Some(script.clone()),
         });
         let app = App::new(settings, TOKEN.into(), true);
@@ -1886,7 +2277,12 @@ mod tests {
         assert_eq!(v["resumed"], "sess-123");
         let log = std::fs::read_to_string(&argv).unwrap();
         assert!(
-            log.contains("--call--\n-p\nnow focus on the JWT code\n--resume\nsess-123\n"),
+            log.contains("--call--\n-p\n--resume\nsess-123\n--input-format\nstream-json\n"),
+            "{}",
+            log
+        );
+        assert!(
+            log.contains("\"content\":\"now focus on the JWT code\""),
             "{}",
             log
         );
@@ -1972,6 +2368,7 @@ mod tests {
             format: "text".into(),
             resume_args: vec![],
             fork_args: vec![],
+            model_args: vec![],
             program: crate::deck::config::which("sleep"),
         };
         let h = &app.settings().harnesses[0];
@@ -2014,6 +2411,7 @@ mod tests {
             format: "text".into(),
             resume_args: vec![],
             fork_args: vec![],
+            model_args: vec![],
             program: crate::deck::config::which("sleep"),
         };
         let h = &app.settings().harnesses[0];

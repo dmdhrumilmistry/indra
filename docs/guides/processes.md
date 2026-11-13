@@ -46,6 +46,16 @@ A process is in one of four states:
 the node; an SSH failure (unreachable host, unknown host key) shows up as `failed` with ssh's
 message in the stream.
 
+## Approve, steer or redirect it
+
+An agent run through a Claude Code runner asks the console before using a tool its permission
+mode does not allow: answer under **Waiting for you** on its page (Allow, Allow always, Deny). The
+same page changes its permission mode or model, interrupts the current turn, or sends a follow-up.
+See [agent control](../../tools/indra/README.md#agent-control) and
+[profiles](../../tools/indra/README.md#profiles). An agent waiting for an answer waits
+indefinitely; workflows that run unattended should use a profile whose permission mode and tool
+rules let it work without asking (`acceptEdits` with `allowed_tools`, or `dontAsk`).
+
 ## Stop it
 
 Press **Stop** on the process page, or `POST /api/procs/{id}/stop`.

@@ -259,6 +259,10 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
   watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
   final cost. Stop stops the whole process tree.
+- **Agent control:** approve or deny each tool request, switch an agent between permission modes
+  (manual, acceptEdits, auto, plan, ...) and models while it runs, interrupt it, or send it a
+  follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
+  plan and the model you pick (or a local one through Ollama) does the work.
 - **Settings:** configure everything from the browser: runners, remote nodes, workflows,
   presets, harnesses, capacity, or the raw `indra.toml`. Each save is checked and applies at
   once, and your comments in the file are kept.
@@ -296,7 +300,8 @@ Run agents on this machine and on any machine you can SSH into, and orchestrate 
 See [Nodes and orchestration](tools/indra/README.md#nodes-and-orchestration) for the setup and
 how remote execution stays safe.
 
-**Guides:** [handling agent processes](docs/guides/processes.md) (watching, stopping, logs,
+**Design:** [architecture](docs/architecture.md) (agent control, profiles, secrets, transport,
+the board, graph workflows). **Guides:** [handling agent processes](docs/guides/processes.md) (watching, stopping, logs,
 capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md), and
 [knowledge base and integrations](docs/guides/knowledge-base.md).
 

@@ -63,6 +63,9 @@ PAGES = [
     ("Guides", "knowledge-base", "Knowledge base and integrations",
      "Import Obsidian, Notion and GitHub wikis; publish findings to Jira, Confluence, GitHub and Notion.",
      [("docs/guides/knowledge-base.md", None)]),
+    ("Project", "architecture", "Architecture",
+     "How indra controls agents across machines: profiles, secrets, transport, the board and graph workflows.",
+     [("docs/architecture.md", None)]),
     ("Project", "kb-updates", "Knowledge-base updates",
      "The scheduled workflows that keep the vulnerability knowledge bases current.",
      [("README.md", ["Automated knowledge-base updates"])]),
@@ -472,8 +475,8 @@ TEMPLATE = """<!doctype html>
       <a href="../index.html#pipeline">Pipeline</a>
       <a href="../index.html#memory">Memory</a>
       <a href="../index.html#console">Console</a>
-      <a class="keep" href="index.html" aria-current="page">Docs</a>
-      <a class="gh" href="{gh}">GitHub</a>
+      <a href="../index.html#install">Install</a>
+      <a class="gh" href="index.html" aria-current="page">Docs</a>
     </nav>
   </div>
 </header>
@@ -491,7 +494,6 @@ TEMPLATE = """<!doctype html>
     <p class="sub">{desc}</p>
 {body}
     <nav class="pager" aria-label="Previous and next page">{pager}</nav>
-    <p class="edit">Source: {sources}</p>
   </main>
   <aside class="toc" aria-label="On this page">
 {toc}
@@ -502,7 +504,7 @@ TEMPLATE = """<!doctype html>
   <div class="wrap foot-in">
     <span class="brand"><img src="../assets/logo.svg" alt="" width="22" height="22"><span>indra</span></span>
     <span>MIT licensed &middot; static analysis of code you are authorized to review</span>
-    <a href="{gh}">github.com/dmdhrumilmistry/indra</a>
+    <a href="{gh}" rel="noopener">Source code</a>
   </div>
 </footer>
 <script src="../main.js"></script>
@@ -577,11 +579,9 @@ def build(out):
         next_ = PAGES[idx + 1] if idx + 1 < len(PAGES) else None
         pager = (('<a class="prev" href="%s.html"><span>Previous</span>%s</a>' % (prev_[1], esc(prev_[2]))) if prev_ else "<span></span>") + \
                 (('<a class="next" href="%s.html"><span>Next</span>%s</a>' % (next_[1], esc(next_[2]))) if next_ else "")
-        srcs = sorted({s for s, _ in sources})
         page = TEMPLATE.format(
             title=esc(title), desc=attr(desc), site=SITE_URL, slug=slug, gh=GH,
             nav=nav_html(slug), group=esc(group), body="\n".join(body), pager=pager, toc=toc,
-            sources=", ".join('<a href="%s/blob/main/%s" rel="noopener">%s</a>' % (GH, s, esc(s)) for s in srcs),
         )
         (out / "docs" / ("%s.html" % slug)).write_text(page, encoding="utf-8")
         rendered.append(slug)

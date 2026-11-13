@@ -1,0 +1,171 @@
+# Architecture
+
+How indra runs and controls agents across machines, and how it is meant to grow: agent control,
+profiles and model routing, secrets, transport, a task board fed by trackers, and graph
+workflows. Each part says what exists now and what comes next.
+
+## The pieces
+
+```text
+                       browser (console UI)
+                              |  HTTPS or loopback, token + same-origin
+                    +---------v----------+
+                    |        hub         |  indra serve
+                    |  config  profiles  |
+                    |  secrets  board    |------> trackers (Jira, ClickUp, GitHub, Linear)
+                    |  workflows engine  |
+                    +---+------------+---+
+          signaling (WebSocket)       \  SSH (last resort)
+              |                        \
+     +--------v--------+         +------v---------+
+     |  node: indra    |  WebRTC |  node: indra   |
+     |  node connect   |<------->|  node exec     |
+     |  runners/agents |  data   |  (over SSH)    |
+     +-----------------+ channel +----------------+
+```
+
+- **Hub** (`indra serve`): the console, the config, the workflow engine and, as they land, the
+  secret store and the board. It is the only part a person talks to.
+- **Node**: any machine that runs agents. `local` is the hub's own machine. A node runs only
+  runners from *its own* configuration; the hub names a runner, it never ships a command line.
+- **Runner**: how one agent CLI is started (Claude Code, Codex, Gemini CLI, or anything that
+  takes a prompt). **Profile**: a runner plus model, permission mode, effort, tool rules and
+  environment, under one name.
+
+## Agent control
+
+An agent started through a `claude-stream-json` runner is driven over Claude Code's control
+channel (`--input-format stream-json`, the same channel the Agent SDK uses), so while it runs the
+console can:
+
+| Action | How |
+|---|---|
+| Approve or deny a tool request | Claude Code asks the host (`can_use_tool`); the console shows the request with **Allow**, **Allow always** (adds Claude Code's suggested rule for the session) and **Deny** |
+| Change the permission mode | `set_permission_mode`: `manual`, `acceptEdits`, `auto`, `plan`, `dontAsk`, `bypassPermissions` |
+| Change the model | `set_model`, for the turns that follow |
+| Interrupt | `interrupt`: stops the current turn, keeps the session |
+| Send a follow-up | another user message in the same session |
+
+The agent's input stays open while it has work: indra closes it after the last turn's result,
+so the agent exits as before. Remote agents get the same controls: the hub forwards control
+messages to the node, which writes them to the agent. Runners that are not Claude Code keep the
+simpler model (launch, watch, stop, pivot).
+
+## Profiles and model routing
+
+A profile is the unit of delegation: "plan with a strong model, do the work with the model I
+choose, try small jobs on a local model".
+
+```toml
+[[profile]]
+name            = "planner"
+runner          = "claude"
+model           = "opus"
+permission_mode = "plan"
+
+[[profile]]
+name            = "worker"
+runner          = "claude"
+model           = "sonnet"
+permission_mode = "acceptEdits"
+allowed_tools   = ["Read", "Grep", "Glob", "Edit", "Bash(git diff:*)"]
+
+[[profile]]
+name   = "local"                       # Claude Code against a local Ollama model
+runner = "claude"
+model  = "qwen3-coder"
+env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+```
+
+Launch, presets, workflow tasks and board items name a profile; the model and mode can still be
+overridden per launch and changed live. Ollama serves the Anthropic Messages API (v0.14 and
+later), so Claude Code runs unchanged on a local model.
+
+## Secrets
+
+Agents need tokens (tracker APIs, cloud credentials, model keys). The rules:
+
+1. **One store, encrypted at rest.** Secrets live in the hub's data directory, encrypted with a
+   key held by the OS keychain (or a key file with `0600` permissions where there is none).
+   `indra.toml` never holds a secret value, only a reference: `env = { JIRA_TOKEN = "secret:jira" }`.
+2. **Write-only from the console.** The Secrets page can set, rotate and delete a secret and
+   shows its name, scope and last use, never its value.
+3. **Scoped.** A secret lists the profiles and nodes that may receive it. A launch that references
+   a secret outside its scope fails before anything starts.
+4. **Delivered just in time, in memory.** Values are resolved when an agent starts and passed in
+   its environment. To a remote node they travel inside the job message over the encrypted
+   transport; the node never writes them to disk.
+5. **Never echoed.** Every event, log line and API response passes through a redactor that
+   replaces known secret values with `[secret:name]`.
+6. **Audited.** Each delivery is recorded (secret, profile, node, process, time).
+
+## Transport: WebRTC first, SSH as the last resort
+
+Today the hub reaches nodes over SSH. The next transport inverts the direction, so nodes need no
+open port and no SSH account:
+
+1. **Enrol.** On the hub, **Nodes > Add** creates a one-time enrolment code. On the node:
+   `indra node connect https://hub.example --code ABCD-1234`. The node generates a key pair and
+   receives a node certificate; from then on it authenticates with its key.
+2. **Signal.** The node keeps one outbound WebSocket to the hub (`/api/nodes/signal`). It carries
+   presence, heartbeats and WebRTC offers, answers and ICE candidates.
+3. **Connect.** Hub and node open a WebRTC peer connection (STUN for NAT traversal, optional
+   TURN) with a reliable, ordered data channel per job, so a slow job never blocks another.
+   DTLS encrypts it end to end.
+4. **Fall back.** If ICE fails, jobs flow over the signaling WebSocket instead (relayed by the
+   hub). If the node has no agent connection at all and has an `ssh` destination configured,
+   the hub uses SSH as it does today.
+5. **Reconnect.** Both sides detect loss with heartbeats (5 s interval, 15 s timeout), reconnect
+   the WebSocket with exponential backoff and jitter (1 s up to 60 s), and restart ICE without
+   dropping the session. A job survives a reconnect: events carry sequence numbers, the node
+   buffers the last events of each job, and the hub resumes from the last one it saw. A node that
+   stays away past a grace period (default 2 minutes) has its jobs stopped, exactly as a closed
+   SSH session stops them today.
+
+**Scale.** Nodes dial in, so the hub needs no route to them; a hub handles thousands of idle
+nodes (one WebSocket each, a heartbeat every few seconds) and the job traffic goes peer to peer.
+Several hubs can share a node fleet behind a signaling relay; the workflow engine already
+schedules by per-node capacity.
+
+## Tasks and the board
+
+A **board** shows work items in columns: **To do**, **Running**, **Review**, **Done**,
+**Failed**. It is generic: an item is a title, a body, labels, an optional source, and a profile
+to run it with, so it serves reviews, fixes, research or anything else an agent can do.
+
+```text
+ tracker (Jira / ClickUp / GitHub / Linear)        indra board
+ ------------------------------------------        ------------
+ issue in "To Do" matching the filter  --import-->  To do
+                                                     | Run (profile, node, target)
+ move to "In Progress"                  <--sync---   Running   (agent process)
+ comment with the result, move to "Review" <-sync--   Review    (agent finished)
+ move to "Done" when you accept it      <--sync---   Done
+```
+
+- **Connectors** are per tracker: how to list items with a filter, read one, comment, and move
+  it between states. Credentials are secrets. A connector maps tracker states to board columns.
+- **Flow.** Import (manual or every few minutes), run with a profile on a node, and when the
+  agent finishes, post its result as a comment and move the item to the mapped state.
+  A person moves items to Done; agents never close tickets on their own.
+- Items can also be created on the board directly.
+
+## Workflows as graphs
+
+Workflows are already DAGs of tasks with dependencies. The editor makes them visual:
+
+- Drag tasks onto a canvas, connect them to say what runs after what; each node picks a profile,
+  a machine and a target.
+- **Components** are saved task templates (a prompt with parameters and a profile), reused by
+  dragging them in.
+- A **workflow can be a node** in another workflow, so pipelines compose.
+- The graph is stored as ordinary `[[workflow]]` TOML (with positions), so `indra run` and the
+  text editor keep working.
+
+## Order of work
+
+1. Agent control and profiles (including Ollama), and this document.
+2. Secrets.
+3. Board and tracker connectors.
+4. Graph workflow editor with components.
+5. WebRTC transport with reconnection, SSH kept as the fallback.

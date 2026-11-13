@@ -28,6 +28,8 @@ pub struct TaskRun {
     pub node: String,
     pub target: String,
     pub runner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub prompt: String,
     pub needs: Vec<String>,
     pub retries: u32,
@@ -270,32 +272,55 @@ impl Engine {
         // The settings now, so a node or runner edited in the console applies
         // to tasks that have not started yet.
         let settings = self.settings.get();
+        // A profile brings its runner (if it names one) and the agent options.
+        let (runner_name, agent) = match t.profile.as_deref() {
+            Some(p) => {
+                let prof = settings
+                    .profile(p)
+                    .ok_or_else(|| format!("profile '{}' is not configured", p))?;
+                (
+                    prof.runner.clone().unwrap_or_else(|| t.runner.clone()),
+                    prof.opts(),
+                )
+            }
+            None => (t.runner.clone(), Default::default()),
+        };
+        let start = crate::deck::procs::StartOpts {
+            agent,
+            ..Default::default()
+        };
         if t.node == LOCAL {
             let runner = settings
                 .runners
                 .iter()
-                .find(|r| r.name == t.runner)
+                .find(|r| r.name == runner_name)
                 .ok_or_else(|| {
-                    format!("runner '{}' is not configured on this machine", t.runner)
+                    format!("runner '{}' is not configured on this machine", runner_name)
                 })?;
             let target = PathBuf::from(&t.target);
-            self.procs.start(Launch::Local {
-                runner,
-                harness,
-                prompt: &prompt,
-                target: &target,
-            })
+            self.procs.start_with(
+                Launch::Local {
+                    runner,
+                    harness,
+                    prompt: &prompt,
+                    target: &target,
+                },
+                start,
+            )
         } else {
             let node = settings
                 .node(&t.node)
                 .ok_or_else(|| format!("unknown node '{}'", t.node))?;
-            self.procs.start(Launch::Remote {
-                node,
-                runner: &t.runner,
-                harness,
-                prompt: &prompt,
-                target: &t.target,
-            })
+            self.procs.start_with(
+                Launch::Remote {
+                    node,
+                    runner: &runner_name,
+                    harness,
+                    prompt: &prompt,
+                    target: &t.target,
+                },
+                start,
+            )
         }
     }
 }
@@ -306,6 +331,7 @@ fn task_run(t: &TaskCfg) -> TaskRun {
         node: t.node.clone(),
         target: t.target.clone(),
         runner: t.runner.clone(),
+        profile: t.profile.clone(),
         prompt: t.prompt.clone(),
         needs: t.needs.clone(),
         retries: t.retries,
@@ -358,6 +384,7 @@ pub fn fan_out(runner: &str, prompt: &str, targets: &[(String, String)]) -> Work
                 prompt: prompt.into(),
                 needs: Vec::new(),
                 retries: 0,
+                profile: None,
             }
         })
         .collect();
@@ -383,6 +410,7 @@ mod tests {
             prompt: "p".into(),
             needs: needs.iter().map(|s| s.to_string()).collect(),
             retries: 0,
+            profile: None,
         }
     }
 

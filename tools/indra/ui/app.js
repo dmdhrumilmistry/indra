@@ -528,6 +528,24 @@
       var presets = ov.presets.filter(function (p) { return !p.harness || p.harness === hs.name; });
       var preset = h("select", { "aria-label": "Preset" }, h("option", { value: "", text: "Write your own" }), presets.map(function (p, i) { return h("option", { value: String(i), text: p.name }); }));
       var prompt = h("textarea", { placeholder: "What should the agent do?", "aria-label": "Prompt" });
+      var profiles = ov.profiles || [];
+      var profile = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "None (runner defaults)" }),
+        profiles.map(function (p) { return h("option", { value: p.name, text: p.name + (p.description ? "  -  " + p.description : "") }); }));
+      var model = h("input", { type: "text", list: "models", "aria-label": "Model", placeholder: "default" });
+      var mode = h("select", { "aria-label": "Permission mode" }, h("option", { value: "", text: "default" }),
+        MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var effort = h("select", { "aria-label": "Effort" }, h("option", { value: "", text: "default" }),
+        ["low", "medium", "high", "xhigh", "max"].map(function (x) { return h("option", { value: x, text: x }); }));
+      function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
+      function fillProfile() {
+        var p = prof() || {};
+        if (p.runner && Array.prototype.some.call(runner.options, function (o) { return o.value === p.runner; })) runner.value = p.runner;
+        model.placeholder = p.model || "default"; mode.options[0].text = p.permission_mode ? "profile: " + p.permission_mode : "default";
+        effort.options[0].text = p.effort ? "profile: " + p.effort : "default";
+        update();
+      }
+      profile.addEventListener("change", fillProfile);
+      [model, mode, effort].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
       var preview = h("div", { class: "cmd" });
       var go = h("button", { class: "primary", type: "submit" }, "Launch");
       function cur() { return nodes.find(function (n) { return n.name === node.value; }) || nodes[0]; }
@@ -543,8 +561,16 @@
         var n = cur(), t = n.targets[Number(target.value)] || "", p = prompt.value.split("{target}").join(t).split("{node}").join(n.name);
         if (n.kind === "local") {
           var r = ov.runners.find(function (x) { return x.name === runner.value; });
-          preview.textContent = r ? [r.command].concat(r.args.map(function (a) { return a.split("{target}").join(t).split("{prompt}").join(p); }))
+          var pr = prof() || {}, extra = [];
+          if (r && r.format === "claude-stream-json") {
+            [["--model", model.value || pr.model], ["--permission-mode", mode.value || pr.permission_mode], ["--effort", effort.value || pr.effort]]
+              .forEach(function (f) { if (f[1]) extra.push(f[0], f[1]); });
+          }
+          var viaStdin = r && r.format === "claude-stream-json" && r.args.indexOf("{prompt}") >= 0;
+          preview.textContent = r ? [r.command].concat(r.args.filter(function (a) { return !(viaStdin && a === "{prompt}"); })
+            .map(function (a) { return a.split("{target}").join(t).split("{prompt}").join(p); })).concat(viaStdin ? ["--input-format", "stream-json"] : []).concat(extra)
             .map(function (a) { return /[\s"'$`\;&|<>]/.test(a) ? JSON.stringify(a) : a; }).join(" ") : "";
+          if (viaStdin) preview.textContent += "\n(the prompt goes over stdin, so you can approve its tool requests and change its mode and model while it runs)";
         } else {
           preview.textContent = "ssh " + n.ssh + " -- indra node exec   (job: " + JSON.stringify({ runner: runner.value, target: t, prompt: p }) + ")";
         }
@@ -555,20 +581,26 @@
       var note = h("div", { class: "note warn", hidden: true });
       preset.addEventListener("change", function () {
         var p = presets[Number(preset.value)];
-        if (p) { prompt.value = p.prompt; if (p.runner) { runner.value = p.runner; } }
+        if (p) { prompt.value = p.prompt; if (p.runner) { runner.value = p.runner; } if (p.profile) { profile.value = p.profile; fillProfile(); } }
         update();
       });
       node.addEventListener("change", fillNode);
       [runner, target, prompt].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
       var form = h("form", { class: "form", onsubmit: function (e) {
         e.preventDefault(); go.disabled = true;
-        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value) } })
+        var o = {};
+        if (model.value.trim()) o.model = model.value.trim();
+        if (mode.value) o.permission_mode = mode.value;
+        if (effort.value) o.effort = effort.value;
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o } })
           .then(function (r) { location.hash = "#/proc/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "Preset", preset),
         h("label", null, "Prompt", h("small", { text: "{target} becomes the target path, {node} the node name." }), prompt),
         h("div", { class: "row" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", null, "Target", target)),
+        h("div", { class: "row" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+        modelList(),
         note,
         h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On a remote node the job travels as JSON over SSH." }), preview),
         h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. A remote node runs only runners from its own configuration." }),
@@ -577,6 +609,7 @@
           if (!name || !name.trim()) return;
           var p = { name: name.trim(), prompt: prompt.value, harness: hs.name };
           if (runner.value) p.runner = runner.value;
+          if (profile.value) p.profile = profile.value;
           addToSection("preset", p).then(function () { toast("Saved preset " + p.name); })
             .catch(function (err) { toast(err.message, true); });
         } }, "Save as preset") : null, h("a", { href: "#/workflows", text: "Or fan out to many targets at once" })));
@@ -698,6 +731,7 @@
       prompt.value = "/indra full security review of {target}";
       var names = {}; nodes.forEach(function (n) { runnersOn(n, ov).forEach(function (r) { names[r] = 1; }); });
       var runner = h("select", { "aria-label": "Runner" }, Object.keys(names).map(function (r) { return h("option", { value: r, text: r }); }));
+      var fprofile = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "None" }), (ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name }); }));
       var boxes = [];
       var picks = h("div", { class: "picks" }, nodes.map(function (n) {
         return h("fieldset", null, h("legend", null, n.name, " ", h("span", { class: "muted", text: n.error ? "(unreachable)" : "(" + n.running + "/" + n.max_parallel + " busy)" })),
@@ -712,11 +746,11 @@
         var targets = boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return { node: b.node, target: b.target }; });
         if (!targets.length) { toast("Pick at least one target", true); return; }
         go.disabled = true;
-        api("/api/workflows/fanout", { method: "POST", body: { h: hs.name, runner: runner.value, prompt: prompt.value, targets: targets } })
+        api("/api/workflows/fanout", { method: "POST", body: { h: hs.name, runner: runner.value, prompt: prompt.value, targets: targets, profile: fprofile.value || null } })
           .then(function (r) { location.hash = "#/workflow/" + r.id; }).catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "Prompt", h("small", { text: "Runs once per selected target, in parallel within each node's capacity." }), prompt),
-        h("label", null, "Runner", runner), h("div", null, h("b", { text: "Targets" }), picks), h("div", { class: "row" }, go)));
+        h("div", { class: "row" }, h("label", null, "Runner", runner), h("label", null, "Profile", fprofile)), h("div", null, h("b", { text: "Targets" }), picks), h("div", { class: "row" }, go)));
     }).catch(function (e) { fan.textContent = e.message; });
   }
 
@@ -771,7 +805,8 @@
       h("tbody", null, list.map(function (p) {
         var go = function () { location.hash = "#/proc/" + p.id; };
         return h("tr", { class: "click", tabindex: "0", onclick: go, onkeydown: function (e) { if (e.key === "Enter") go(); } },
-          h("td", { text: String(p.id) }), h("td", null, statusPill(p.status)), h("td", { text: p.node + (p.host && p.node !== "local" ? " (" + p.host + ")" : "") }), h("td", { text: p.runner }),
+          h("td", { text: String(p.id) }), h("td", null, statusPill(p.status), p.pending && p.pending.length ? h("span", { class: "pill warn", text: "needs you (" + p.pending.length + ")" }) : null),
+          h("td", { text: p.node + (p.host && p.node !== "local" ? " (" + p.host + ")" : "") }), h("td", { text: p.runner + (p.model ? " - " + p.model : "") }),
           h("td", { class: "desc" }, h("div", { text: p.prompt.length > 90 ? p.prompt.slice(0, 88) + "..." : p.prompt }), p.last ? h("div", { class: "muted", text: p.last }) : null),
           h("td", { text: String(p.agents.length) }),
           h("td", { text: p.cost_usd != null ? "$" + p.cost_usd.toFixed(4) : "-" }),
@@ -818,10 +853,68 @@
       h("label", { class: "check" }, pv.cont, h("span", null, h("b", { text: "Continue its session" }), " - keeps everything it learned")),
       h("label", { class: "check" }, pv.fresh, h("span", null, h("b", { text: "Start fresh" }), " - a new agent, given this one's question and result")),
       keepRow, pv.note, h("div", { class: "row" }, pv.go));
+    // Waiting tool requests, and live control of an interactive agent.
+    var approvals = h("div", { class: "card approvals", hidden: true, role: "region", "aria-label": "Tool requests waiting for you" });
+    var cv = {
+      mode: h("select", { "aria-label": "Permission mode" }, MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); })),
+      model: h("input", { type: "text", list: "models", "aria-label": "Model", placeholder: "opus, sonnet, a full model id..." }),
+      msg: h("textarea", { "aria-label": "Message", placeholder: "A follow-up for this agent, in the same session" }),
+      state: h("p", { class: "muted small" }), note: h("p", { class: "muted small" })
+    };
+    function ctl(body, done) {
+      return api("/api/procs/" + id + "/control", { method: "POST", body: body }).then(function () { toast(done); refresh(); }).catch(function (e) { toast(e.message, true); });
+    }
+    var controlCard = h("div", { class: "card control", hidden: true },
+      h("h3", { text: "Control" }), cv.state,
+      h("div", { class: "ctlrow" }, cv.mode, h("button", { type: "button", onclick: function () { ctl({ mode: cv.mode.value }, "Mode change sent"); } }, "Set mode")),
+      h("div", { class: "ctlrow" }, cv.model, h("button", { type: "button", onclick: function () {
+        if (!cv.model.value.trim()) { toast("Type a model first", true); return; }
+        ctl({ model: cv.model.value.trim() }, "Model change sent");
+      } }, "Set model")),
+      h("div", { class: "row" }, h("button", { type: "button", class: "danger", onclick: function () { ctl({ interrupt: true }, "Interrupt sent"); } }, "Interrupt current turn")),
+      cv.msg,
+      h("div", { class: "row" }, h("button", { type: "button", class: "primary", onclick: function () {
+        if (!cv.msg.value.trim()) return;
+        api("/api/procs/" + id + "/message", { method: "POST", body: { text: cv.msg.value } })
+          .then(function () { cv.msg.value = ""; toast("Sent"); refresh(); }).catch(function (e) { toast(e.message, true); });
+      } }, "Send message")), cv.note, modelList());
+    var ctlFilled = false;
+    function renderControl(p) {
+      var ro = S.ov.read_only;
+      approvals.textContent = "";
+      approvals.hidden = !p.pending.length;
+      if (p.pending.length) {
+        approvals.appendChild(h("h3", { text: "Waiting for you" }));
+        p.pending.forEach(function (a) {
+          var answer = function (allow, always) {
+            var body = { request_id: a.request_id, allow: allow, always: !!always };
+            if (!allow) { var why = window.prompt("Tell the agent why (optional):", ""); if (why === null) return; body.message = why; }
+            api("/api/procs/" + id + "/permission", { method: "POST", body: body })
+              .then(function () { toast(allow ? "Allowed" : "Denied"); refresh(); }).catch(function (e) { toast(e.message, true); });
+          };
+          var input = JSON.stringify(a.input, null, 2);
+          approvals.appendChild(h("div", { class: "ask" },
+            h("div", { class: "row" }, h("b", { text: a.tool }), h("span", { class: "muted small", text: ago(a.ts) })),
+            h("pre", { class: "view small", text: input.length > 1500 ? input.slice(0, 1500) + "\n..." : input }),
+            h("div", { class: "row" },
+              h("button", { type: "button", class: "primary", disabled: ro, onclick: function () { answer(true); } }, "Allow"),
+              (a.suggestions || []).length ? h("button", { type: "button", disabled: ro, title: "Allow, and add Claude Code's suggested rule for the rest of this session", onclick: function () { answer(true, true); } }, "Allow always") : null,
+              h("button", { type: "button", class: "danger", disabled: ro, onclick: function () { answer(false); } }, "Deny"))));
+        });
+      }
+      controlCard.hidden = !p.interactive;
+      if (!p.interactive) return;
+      cv.state.textContent = "Mode " + (p.mode || "default") + ", model " + (p.model || "default") + (p.open ? "" : " (finished)");
+      if (!ctlFilled && p.mode) { cv.mode.value = p.mode; ctlFilled = true; }
+      var off = ro || !p.open;
+      Array.prototype.forEach.call(controlCard.querySelectorAll("button,select,input,textarea"), function (x) { x.disabled = off; });
+      cv.note.textContent = ro ? "Read-only console." : p.open ? "Changes apply to the next tool call or turn." : "This agent has finished its work. Use Pivot to continue it.";
+    }
     m.appendChild(top);
+    m.appendChild(approvals);
     m.appendChild(h("div", { class: "split" },
       h("div", null, h("div", { class: "row" }, h("h2", { text: "Live feed" }), h("label", { class: "row muted" }, follow, "Follow")), feed),
-      h("div", null, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
+      h("div", null, controlCard, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
         S.ov.read_only ? null : pivotCard)));
     function updatePivot(p, children) {
       var hasSession = !!p.session && p.can_resume;
@@ -863,6 +956,7 @@
     function refresh() {
       Promise.all([api("/api/procs/" + id), api("/api/procs")]).then(function (r) {
         renderInfo(r[0]);
+        renderControl(r[0]);
         updatePivot(r[0], r[1].filter(function (x) { return x.parent === Number(id); }).reverse());
       }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); });
     }
@@ -875,11 +969,21 @@
         h("div", { class: "t" }, e.agent ? h("span", { class: "a", text: e.agent }) : null, e.text)));
       while (feed.childNodes.length > 3000) feed.removeChild(feed.firstChild);
       if (follow.checked) feed.scrollTop = feed.scrollHeight;
-      if (e.kind === "agent" || e.kind === "tool" || e.kind === "exit" || e.kind === "result") {
+      if (["agent", "tool", "exit", "result", "permission", "system", "user"].indexOf(e.kind) >= 0) {
         clearTimeout(pending); pending = setTimeout(refresh, 300);
       }
     };
     S.cleanup.push(function () { es.close(); clearTimeout(pending); });
+  }
+
+  // Claude Code's permission modes, with what each means.
+  var MODES = [["manual", "manual: ask before every tool"], ["acceptEdits", "acceptEdits: file edits run, the rest asks"],
+    ["auto", "auto: Claude decides what is safe"], ["plan", "plan: read and plan, change nothing"],
+    ["dontAsk", "dontAsk: deny whatever would ask"], ["bypassPermissions", "bypassPermissions: run everything"]];
+  function modelList() {
+    if ($("models")) return null;
+    return h("datalist", { id: "models" }, ["opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "qwen3-coder", "gpt-oss:20b"]
+      .map(function (x) { return h("option", { value: x }); }));
   }
 
   // Whether this console may edit indra.toml (see Settings).
@@ -897,7 +1001,7 @@
   // Each section of the config file has a schema; forms are built from it, and
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
-  var TABS = [["general", "General"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"],
+  var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"],
     ["presets", "Presets"], ["harnesses", "Harnesses"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
@@ -908,8 +1012,28 @@
     var n = {}; (c.config.harness || []).concat(c.builtin.harnesses).forEach(function (x) { n[x.name] = 1; }); return Object.keys(n);
   }
   function cfgNodeNames(c) { return ["local"].concat((c.config.node || []).map(function (n) { return n.name; })); }
+  function cfgProfileNames(c) { return (c.config.profile || []).map(function (p) { return p.name; }); }
+  // Starting points for "Add profile".
+  var PROFILE_TEMPLATES = [
+    { label: "Planner (Opus, plan mode)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "plan", effort: "high" } },
+    { label: "Worker (Sonnet, accept edits)", v: { name: "worker", description: "Does the work the planner laid out", runner: "claude", model: "sonnet", permission_mode: "acceptEdits",
+      allowed_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git diff:*)", "Bash(git status:*)"] } },
+    { label: "Local model (Ollama)", v: { name: "local", description: "Claude Code against a local model served by Ollama", runner: "claude", model: "qwen3-coder",
+      permission_mode: "manual", env: { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama", ANTHROPIC_API_KEY: "" } } }
+  ];
 
   var SCHEMA = {
+    profile: { tab: "profiles", noun: "profile", fields: function (c) { return [
+      { k: "name", label: "Name", req: true, help: "Pick it on Launch, in presets, in workflow tasks and on the board." },
+      { k: "description", label: "Description" },
+      { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") },
+      { k: "model", label: "Model", list: "models", placeholder: "default", help: "An alias (opus, sonnet, haiku) or a full model id; for Ollama, the local model's name." },
+      { k: "permission_mode", label: "Permission mode", type: "select", options: [["", "default"]].concat(MODES) },
+      { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
+      { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
+      { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
+      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 to use a local model through Ollama." }]; },
+      summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : ""); } },
     runner: { tab: "runners", noun: "runner", fields: function () { return [
       { k: "name", label: "Name", req: true, help: "How you pick it on Launch and in workflows. A built-in name (claude, codex, gemini) replaces the built-in." },
       { k: "command", label: "Program", req: true, help: "A program on PATH or a full path. It runs directly, never through a shell." },
@@ -934,7 +1058,8 @@
       { k: "name", label: "Name", req: true },
       { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} becomes the target path, {node} the node name." },
       { k: "harness", label: "Only for harness", type: "select", options: opts(cfgHarnessNames(c), "Any harness") },
-      { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") }]; },
+      { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") },
+      { k: "profile", label: "Profile", type: "select", options: opts(cfgProfileNames(c), "None") }]; },
       summary: function (p) { return p.prompt; } },
     workflow: { tab: "workflows", noun: "workflow", fields: function (c) { return [
       { k: "name", label: "Name", req: true, help: "Run it from the Workflows page or with `indra run <name>`." },
@@ -944,6 +1069,7 @@
         { k: "id", label: "Id", req: true },
         { k: "node", label: "Node", type: "select", options: opts(cfgNodeNames(c)), dflt: "local" },
         { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c)), dflt: "claude" },
+        { k: "profile", label: "Profile", type: "select", options: opts(cfgProfileNames(c), "None"), help: "Model, permission mode and the rest. Its runner, if it names one, replaces the runner above." },
         { k: "target", label: "Target", req: true, help: "A directory on that node. Local paths are relative to the config file." },
         { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} and {node} are filled in." },
         { k: "needs", label: "Runs after", type: "words", help: "Task ids, separated by spaces or commas. It runs only if they all succeed." },
@@ -993,8 +1119,19 @@
       get = function () { return el.value || undefined; };
     } else if (f.type === "rows") {
       return rowsControl(f, val || []);
+    } else if (f.type === "kv") {
+      el = h("textarea", { class: "list", rows: "3", placeholder: ph || "KEY=value" });
+      el.value = Object.keys(val || {}).map(function (k) { return k + "=" + val[k]; }).join("\n");
+      get = function () {
+        var o = {}, any = false;
+        el.value.split("\n").forEach(function (line) {
+          var i = line.indexOf("="); if (i <= 0) return;
+          o[line.slice(0, i).trim()] = line.slice(i + 1); any = true;
+        });
+        return any ? o : undefined;
+      };
     } else {
-      el = h("input", { type: "text", placeholder: ph }); el.value = val == null ? "" : String(val);
+      el = h("input", { type: "text", placeholder: ph, list: f.list || null }); el.value = val == null ? "" : String(val);
       get = function () { return el.value.trim() ? el.value.trim() : (f.req ? "" : undefined); };
     }
     if (f.req) el.setAttribute("required", "");
@@ -1072,7 +1209,7 @@
         body.appendChild(h("div", { class: "note bad" }, "The file has an error, so the forms are off until it is fixed in the ", h("a", { href: "#/settings/file", text: "File" }), " tab: " + c.error));
         return;
       }
-      ({ general: general, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
+      ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
         harnesses: function () { list("harness", c.builtin.harnesses); }, file: file })[tab]();
     }
@@ -1108,7 +1245,11 @@
         var first = body.querySelector("input,textarea,select"); if (first) first.focus();
       }
       var add = h("button", { class: "primary", type: "button", disabled: !c.editable, onclick: function () { edit(null, {}, "New " + d.noun); } }, "Add " + d.noun);
-      body.appendChild(h("div", { class: "row cfgbar" }, add));
+      body.appendChild(h("div", { class: "row cfgbar" }, add, section === "profile" ? PROFILE_TEMPLATES.map(function (t) {
+        return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New profile: " + t.label); } }, "+ " + t.label);
+      }) : null));
+      if (section === "profile") body.appendChild(h("p", { class: "muted", text: "A profile is how an agent runs: plan with a strong model, do the work with the one you choose, or try it on a local model. Launch, presets, workflow tasks and fan-outs can pick one; model and mode can still change while the agent runs." }));
+      body.appendChild(modelList() || h("span"));
       var grid = h("div", { class: "grid" });
       items.forEach(function (it, i) {
         var inst = section === "runner" ? c.installed.find(function (r) { return r.name === it.name; }) : null;
@@ -1180,6 +1321,8 @@
       $("version").textContent = "v" + ov.version;
       $("ro-badge").hidden = !ov.read_only;
       var b = $("running-badge"); b.hidden = !ov.running; b.textContent = String(ov.running);
+      var a = $("approvals-badge"); a.hidden = !ov.approvals; a.textContent = String(ov.approvals || 0);
+      a.title = ov.approvals ? ov.approvals + " tool request(s) waiting for you" : "";
     });
   }
 

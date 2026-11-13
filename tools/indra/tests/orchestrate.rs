@@ -281,3 +281,66 @@ fn cancelling_stops_the_remote_agent() {
         "the agent on the node must be stopped when the run is cancelled"
     );
 }
+
+/// A profile's model and environment reach an agent on a remote node, which
+/// is driven over Claude Code's control channel and finishes on its own.
+#[test]
+fn profiles_reach_remote_agents_over_the_control_channel() {
+    let e = Env::new("profile");
+    let fake = e.dir.join("fake-claude.py");
+    fs::write(
+        &fake,
+        "#!/usr/bin/env python3\nimport json, os, sys\n\
+         args = sys.argv[1:]\n\
+         model = args[args.index('--model') + 1] if '--model' in args else '-'\n\
+         first = sys.stdin.readline()\n\
+         prompt = json.loads(sys.stdin.readline())['message']['content']\n\
+         print(json.dumps({'type': 'system', 'subtype': 'init', 'model': model, 'session_id': 'r-1'}), flush=True)\n\
+         say = 'model=%s env=%s prompt=%s interactive=%s' % (model, os.environ.get('INDRA_TEST_ENV', '-'), prompt, '--input-format' in args)\n\
+         print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': say}]}}), flush=True)\n\
+         print(json.dumps({'type': 'result', 'subtype': 'success', 'num_turns': 1, 'duration_ms': 1, 'result': 'ok'}), flush=True)\n\
+         sys.stdin.read()\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let remote = fs::read_to_string(e.dir.join("remote.toml")).unwrap()
+        + &format!(
+            "[[runner]]\nname = \"fakec\"\ncommand = \"{}\"\nargs = [\"-p\", \"{{prompt}}\"]\nformat = \"claude-stream-json\"\n",
+            fake.display()
+        );
+    fs::write(e.dir.join("remote.toml"), remote).unwrap();
+    let hub = e.hub(&format!(
+        "[[profile]]\nname = \"remote-sonnet\"\nrunner = \"fakec\"\nmodel = \"sonnet\"\nenv = {{ INDRA_TEST_ENV = \"from-hub\" }}\n\
+         [[workflow]]\nname = \"p\"\n[[workflow.task]]\nid = \"t\"\nnode = \"box\"\ntarget = \"{api}\"\nprofile = \"remote-sonnet\"\nprompt = \"review {{node}}\"\n",
+        api = e.p("remote-api"),
+    ));
+    let out = e
+        .indra(&["run", "p", "--config", hub.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        text,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| l.split_whitespace().next() == Some("t"))
+        .unwrap();
+    let mut rest = line.trim_start();
+    for _ in 0..3 {
+        rest = rest
+            .split_once(char::is_whitespace)
+            .map(|(_, r)| r.trim_start())
+            .unwrap();
+    }
+    let log = fs::read_to_string(rest.trim_end()).unwrap();
+    assert!(
+        log.contains("model=sonnet env=from-hub prompt=review box interactive=True"),
+        "{}",
+        log
+    );
+}
