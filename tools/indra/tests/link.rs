@@ -153,7 +153,7 @@ impl Hub {
             .env("XDG_CONFIG_HOME", self.dir.join("node-config"))
             .env("XDG_DATA_HOME", self.dir.join("node-data"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(self.dir.join("node.log")).unwrap())
             .spawn()
             .unwrap();
         self.procs.push(node);
@@ -323,10 +323,22 @@ fn a_cut_connection_loses_and_repeats_nothing() {
     std::thread::sleep(Duration::from_millis(1500));
     proxy.cut();
     seen.store(true, Ordering::SeqCst);
-    let p = until("the job to end after reconnecting", 60, || {
+    let start = Instant::now();
+    let p = loop {
         let p = h.proc(id);
-        (p["status"] != "running").then_some(p)
-    });
+        if p["status"] != "running" {
+            break p;
+        }
+        if start.elapsed() > Duration::from_secs(60) {
+            panic!(
+                "the job did not end after reconnecting\nnode: {}\nnode log:\n{}\nfeed: {:?}",
+                h.node_view(),
+                std::fs::read_to_string(h.dir.join("node.log")).unwrap_or_default(),
+                texts(&h, id)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert_eq!(p["status"], "exited", "{}", p);
     let feed = texts(&h, id);
     let ticks: Vec<String> = feed

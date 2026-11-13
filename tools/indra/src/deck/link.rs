@@ -768,6 +768,7 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
             }
         };
         let connected_at = now();
+        away_since = None;
         eprintln!("indra: connected to {} as {}", base, o.name);
         let (mut sink, mut stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
