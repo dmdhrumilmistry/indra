@@ -56,7 +56,8 @@ gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file
 skills/                             # GENERATED mirror of the canonical skills
 scripts/sync-agent-skills.py        # regenerates that mirror
-site/                               # the GitHub Pages website (deployed by .github/workflows/pages.yml)
+site/                               # the GitHub Pages landing page (deployed by .github/workflows/pages.yml)
+scripts/build-site.py               # builds the website: site/ + assets/ + docs pages rendered from the Markdown
 assets/                             # logo, banner, social image and screenshots (README, site, console icon)
 tools/indra/                        # indra: one Rust CLI - graph memory (indra mem) and agent web console (indra serve)
 docs/DISTRIBUTION.md                # packaging and public-listing steps

@@ -8,3 +8,6 @@ __pycache__/
 
 # Rust build output
 tools/indra/target/
+
+# Built website (scripts/build-site.py)
+_site/

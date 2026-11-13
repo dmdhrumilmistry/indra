@@ -12,6 +12,7 @@
 
 <p align="center">
   <b><a href="https://dmdhrumilmistry.github.io/indra/">Website</a></b> &nbsp;&middot;&nbsp;
+  <b><a href="https://dmdhrumilmistry.github.io/indra/docs/">Docs</a></b> &nbsp;&middot;&nbsp;
   <a href="#install">Install</a> &nbsp;&middot;&nbsp;
   <a href="#usage">Usage</a> &nbsp;&middot;&nbsp;
   <a href="#indra-memory-and-agent-console">Memory &amp; console</a> &nbsp;&middot;&nbsp;
