@@ -625,8 +625,30 @@
   }
   function pageNodes(m) {
     var refresh = h("button", { type: "button" }, "Check again");
-    m.appendChild(header("Nodes", "The machines agents run on. Remote nodes are reached over SSH and must have indra installed; each runs only its own configured runners.",
-      [canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Add or edit nodes" }) : null, refresh]));
+    m.appendChild(header("Nodes", "The machines agents run on. A machine dials in to this hub (Add a machine: no open port, no SSH, a direct WebRTC channel when possible), or is reached over SSH; either way it runs only its own configured runners.",
+      [canEdit() ? h("button", { type: "button", class: "primary", onclick: function () { addMachine(); } }, "Add a machine") : null,
+        canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Edit nodes" }) : null, refresh]));
+    var addBox = h("div"); m.appendChild(addBox);
+    // A machine dials in: no open port, no SSH. One-time code, then its own key.
+    function addMachine() {
+      var name = h("input", { type: "text", required: true, placeholder: "build-box", "aria-label": "Name" });
+      var targets = h("textarea", { class: "list", rows: "2", placeholder: "optional: codebases on it, one per line (it can also report its own with --target)" });
+      var out = h("div");
+      addBox.textContent = "";
+      addBox.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+        e.preventDefault();
+        var t = targets.value.split("\n").map(function (x) { return x.trim(); }).filter(Boolean);
+        api("/api/nodes/enrol", { method: "POST", body: { name: name.value.trim(), targets: t } }).then(function (r) {
+          out.textContent = "";
+          out.appendChild(h("p", { text: "On that machine, with indra installed, run (the code works once, for 15 minutes):" }));
+          out.appendChild(h("pre", { class: "view", text: r.command }));
+          out.appendChild(h("p", { class: "muted small", text: "It dials out to this hub (no open port, no SSH), keeps the link up and reconnects on its own, and moves to a direct WebRTC channel when it can. Its key is saved on it; later starts need only `indra node connect <hub> --name " + name.value.trim() + "`. Behind a different address or a proxy, use the URL people use to reach this console." }));
+          load(true);
+        }).catch(function (err) { toast(err.message, true); });
+      } }, h("h2", { text: "Add a machine" }), h("label", null, "Name", name), h("label", null, "Targets", targets),
+        h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Get a connect command"), h("button", { type: "button", onclick: function () { addBox.textContent = ""; } }, "Close")), out));
+      name.focus();
+    }
     var grid = h("div", { class: "grid" }), runsBox = h("div");
     m.appendChild(grid); m.appendChild(runsBox);
     function showRuns(n) {
@@ -651,7 +673,9 @@
       nodes.forEach(function (n) {
         var i = n.info, ok = !!i;
         var card = h("div", { class: "card" },
-          h("div", { class: "row" }, h("h4", { text: n.name }), h("span", { class: "pill", text: n.kind === "local" ? "this machine" : "ssh" }),
+          h("div", { class: "row" }, h("h4", { text: n.name }), h("span", { class: "pill" + (n.transport === "webrtc" ? " ok" : ""),
+            title: { webrtc: "Dialled in; a direct, encrypted WebRTC data channel", relay: "Dialled in; traffic relayed over its link to this hub", ssh: "Reached over SSH", none: "Not connected" }[n.transport] || "",
+            text: n.kind === "local" ? "this machine" : n.transport === "webrtc" ? "link: direct (WebRTC)" : n.transport === "relay" ? "link: relayed" : n.transport === "none" ? "offline" : "ssh" }),
             h("span", { class: "pill " + (ok ? "ok" : "bad"), text: ok ? "online" : "unreachable" })),
           h("p", { class: "muted", text: n.kind === "local" ? (n.description || "") : n.ssh + (n.description ? "  -  " + n.description : "") }),
           ok ? h("div", { class: "stats" },

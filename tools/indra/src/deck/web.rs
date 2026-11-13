@@ -79,6 +79,7 @@ impl App {
         config: Option<ConfigAccess>,
     ) -> Arc<App> {
         let procs = Procs::new(settings.data_dir.join("logs"));
+        apply_link_settings(&procs, &settings);
         let board = Arc::new(crate::deck::board::Board::open(
             settings.data_dir.join("board.json"),
         ));
@@ -550,10 +551,28 @@ fn node_targets(app: &App, h: &Harness, node: &str) -> ApiResult<Vec<String>> {
     if node == LOCAL {
         return Ok(h.targets.iter().map(|t| t.display().to_string()).collect());
     }
-    app.settings()
+    let n = app
+        .settings()
         .node(node)
         .map(|n| n.targets.clone())
-        .ok_or_else(|| bad(format!("unknown node '{}'", node)))
+        .ok_or_else(|| bad(format!("unknown node '{}'", node)))?;
+    // A node that dialled in reports its own targets when the config lists none.
+    if n.is_empty() {
+        if let Some(l) = app.procs.links().get(node) {
+            return Ok(l.targets());
+        }
+    }
+    Ok(n)
+}
+
+/// WebRTC on or off, and its ICE servers, for nodes that dial in.
+fn apply_link_settings(procs: &Procs, s: &Settings) {
+    let l = procs.links();
+    l.webrtc.store(
+        s.webrtc && cfg!(feature = "webrtc"),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    *l.ice_servers.lock().unwrap() = s.ice_servers.clone();
 }
 
 fn check_prompt(p: &str) -> ApiResult<&str> {
@@ -837,7 +856,13 @@ async fn nodes_list(
     let now = runs::now();
     // Probe stale remote nodes in parallel.
     let mut set = tokio::task::JoinSet::new();
-    for n in app.settings().nodes.iter().cloned() {
+    for n in app
+        .settings()
+        .nodes
+        .iter()
+        .filter(|n| !n.ssh.is_empty() && !app.procs.links().connected(&n.name))
+        .cloned()
+    {
         let fresh = q.refresh.is_none()
             && app
                 .node_cache
@@ -864,15 +889,35 @@ async fn nodes_list(
     let cache = app.node_cache.lock().unwrap();
     let mut out = vec![local];
     for n in &app.settings().nodes {
-        let (checked, info, error) = match cache.get(&n.name) {
-            Some((t, Ok(i))) => (*t, json!(i), Value::Null),
-            Some((t, Err(e))) => (*t, Value::Null, json!(e)),
-            None => (0, Value::Null, json!("not checked yet")),
+        let link = app.procs.links().get(&n.name);
+        let linked = link.as_ref().map(|l| l.connected()).unwrap_or(false);
+        let (checked, info, error) = if linked {
+            let l = link.as_ref().unwrap();
+            (now, l.info().unwrap_or(Value::Null), Value::Null)
+        } else if n.ssh.is_empty() {
+            (
+                now,
+                Value::Null,
+                json!("not connected: run `indra node connect` on it"),
+            )
+        } else {
+            match cache.get(&n.name) {
+                Some((t, Ok(i))) => (*t, json!(i), Value::Null),
+                Some((t, Err(e))) => (*t, Value::Null, json!(e)),
+                None => (0, Value::Null, json!("not checked yet")),
+            }
+        };
+        let targets = if n.targets.is_empty() {
+            link.as_ref().map(|l| l.targets()).unwrap_or_default()
+        } else {
+            n.targets.clone()
         };
         out.push(json!({
-            "name": n.name, "kind": "ssh", "ssh": n.ssh, "description": n.description,
+            "name": n.name, "kind": if linked { "link" } else { "ssh" }, "ssh": n.ssh, "description": n.description,
+            "transport": if linked { link.as_ref().unwrap().view()["path"].clone() } else if n.ssh.is_empty() { json!("none") } else { json!("ssh") },
+            "link": link.as_ref().map(|l| l.view()),
             "max_parallel": n.max_parallel, "running": app.procs.running_on(&n.name),
-            "targets": n.targets, "info": info, "error": error, "checked": checked,
+            "targets": targets, "info": info, "error": error, "checked": checked,
         }));
     }
     Ok(Json(json!(out)))
@@ -1231,6 +1276,110 @@ async fn board_import(
     Ok(Json(json!({ "added": added, "updated": updated })))
 }
 
+// ---- nodes that dial in -------------------------------------------------------------
+
+/// `GET /agent/connect` (WebSocket): a node presents its name and either its
+/// link key or a one-time enrolment code. Outside /api: nodes have no console
+/// token, and the console token gives no access here.
+async fn agent_connect(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let h = |k: &str| {
+        headers
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = h("x-indra-node");
+    if nodes::validate_name(&name).is_err() || app.settings().node(&name).is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        return ApiError(StatusCode::UNAUTHORIZED, "unknown node".into()).into_response();
+    }
+    let vault = app.procs.vault();
+    let key = h("authorization")
+        .strip_prefix("Bearer ")
+        .map(str::to_string);
+    let enrolled = match (key, h("x-indra-enroll")) {
+        (Some(k), _) if vault.check_node_key(&name, &k) => None,
+        (None, code) if !code.is_empty() && app.procs.links().redeem(&name, &code) => {
+            let mut b = [0u8; 32];
+            if getrandom::fill(&mut b).is_err() {
+                return internal("no OS randomness").into_response();
+            }
+            let k: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+            if let Err(e) = vault.set_node_key(&name, &k) {
+                return internal(e).into_response();
+            }
+            Some(k)
+        }
+        _ => {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            return ApiError(
+                StatusCode::UNAUTHORIZED,
+                "wrong key or enrolment code".into(),
+            )
+            .into_response();
+        }
+    };
+    let links = app.procs.links().clone();
+    ws.on_upgrade(move |socket| links.session(name, enrolled, socket))
+}
+
+#[derive(Deserialize)]
+struct EnrolReq {
+    name: String,
+    #[serde(default)]
+    targets: Vec<String>,
+}
+
+/// Make a one-time code for a node to dial in with, adding the node to
+/// indra.toml if it is not there yet.
+async fn node_enrol(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(r): Json<EnrolReq>,
+) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    if let Some(why) = &c.locked {
+        return Err(forbidden(why.clone()));
+    }
+    nodes::validate_name(&r.name).map_err(bad)?;
+    if r.name == LOCAL {
+        return Err(bad("'local' is this machine"));
+    }
+    if app.settings().node(&r.name).is_none() {
+        let _one = c.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let (current, _) = confedit::read(&c.path).map_err(internal)?;
+        let cf = confedit::parse(&current).map_err(bad)?;
+        let mut list = serde_json::to_value(&cf.node).map_err(|e| internal(e.to_string()))?;
+        let mut entry = json!({ "name": r.name });
+        if !r.targets.is_empty() {
+            entry["targets"] = json!(r.targets);
+        }
+        list.as_array_mut().unwrap().push(entry);
+        let next = confedit::set_section(&current, "node", &list).map_err(bad)?;
+        let settings = check_config(&app, c, &next)?;
+        confedit::write_atomic(&c.path, &next).map_err(internal)?;
+        app.settings.set(settings);
+    }
+    let code = app.procs.links().enrol_code(&r.name);
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("HUB:PORT");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    Ok(Json(json!({
+        "code": code, "expires_in": 900,
+        "command": format!("indra node connect {}://{} --name {} --code {}", scheme, host, r.name, code),
+    })))
+}
+
 // ---- settings (the config file) ------------------------------------------------
 
 fn config_access(app: &App) -> ApiResult<&ConfigAccess> {
@@ -1348,6 +1497,7 @@ async fn config_put(
         };
         let settings = check_config(&app, c, &next)?;
         confedit::write_atomic(&c.path, &next).map_err(internal)?;
+        apply_link_settings(&app.procs, &settings);
         app.settings.set(settings);
         app.node_cache
             .lock()
@@ -1416,6 +1566,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/run/file", get(run_file))
         .route("/api/procs", get(procs_list).post(proc_start))
         .route("/api/nodes", get(nodes_list))
+        .route("/api/nodes/enrol", post(node_enrol))
+        .route("/agent/connect", get(agent_connect))
         .route("/api/nodes/runs", get(node_runs))
         .route("/api/workflows", get(workflows_list).post(workflow_run))
         .route("/api/workflows/fanout", post(workflow_fanout))
@@ -1508,6 +1660,8 @@ mod tests {
             config_path: None,
             data_dir: dir.join("data"),
             local_max_parallel: 4,
+            webrtc: false,
+            ice_servers: vec![],
             nodes: vec![],
             workflows: vec![],
         };

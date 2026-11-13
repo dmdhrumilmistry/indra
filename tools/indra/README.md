@@ -31,7 +31,7 @@ picked up automatically, and any other harness is a few lines of TOML.
 (`indra.exe` on Windows) and put it on your `PATH`. Builds exist for Linux (x86_64 and arm64,
 static), macOS (Apple silicon and Intel) and Windows (x86_64).
 
-**From source** (any platform with [Rust](https://rustup.rs) 1.80+):
+**From source** (any platform with [Rust](https://rustup.rs) 1.89+):
 
 ```bash
 cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra
@@ -555,6 +555,42 @@ gpu-box        DOWN  me@gpu-box  ssh: Could not resolve hostname gpu-box: Name o
 In the console, **Nodes** shows each machine, its runners, its capacity and the review runs on
 its disk, and **Launch** can start an agent on any node. A remote agent streams into the same
 live view as a local one, with its subagents and tool calls, and Stop stops it on the remote.
+
+### Machines that dial in (no SSH)
+
+A node can connect to the hub instead of being reached over SSH. On the Nodes page, **Add a
+machine** gives a one-time command; run it on that machine (with indra installed):
+
+```bash
+indra node connect https://hub.example:7878 --name build-box --code ABCDE-FGHJK --target /srv/api
+# later starts: indra node connect https://hub.example:7878 --name build-box --target /srv/api
+```
+
+- **Outbound only.** The node opens a WebSocket to the hub (`/agent/connect`); it needs no open
+  port and no SSH account. The hub needs to be reachable by the node: bind it with `--bind` (and
+  `--allow-remote-config` if you also want to edit settings remotely), ideally behind a TLS
+  reverse proxy so the node uses `https://`/`wss://`.
+- **Enrolment.** The code works once, for 15 minutes. The node then gets its own random key,
+  stored in the hub's encrypted secret store (never given to agents) and in an owner-only
+  `agent.json` in the node's config folder.
+- **Direct when possible.** The WebSocket carries signaling; hub and node then open a WebRTC data
+  channel (DTLS-encrypted) and job traffic moves onto it. On the same network that needs nothing;
+  across NATs add STUN/TURN servers (`[server] ice_servers = ["stun:stun.example.org:3478"]`).
+  When there is no direct path, traffic is relayed over the WebSocket. `[server] webrtc = false`,
+  or `indra node connect --no-webrtc`, keeps everything on the relay. The Nodes page shows which
+  path each node uses.
+- **Reconnects on its own.** Heartbeats every 5 s; a link silent for 15 s is dead. The node
+  retries with exponential backoff and jitter (1 s up to 60 s). Jobs keep running through a drop:
+  their output is numbered, the node keeps what the hub has not acknowledged and sends it again,
+  and the hub drops duplicates, so each line arrives once, in order.
+- **No orphans.** The hub fails a node's jobs if it stays away for 2 minutes; the node stops its
+  jobs if the hub is gone for 10 minutes, or comes back as a different hub process.
+- **SSH stays as the fallback.** A `[[node]]` with an `ssh` destination is used over SSH whenever
+  it has no live link.
+
+The node runs only runners from its own configuration, in directories that exist on it, exactly
+as with SSH. Builds without the `webrtc` feature (`cargo install --no-default-features`) relay
+everything over the WebSocket.
 
 ### Workflows
 

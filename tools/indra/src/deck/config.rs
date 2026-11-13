@@ -47,6 +47,9 @@ pub struct NodeCfg {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// SSH destination: host, user@host, or a Host alias from ~/.ssh/config.
+    /// Optional: a node that dials in (`indra node connect`) needs none, and
+    /// SSH is then only the fallback when its link is down.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ssh: String,
     #[serde(default)]
     pub port: Option<u16>,
@@ -255,6 +258,13 @@ fn is_zero(n: &u32) -> bool {
 pub struct ServerCfg {
     pub bind: Option<String>,
     pub read_only: Option<bool>,
+    /// Let nodes that dial in move to a direct WebRTC data channel (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webrtc: Option<bool>,
+    /// STUN/TURN servers for that, e.g. ["stun:stun.example.org:3478"]. Without
+    /// any, direct paths work on the same network; elsewhere traffic is relayed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice_servers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -504,6 +514,9 @@ pub struct Settings {
     pub config_path: Option<PathBuf>,
     pub data_dir: PathBuf,
     pub local_max_parallel: usize,
+    /// WebRTC for linked nodes, and its ICE servers.
+    pub webrtc: bool,
+    pub ice_servers: Vec<String>,
     pub nodes: Vec<crate::deck::nodes::Node>,
     pub workflows: Vec<WorkflowCfg>,
 }
@@ -1111,7 +1124,9 @@ pub fn build_settings(
         {
             return Err(format!("node name '{}' is reserved or used twice", n.name));
         }
-        crate::deck::nodes::validate_destination(&n.ssh)?;
+        if !n.ssh.is_empty() {
+            crate::deck::nodes::validate_destination(&n.ssh)?;
+        }
         nodes.push(crate::deck::nodes::Node {
             name: n.name.clone(),
             description: n.description.clone(),
@@ -1166,6 +1181,8 @@ pub fn build_settings(
         connectors: file.connector.clone(),
         components: file.component.clone(),
         local_max_parallel: file.local.max_parallel.unwrap_or(4).max(1),
+        webrtc: file.server.webrtc.unwrap_or(true),
+        ice_servers: file.server.ice_servers.clone(),
         nodes,
         workflows,
         bind: opts

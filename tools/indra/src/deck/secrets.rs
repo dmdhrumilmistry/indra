@@ -125,7 +125,7 @@ fn hex(b: &[u8]) -> String {
 
 fn unhex(s: &str) -> Result<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 || !s.bytes().all(|c| c.is_ascii_hexdigit()) {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("not hex".into());
     }
     (0..s.len())
@@ -175,7 +175,32 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Held while the store is read or changed: the in-process mutex, and a
+/// file lock so other indra processes (`indra secret set` while the console
+/// runs, two consoles on one data directory) cannot lose each other's writes.
+struct Guard<'a> {
+    _mutex: std::sync::MutexGuard<'a, ()>,
+    _file: Option<std::fs::File>,
+}
+
 impl Vault {
+    fn guard(&self) -> Guard<'_> {
+        let m = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = create_private_dir(&self.dir);
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let f = o.open(self.dir.join(".lock")).ok();
+        if let Some(f) = &f {
+            let _ = f.lock();
+        }
+        Guard {
+            _mutex: m,
+            _file: f,
+        }
+    }
+
     pub fn open(dir: PathBuf) -> Vault {
         Vault {
             dir,
@@ -259,7 +284,7 @@ impl Vault {
     }
 
     pub fn list(&self) -> Result<Vec<Info>> {
-        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = self.guard();
         Ok(self
             .load()?
             .into_iter()
@@ -292,7 +317,7 @@ impl Vault {
         for n in c.nodes.iter().flatten() {
             crate::deck::nodes::validate_name(n).map_err(|e| format!("node: {}", e))?;
         }
-        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = self.guard();
         let mut all = self.load()?;
         let t = now();
         let e = match all.get_mut(name) {
@@ -333,9 +358,45 @@ impl Vault {
         self.save(&all)
     }
 
+    /// A node's link key: stored like a secret, never resolvable by profiles.
+    pub fn set_node_key(&self, node: &str, key: &str) -> Result<()> {
+        let name = crate::deck::link::key_name(node);
+        validate_name(&name)?;
+        let _g = self.guard();
+        let mut all = self.load()?;
+        let t = now();
+        all.insert(
+            name,
+            Entry {
+                value: key.to_string(),
+                description: format!("link key of node {}", node),
+                profiles: vec![],
+                nodes: vec![node.to_string()],
+                created: t,
+                updated: t,
+                last_used: None,
+                uses: 0,
+            },
+        );
+        self.save(&all)
+    }
+
+    /// Whether `key` is the link key of `node` (compared in constant time).
+    pub fn check_node_key(&self, node: &str, key: &str) -> bool {
+        let _g = self.guard();
+        let Ok(all) = self.load() else { return false };
+        match all.get(&crate::deck::link::key_name(node)) {
+            Some(e) => {
+                let (a, b) = (e.value.as_bytes(), key.as_bytes());
+                a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+            }
+            None => false,
+        }
+    }
+
     pub fn remove(&self, name: &str) -> Result<bool> {
         validate_name(name)?;
-        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = self.guard();
         let mut all = self.load()?;
         let gone = all.remove(name).is_some();
         if gone {
@@ -357,13 +418,19 @@ impl Vault {
         if !env.values().any(|v| reference(v).is_some()) {
             return Ok((env.clone(), Vec::new()));
         }
-        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = self.guard();
         let all = self.load()?;
         let mut out = env.clone();
         let mut used = Vec::new();
         for (k, v) in env {
             let Some(name) = reference(v) else { continue };
             validate_name(name)?;
+            if name.starts_with("node.") {
+                return Err(format!(
+                    "secret '{}' is a node's link key and is never given to agents",
+                    name
+                ));
+            }
             let e = all.get(name).ok_or_else(|| {
                 format!(
                     "secret '{}' (for {}) is not set: add it in Settings > Secrets or with `indra secret set {}`",
@@ -400,7 +467,7 @@ impl Vault {
         if names.is_empty() {
             return;
         }
-        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = self.guard();
         if let Ok(mut all) = self.load() {
             let t = now();
             for n in names {
@@ -529,6 +596,36 @@ mod tests {
             .contains("\"process\":7"));
         assert!(v.remove("jira").unwrap());
         assert!(v.list().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two stores on one directory (as two indra processes would be) do not
+    /// lose each other's writes: only the file lock stands between them.
+    #[test]
+    fn concurrent_writers_lose_nothing() {
+        let (_, dir) = vault("concurrent");
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let d = dir.clone();
+                std::thread::spawn(move || {
+                    let v = Vault::open(d);
+                    for i in 0..15 {
+                        v.set(
+                            &format!("w{}-{}", w, i),
+                            Change {
+                                value: Some(format!("value-{}", i)),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in writers {
+            t.join().unwrap();
+        }
+        assert_eq!(Vault::open(dir.clone()).list().unwrap().len(), 30);
         let _ = std::fs::remove_dir_all(dir);
     }
 

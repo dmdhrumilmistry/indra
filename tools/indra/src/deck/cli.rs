@@ -622,6 +622,23 @@ pub enum NodeCmd {
     Runs,
     /// Run one agent job given as JSON on stdin; stops it when stdin closes
     Exec,
+    /// Dial in to a hub and run its jobs here, reconnecting as needed (no SSH)
+    Connect {
+        /// The hub's console URL, e.g. https://hub.example:7878
+        hub: String,
+        /// This node's name in the hub's config
+        #[arg(long)]
+        name: String,
+        /// One-time enrolment code from the hub (Nodes > Add a machine); only the first time
+        #[arg(long)]
+        code: Option<String>,
+        /// Codebases on this machine the hub may run agents in (repeatable)
+        #[arg(long = "target")]
+        targets: Vec<String>,
+        /// Never use the direct WebRTC path; relay everything through the hub
+        #[arg(long)]
+        no_webrtc: bool,
+    },
 }
 
 /// `indra node ...`: the remote side of a node. The hub runs these over SSH.
@@ -643,6 +660,38 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
         NodeCmd::Info => nodes::cmd_info(&load(opts, None, false)?),
         NodeCmd::Runs => nodes::cmd_runs(),
         NodeCmd::Exec => nodes::cmd_exec(&load(opts, None, false)?),
+        NodeCmd::Connect {
+            hub,
+            name,
+            code,
+            targets,
+            no_webrtc,
+        } => {
+            let s = load(opts, None, false)?;
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            let targets = targets
+                .iter()
+                .map(|t| {
+                    let p = config::expand(&cwd, t);
+                    std::fs::canonicalize(&p).unwrap_or(p).display().to_string()
+                })
+                .collect();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(crate::deck::link::connect(
+                s,
+                crate::deck::link::ConnectOpts {
+                    hub,
+                    name,
+                    code,
+                    targets,
+                    webrtc: !no_webrtc,
+                },
+            ))?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

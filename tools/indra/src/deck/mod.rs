@@ -6,6 +6,7 @@ pub mod cli;
 pub mod confedit;
 pub mod config;
 pub mod discover;
+pub mod link;
 pub mod nodes;
 pub mod procs;
 pub mod runs;
