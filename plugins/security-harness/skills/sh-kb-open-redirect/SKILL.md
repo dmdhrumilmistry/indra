@@ -40,6 +40,14 @@ Login/logout `?next=`/`?return_to=`/`?redirect=`/`?url=` params, post-action red
   against the app origin and re-checked.
 - Destination validated against a strict host allowlist (exact host match, not substring/`endsWith`).
 - Redirect target is server-chosen (not user input) or an opaque id mapped to a known URL.
+- Validation parses scheme, canonical host and effective port (and rejects userinfo) using a parser that
+  matches browser behavior; raw prefix/suffix string checks are not a filter.
+
+## Forwards (server-side)
+A user-controlled server-side forward/dispatch target (`RequestDispatcher.forward`, `fwd=` params) is an
+access-control bypass, not a phishing issue: confirm the user is authorized for the forwarded function
+(see `access-control`). Also check PHP `header("Location: ...")` without `exit`, since code after it still
+runs and may perform the privileged action.
 
 ## CWE / OWASP / severity
 CWE-601. OWASP A01:2021. Usually **medium** standalone; **high** when it leaks OAuth codes/tokens or is a
