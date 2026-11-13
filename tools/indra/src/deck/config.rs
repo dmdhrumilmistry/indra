@@ -175,6 +175,14 @@ pub struct RunnerCfg {
     /// `claude-stream-json` (Claude Code `--output-format stream-json`) or `text`.
     #[serde(default)]
     pub format: Option<String>,
+    /// Extra arguments that continue an earlier session (`{session}` is its id).
+    /// Enables "continue" pivots, e.g. ["--resume", "{session}"] for Claude Code.
+    #[serde(default)]
+    pub resume_args: Vec<String>,
+    /// Added after `resume_args` to branch the session instead of continuing it
+    /// in place, used when the original agent keeps running.
+    #[serde(default)]
+    pub fork_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -240,6 +248,8 @@ pub struct Runner {
     pub command: String,
     pub args: Vec<String>,
     pub format: String,
+    pub resume_args: Vec<String>,
+    pub fork_args: Vec<String>,
     /// Where the program was found on PATH; None means it is not installed.
     pub program: Option<PathBuf>,
 }
@@ -503,20 +513,25 @@ fn default_runners() -> Vec<RunnerCfg> {
         command: command.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
         format: Some(format.into()),
+        resume_args: Vec::new(),
+        fork_args: Vec::new(),
     };
+    let mut claude = r(
+        "claude",
+        "claude",
+        &[
+            "-p",
+            "{prompt}",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ],
+        "claude-stream-json",
+    );
+    claude.resume_args = vec!["--resume".into(), "{session}".into()];
+    claude.fork_args = vec!["--fork-session".into()];
     vec![
-        r(
-            "claude",
-            "claude",
-            &[
-                "-p",
-                "{prompt}",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ],
-            "claude-stream-json",
-        ),
+        claude,
         r("codex", "codex", &["exec", "{prompt}"], "text"),
         r("gemini", "gemini", &["-p", "{prompt}"], "text"),
     ]
@@ -653,12 +668,30 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
         if !r.args.iter().any(|a| a.contains("{prompt}")) {
             return Err(format!("runner '{}': args must contain {{prompt}}", r.name));
         }
+        // Claude Code's stream-json runners can always be continued.
+        let (resume_args, fork_args) = if format == "claude-stream-json" && r.resume_args.is_empty()
+        {
+            (
+                vec!["--resume".to_string(), "{session}".to_string()],
+                vec!["--fork-session".to_string()],
+            )
+        } else {
+            (r.resume_args.clone(), r.fork_args.clone())
+        };
+        if !resume_args.is_empty() && !resume_args.iter().any(|a| a.contains("{session}")) {
+            return Err(format!(
+                "runner '{}': resume_args must contain {{session}}",
+                r.name
+            ));
+        }
         runners.push(Runner {
             program: which(&r.command),
             name: r.name,
             command: r.command,
             args: r.args,
             format,
+            resume_args,
+            fork_args,
         });
     }
 

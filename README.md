@@ -68,6 +68,7 @@ indra/                           # this repository: a plugin marketplace + the i
 │   │   ├── sh-security-review   # the pipeline orchestrator (stages 0-6)
 │   │   ├── sh-pr-review         # review one pull request, post inline comments
 │   │   ├── sh-memory            # long-term graph memory across runs
+│   │   ├── sh-publish           # findings to Jira, Confluence, GitHub issues, Notion
 │   │   └── sh-kb-*  (15)        # per-vulnerability-class knowledge bases
 │   ├── agents/
 │   │   ├── sh-recon             # map: code graph, stack, SBOM/CVE, attack surface
@@ -232,6 +233,13 @@ indra mem recall "django raw sql"                        # what do we know about
 
 A vault is an ordinary Obsidian-compatible folder, so you can also open it in Obsidian.
 
+**Bring knowledge in, send findings out.** `indra mem import` copies an Obsidian vault, a Notion
+export, a GitHub wiki or any Markdown folder into a vault, turning its links into wikilinks. The
+`sh-publish` skill files a review's findings in Jira, Confluence, GitHub issues or Notion
+through their official MCP servers: it asks before creating anything, never opens a duplicate,
+and never sends evidence, payloads or secrets. See
+[Knowledge base and integrations](docs/guides/knowledge-base.md).
+
 ### Agent console (`indra serve`)
 
 A local web console for the harness, and for any other agent harness:
@@ -250,6 +258,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
   watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
   final cost. Stop stops the whole process tree.
+- **Pivot:** redirect an agent mid-run. *Continue* resumes its own session with your new
+  instruction, so it keeps everything it learned; *Fresh* starts a new agent briefed with what
+  the first one was asked and found. Keep the original running to try two directions at once.
 
 <table>
   <tr>
@@ -280,6 +291,12 @@ Run agents on this machine and on any machine you can SSH into, and orchestrate 
 
 See [Nodes and orchestration](tools/indra/README.md#nodes-and-orchestration) for the setup and
 how remote execution stays safe.
+
+**Guides:** [handling agent processes](docs/guides/processes.md) (watching, stopping, logs,
+capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md), and
+[knowledge base and integrations](docs/guides/knowledge-base.md).
+
+<p align="center"><img src="assets/screenshots/pivot.png" alt="Pivoting an agent: continue its session with a new instruction" width="720"></p>
 
 The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
 `.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.

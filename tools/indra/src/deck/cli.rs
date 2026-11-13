@@ -172,12 +172,42 @@ async fn serve(s: config::Settings, token: Option<String>, open: bool) -> Result
         open_browser(&url);
     }
     let app = web::App::new(s, token, loopback);
-    axum::serve(listener, web::router(app))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .map_err(|e| e.to_string())
+    let (procs, engine) = (app.procs.clone(), app.engine.clone());
+    tokio::select! {
+        r = axum::serve(listener, web::router(app)) => r.map_err(|e| e.to_string()),
+        _ = shutdown_signal() => {
+            // Agents run in their own process groups, so a terminal's Ctrl-C
+            // does not reach them: stop them here rather than orphan them.
+            for r in engine.list().iter().filter(|r| r.status == "running") {
+                engine.cancel(r.id);
+            }
+            let n = procs.running();
+            if n > 0 {
+                eprintln!("indra: stopping {} running agent(s)...", n);
+            }
+            procs.stop_all().await;
+            Ok(())
+        }
+    }
+}
+
+/// Ctrl-C, or SIGTERM / SIGHUP on Unix (a service manager, a closed terminal).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut hup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async { match term.as_mut() { Some(s) => { s.recv().await; } None => std::future::pending().await } } => {}
+            _ = async { match hup.as_mut() { Some(s) => { s.recv().await; } None => std::future::pending().await } } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn open_browser(url: &str) {

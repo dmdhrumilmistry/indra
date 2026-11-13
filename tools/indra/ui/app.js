@@ -783,10 +783,55 @@
   function pageProc(m, id) {
     var top = h("div"), agentsBox = h("div"), toolsBox = h("div"), feed = h("div", { class: "feed", role: "log", "aria-live": "polite" });
     var follow = h("input", { type: "checkbox", checked: true, id: "follow" });
+    // Pivot: give this agent a new direction.
+    var pv = {
+      text: h("textarea", { "aria-label": "New direction", placeholder: "e.g. Stop the SQLi hunt and focus on the JWT validation in auth/" }),
+      cont: h("input", { type: "radio", name: "pivot-mode", value: "continue", checked: true }),
+      fresh: h("input", { type: "radio", name: "pivot-mode", value: "fresh" }),
+      keep: h("input", { type: "checkbox" }),
+      go: h("button", { class: "primary", type: "submit" }, "Pivot"),
+      note: h("p", { class: "muted small" })
+    };
+    [pv.cont, pv.fresh].forEach(function (r) { r.addEventListener("change", function () { pv.chosen = true; }); });
+    var keepRow = h("label", { class: "check" }, pv.keep, "Keep this agent running (the continuation branches its session)");
+    var pivotCard = h("form", { class: "card pivot", onsubmit: function (e) {
+      e.preventDefault();
+      if (!pv.text.value.trim()) { toast("Write the new direction first", true); return; }
+      pv.go.disabled = true;
+      api("/api/procs/" + id + "/pivot", { method: "POST", body: { prompt: pv.text.value, mode: pv.fresh.checked ? "fresh" : "continue", keep_running: pv.keep.checked } })
+        .then(function (r) { location.hash = "#/proc/" + r.id; })
+        .catch(function (err) { toast(err.message, true); pv.go.disabled = false; });
+    } },
+      h("h3", { text: "Pivot this agent" }),
+      pv.text,
+      h("label", { class: "check" }, pv.cont, h("span", null, h("b", { text: "Continue its session" }), " - keeps everything it learned")),
+      h("label", { class: "check" }, pv.fresh, h("span", null, h("b", { text: "Start fresh" }), " - a new agent, given this one's question and result")),
+      keepRow, pv.note, h("div", { class: "row" }, pv.go));
     m.appendChild(top);
     m.appendChild(h("div", { class: "split" },
       h("div", null, h("div", { class: "row" }, h("h2", { text: "Live feed" }), h("label", { class: "row muted" }, follow, "Follow")), feed),
-      h("div", null, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox))));
+      h("div", null, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
+        S.ov.read_only ? null : pivotCard)));
+    function updatePivot(p, children) {
+      var hasSession = !!p.session && p.can_resume;
+      pv.cont.disabled = !hasSession;
+      // Follow the session until the user picks a mode themselves: an agent
+      // reports its session a moment after it starts.
+      if (!hasSession && pv.cont.checked) { pv.fresh.checked = true; }
+      else if (hasSession && !pv.chosen) { pv.cont.checked = true; }
+      keepRow.hidden = p.status !== "running";
+      pv.note.textContent = hasSession
+        ? "Runs on " + p.node + " in the same directory with " + p.runner + ". Session " + p.session.slice(0, 8) + "..."
+        : !p.can_resume
+          ? "Runner " + p.runner + " cannot continue a session, so a pivot starts fresh with this agent's result as context."
+          : "This agent has not reported a session yet (only Claude Code does), so a pivot starts fresh with its result as context.";
+      lineage.textContent = "";
+      if (p.parent) lineage.appendChild(h("span", null, "Pivoted from ", h("a", { href: "#/proc/" + p.parent, text: "#" + p.parent }), p.resumed ? " (same session)" : " (fresh)"));
+      if (children.length) lineage.appendChild(h("span", null, (p.parent ? "  -  " : "") + "Pivots: ", children.map(function (c, i) {
+        return [i ? ", " : "", h("a", { href: "#/proc/" + c.id, text: "#" + c.id })];
+      })));
+    }
+    var lineage = h("p", { class: "muted lineage" });
     function renderInfo(p) {
       top.textContent = "";
       var stop = h("button", { class: "danger", type: "button", disabled: p.status !== "running" || S.ov.read_only, onclick: function () {
@@ -795,6 +840,7 @@
       } }, "Stop");
       top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null, stop]));
       top.appendChild(h("div", { class: "cmd", text: p.prompt }));
+      top.appendChild(lineage);
       agentsBox.textContent = "";
       agentsBox.appendChild(p.agents.length ? h("div", { class: "bars" }, p.agents.map(function (a) {
         return h("div", null, h("div", { class: "row" }, h("b", { text: a.type }), statusPill(a.state === "running" ? "running" : a.state === "error" ? "failed" : "exited"),
@@ -803,7 +849,12 @@
       toolsBox.textContent = "";
       toolsBox.appendChild(bars(p.tools));
     }
-    function refresh() { api("/api/procs/" + id).then(renderInfo).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); }); }
+    function refresh() {
+      Promise.all([api("/api/procs/" + id), api("/api/procs")]).then(function (r) {
+        renderInfo(r[0]);
+        updatePivot(r[0], r[1].filter(function (x) { return x.parent === Number(id); }).reverse());
+      }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); });
+    }
     refresh();
     var es = new EventSource("/api/procs/" + id + "/events");
     var pending = null;

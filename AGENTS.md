@@ -50,7 +50,7 @@ PY
 .claude-plugin/marketplace.json     # Claude Code marketplace manifest
 plugins/indra/                      # the plugin itself
   agents/                           # sh-recon, sh-hunter, sh-chainer, sh-verifier, sh-reporter
-  skills/                           # CANONICAL skills: indra, sh-security-review, sh-pr-review, sh-memory, sh-kb-* (15)
+  skills/                           # CANONICAL skills: indra, sh-security-review, sh-pr-review, sh-memory, sh-publish, sh-kb-* (15)
   references/                       # shared reference docs
 gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file
@@ -60,6 +60,7 @@ site/                               # the GitHub Pages website (deployed by .git
 assets/                             # logo, banner, social image and screenshots (README, site, console icon)
 tools/indra/                        # indra: one Rust CLI - graph memory (indra mem) and agent web console (indra serve)
 docs/DISTRIBUTION.md                # packaging and public-listing steps
+docs/guides/                        # user guides: processes, pivoting, knowledge base and integrations
 .github/actions/ai-agent/           # pluggable agent runner (claude | codex | gemini | custom)
 .github/workflows/                  # KB stage 1 (open PR), stage 2 (review and merge)
 .github/kb-update/                  # prompts and trusted-source allowlist for the KB updater

@@ -144,4 +144,21 @@ indra mem --vault "$TV" export -o "<run_dir>/reports/memory-graph.html"   # inte
 indra mem --vault "$TV" export -f mermaid          # paste into Markdown
 ```
 
+## Bring in an existing knowledge base
+
+`indra mem import` copies notes from another tool into a vault, converting its links to
+`[[wikilinks]]`. It never changes the source, skips notes that already exist (`--overwrite`
+replaces them), and `--dry-run` shows what it would do.
+
+```bash
+indra mem --vault "$TV" import ~/notes/obsidian-vault            # an Obsidian vault
+indra mem --vault "$TV" import ~/Downloads/notion-export          # an unzipped Notion "Markdown & CSV" export
+indra mem --vault "$TV" import ./app.wiki --folder wiki           # git clone https://github.com/<o>/<r>.wiki.git
+indra mem --vault "$TV" import ./docs --from markdown --tag docs  # any folder of Markdown
+```
+
+The source kind is detected (`--from obsidian|notion|github-wiki|markdown` to force it). Each
+note gets `source: <kind>:<path>` so you can tell where it came from. To send findings the other
+way, to Jira, Confluence, GitHub issues or Notion, use the `sh-publish` skill.
+
 All commands accept `--json`. Names resolve by id, title, alias or slug, case-insensitively.

@@ -178,6 +178,26 @@ enum Cmd {
         #[arg(long)]
         no_body: bool,
     },
+    /// Import notes from Obsidian, a Notion export, a GitHub wiki or Markdown
+    Import {
+        /// Folder to import (unzip a Notion export first)
+        source: PathBuf,
+        /// obsidian | notion | github-wiki | markdown (default: detected)
+        #[arg(long)]
+        from: Option<String>,
+        /// Put the imported notes in this subfolder of the vault
+        #[arg(long)]
+        folder: Option<String>,
+        /// Tag every imported note (repeatable)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Replace notes that already exist (default: skip them)
+        #[arg(long)]
+        overwrite: bool,
+        /// Show what would be imported without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Delete a note (reports the links it leaves dangling)
     Rm { note: String },
 }
@@ -1293,6 +1313,65 @@ pub fn run(cli: MemArgs) -> Result<ExitCode> {
                     );
                 }
                 None => print!("{}", text),
+            }
+        }
+        Cmd::Import {
+            source,
+            from,
+            folder,
+            tags,
+            overwrite,
+            dry_run,
+        } => {
+            let from = from
+                .as_deref()
+                .map(crate::mem::import::Source::parse)
+                .transpose()?;
+            let opts = crate::mem::import::Options {
+                from,
+                folder,
+                tags,
+                overwrite,
+                dry_run,
+            };
+            let r = crate::mem::import::import(&root, &source, &opts)?;
+            if json {
+                print_json(&r)?;
+            } else {
+                let verb = if r.dry_run {
+                    "would import"
+                } else {
+                    "imported"
+                };
+                println!(
+                    "{} {} note(s) from {} into {}",
+                    verb,
+                    r.imported.len(),
+                    serde_json::to_value(r.from)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_default(),
+                    root.display()
+                );
+                println!("  links converted   {}", r.links_converted);
+                if !r.skipped_existing.is_empty() {
+                    println!(
+                        "  skipped existing  {} (use --overwrite to replace)",
+                        r.skipped_existing.len()
+                    );
+                }
+                if r.ignored_files > 0 {
+                    println!(
+                        "  ignored files     {} (attachments, CSV databases)",
+                        r.ignored_files
+                    );
+                }
+                if !r.unresolved.is_empty() {
+                    println!("  unresolved links  {}", r.unresolved.len());
+                    for (note, target) in r.unresolved.iter().take(10) {
+                        println!("    {} -> {}", note, target);
+                    }
+                }
             }
         }
         Cmd::Rm { note } => {

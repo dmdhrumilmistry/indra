@@ -6,6 +6,7 @@ pub mod cli;
 pub mod export;
 pub mod frontmatter;
 pub mod graph;
+pub mod import;
 pub mod note;
 pub mod search;
 pub mod time;

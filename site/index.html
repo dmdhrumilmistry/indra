@@ -22,6 +22,7 @@
       <a href="#memory">Memory</a>
       <a href="#console">Console</a>
       <a href="#orchestrate">Orchestrate</a>
+      <a href="#guides">Guides</a>
       <a href="#install">Install</a>
       <a class="gh" href="https://github.com/dmdhrumilmistry/indra">GitHub</a>
     </nav>
@@ -81,6 +82,7 @@
         <li><b>Recall that follows links.</b> Search finds a note; the graph brings in its mitigation, its false positives and its siblings, and says why.</li>
         <li><b>Plain files.</b> A vault is a folder that opens as-is in Obsidian and diffs cleanly in git.</li>
         <li><b>Safe by design.</b> Findings are remembered without evidence, payloads or secrets.</li>
+        <li><b>Connected.</b> Import Obsidian, Notion exports and GitHub wikis; publish findings to Jira, Confluence, GitHub issues and Notion.</li>
       </ul>
       <div class="term small">
         <pre><code><span class="c">$</span> indra mem recall "django raw sql"
@@ -132,6 +134,15 @@ needs  = ["api", "web"]</code></pre></div>
         <li><b>Stop means stop.</b> Closing the session ends the agent's whole process tree on the remote.</li>
         <li><b>Cron and CI ready.</b> <code>indra run nightly</code> exits non-zero if any task failed.</li>
       </ul>
+    </div>
+  </section>
+
+  <section class="wrap band" id="guides">
+    <h2>Guides</h2>
+    <div class="cards">
+      <div class="card"><h3><a href="https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/processes.md">Handling agent processes</a></h3><p>Launch, watch, stop and clean up after agents, where logs go, capacity, permissions and troubleshooting.</p></div>
+      <div class="card"><h3><a href="https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/pivoting.md">Pivoting agents</a></h3><p>Redirect a running agent: continue its own session with a new instruction, or start fresh with a brief of what it found.</p></div>
+      <div class="card"><h3><a href="https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/knowledge-base.md">Knowledge base and integrations</a></h3><p>Obsidian, Notion and GitHub wikis into memory; findings out to Jira, Confluence, GitHub issues and Notion.</p></div>
     </div>
   </section>
 

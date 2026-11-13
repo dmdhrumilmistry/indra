@@ -474,3 +474,44 @@ fn tree_draws_the_graph_in_the_terminal() {
         0
     );
 }
+
+#[test]
+fn import_a_github_wiki_from_the_cli() {
+    let v = Vault::new();
+    // The source lives outside the vault, as a cloned wiki would.
+    let wiki = v.dir.with_extension("wiki-src");
+    let _ = fs::remove_dir_all(&wiki);
+    fs::create_dir_all(&wiki).unwrap();
+    fs::write(
+        wiki.join("Home.md"),
+        "Read [[the setup guide|Setup-Guide]] first.\n",
+    )
+    .unwrap();
+    fs::write(wiki.join("Setup-Guide.md"), "Install indra.\n").unwrap();
+    fs::write(wiki.join("_Sidebar.md"), "[[Home]]\n").unwrap();
+    let dry = v.json(&["import", wiki.to_str().unwrap(), "--dry-run"]);
+    assert_eq!(dry["from"], "github-wiki");
+    assert_eq!(dry["dry_run"], true);
+    assert!(!v.dir.join("home.md").exists());
+    let r = v.json(&[
+        "import",
+        wiki.to_str().unwrap(),
+        "--folder",
+        "wiki",
+        "--tag",
+        "docs",
+    ]);
+    assert_eq!(
+        r["imported"],
+        serde_json::json!(["wiki/home", "wiki/setup-guide", "wiki/sidebar"])
+    );
+    assert_eq!(r["links_converted"], 2);
+    v.ok(&["check"]);
+    let n = v.json(&["neighbors", "wiki/home"]);
+    assert_eq!(n[0]["id"], "wiki/setup-guide");
+    assert!(v
+        .read("wiki/home")
+        .contains("[[wiki/setup-guide|the setup guide]]"));
+    assert!(!v.run(&["import", "/definitely/not/here"]).status.success());
+    let _ = fs::remove_dir_all(&wiki);
+}

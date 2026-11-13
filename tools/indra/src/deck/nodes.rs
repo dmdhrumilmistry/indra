@@ -334,6 +334,33 @@ pub struct Job {
     pub runner: String,
     pub prompt: String,
     pub target: String,
+    /// Continue an earlier agent session on this node instead of starting fresh.
+    #[serde(default)]
+    pub resume: Option<Resume>,
+}
+
+/// Continue an earlier agent session (a pivot), optionally as a branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Resume {
+    pub session: String,
+    /// Branch the session instead of continuing it in place.
+    #[serde(default)]
+    pub fork: bool,
+}
+
+/// A session id becomes a command-line argument: keep it to the characters
+/// real ids use, and never let it look like an option.
+pub fn validate_session(s: &str) -> Result<(), String> {
+    let ok = !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("invalid session id '{}'", s))
+    }
 }
 
 type Out = Arc<Mutex<std::io::Stdout>>;
@@ -391,7 +418,8 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
             target.display()
         ));
     }
-    let (program, args) = match runner_argv(runner, &job.prompt, &target) {
+    let (program, args) = match runner_argv_with(runner, &job.prompt, &target, job.resume.as_ref())
+    {
         Ok(x) => x,
         Err(e) => return fail(e),
     };
@@ -450,13 +478,7 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
     };
     let status = tokio::select! {
         st = child.wait() => st,
-        _ = eof => {
-            crate::deck::procs::terminate_tree(pid);
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
-                Ok(st) => st,
-                Err(_) => { let _ = child.start_kill(); child.wait().await }
-            }
-        }
+        _ = eof => crate::deck::procs::stop_tree(&mut child, pid).await,
     };
     let _ = t1.await;
     let _ = t2.await;
@@ -467,10 +489,13 @@ async fn exec(s: &Settings) -> Result<ExitCode, String> {
 
 /// The argument vector a runner executes for a prompt in a target. The
 /// prompt is substituted last so its own text is never expanded again.
-pub fn runner_argv(
+/// With `resume`, an earlier session is continued (or branched) through the
+/// runner's `resume_args` / `fork_args`.
+pub fn runner_argv_with(
     r: &Runner,
     prompt: &str,
     target: &std::path::Path,
+    resume: Option<&Resume>,
 ) -> Result<(PathBuf, Vec<String>), String> {
     let program = r.program.clone().ok_or_else(|| {
         format!(
@@ -480,17 +505,83 @@ pub fn runner_argv(
     })?;
     let target = target.to_string_lossy();
     let prompt = prompt.replace("{target}", &target);
-    let args = r
+    let mut args: Vec<String> = r
         .args
         .iter()
         .map(|a| a.replace("{target}", &target).replace("{prompt}", &prompt))
         .collect();
+    if let Some(res) = resume {
+        if r.resume_args.is_empty() {
+            return Err(format!(
+                "runner '{}' cannot continue a session (it has no resume_args); pivot with a fresh start instead",
+                r.name
+            ));
+        }
+        validate_session(&res.session)?;
+        args.extend(
+            r.resume_args
+                .iter()
+                .map(|a| a.replace("{session}", &res.session)),
+        );
+        if res.fork {
+            args.extend(r.fork_args.iter().cloned());
+        }
+    }
     Ok((program, args))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_arguments() {
+        let r = Runner {
+            name: "claude".into(),
+            command: "claude".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            format: "claude-stream-json".into(),
+            resume_args: vec!["--resume".into(), "{session}".into()],
+            fork_args: vec!["--fork-session".into()],
+            program: Some(PathBuf::from("/bin/claude")),
+        };
+        let t = std::path::Path::new("/t");
+        let res = Resume {
+            session: "4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10".into(),
+            fork: false,
+        };
+        let (_, a) = runner_argv_with(&r, "next", t, Some(&res)).unwrap();
+        assert_eq!(
+            a,
+            vec![
+                "-p",
+                "next",
+                "--resume",
+                "4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"
+            ]
+        );
+        let fork = Resume {
+            fork: true,
+            ..res.clone()
+        };
+        let (_, a) = runner_argv_with(&r, "next", t, Some(&fork)).unwrap();
+        assert_eq!(a.last().unwrap(), "--fork-session");
+        // A session id can never smuggle in an option.
+        for bad in ["--dangerously-skip-permissions", "a b", "", "x;y"] {
+            let r2 = Resume {
+                session: bad.into(),
+                fork: false,
+            };
+            assert!(runner_argv_with(&r, "x", t, Some(&r2)).is_err(), "{}", bad);
+        }
+        let plain = Runner {
+            resume_args: vec![],
+            ..r
+        };
+        assert!(runner_argv_with(&plain, "x", t, Some(&res))
+            .unwrap_err()
+            .contains("cannot continue"));
+    }
 
     #[test]
     fn destinations() {
