@@ -153,7 +153,7 @@ to run it with, so it serves reviews, fixes, research or anything else an agent 
   A person moves items to Done; agents never close tickets on their own.
 - Items can also be created on the board directly.
 
-## Workflows as graphs
+## Workflows as graphs (built)
 
 Workflows are already DAGs of tasks with dependencies. The editor makes them visual:
 
@@ -161,7 +161,9 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
   a machine and a target.
 - **Components** are saved task templates (a prompt with parameters and a profile), reused by
   dragging them in.
-- A **workflow can be a node** in another workflow, so pipelines compose.
+- A **workflow can be a node** in another workflow, so pipelines compose. It is inlined when the
+  config loads (`<step>__<task>`), so the engine runs one flat graph and capacity, retries and
+  cancel work as for any task.
 - The graph is stored as ordinary `[[workflow]]` TOML (with positions), so `indra run` and the
   text editor keep working.
 
@@ -170,5 +172,5 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 1. Agent control and profiles (including Ollama), and this document. Done.
 2. Secrets. Done.
 3. Board and tracker connectors (Jira, GitHub Issues, ClickUp). Done.
-4. Graph workflow editor with components.
+4. Graph workflow editor with components and sub-workflows. Done.
 5. WebRTC transport with reconnection, SSH kept as the fallback.

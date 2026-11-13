@@ -609,6 +609,33 @@ $ indra run nightly
 17:23:40 workflow 'nightly' succeeded
 ```
 
+**The graph editor.** **Workflows > New workflow** (or **Edit graph** on a workflow) opens a
+canvas: drag tasks, components and other workflows in from the palette, drag from a task's right
+edge to another task to make it run after the first, and edit the selected step on the right.
+Saving writes the same `[[workflow]]` TOML, with each task's position, so `indra run` and the
+text editor keep working.
+
+**Components** are reusable tasks. A task can start from one and override any field, and the
+editor's **Save as component** turns a task into one:
+
+```toml
+[[component]]
+name    = "review"
+prompt  = "/indra full security review of {target}"
+profile = "worker"
+retries = 1
+
+[[workflow.task]]
+id        = "api"
+component = "review"
+node      = "build-box"
+target    = "/srv/api"
+```
+
+**Workflows compose.** A task with `workflow = "<name>"` runs that workflow as one step: its
+first tasks start after the step's `needs`, and anything that needs the step waits for its last
+tasks. Its tasks show up as `<step>__<task>` in the run. A workflow cannot include itself.
+
 `indra run` exits 0 only if every task succeeded; Ctrl-C cancels the run and stops its agents.
 `indra run` without a name lists the configured workflows.
 

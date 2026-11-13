@@ -1502,6 +1502,7 @@ mod tests {
             presets: vec![],
             profiles: vec![],
             connectors: vec![],
+            components: vec![],
             bind: "127.0.0.1:0".into(),
             read_only,
             config_path: None,

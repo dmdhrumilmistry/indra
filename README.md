@@ -270,6 +270,8 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
   moves to Review when the agent finishes. Connect Jira, GitHub Issues or ClickUp to import
   tickets, run them (automatically if you like) and report results and state back. See
   [the board guide](docs/guides/board.md).
+- **Workflow editor:** build workflows as a graph by dragging tasks, reusable components and
+  whole workflows (as one step) onto a canvas and connecting them; it saves plain TOML.
 - **Settings:** configure everything from the browser: runners, remote nodes, workflows,
   presets, harnesses, capacity, or the raw `indra.toml`. Each save is checked and applies at
   once, and your comments in the file are kept.

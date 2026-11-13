@@ -23,6 +23,8 @@ pub struct ConfigFile {
     pub preset: Vec<PresetCfg>,
     pub profile: Vec<ProfileCfg>,
     pub connector: Vec<ConnectorCfg>,
+    /// Reusable workflow tasks.
+    pub component: Vec<ComponentCfg>,
     /// This machine as an agent node.
     pub local: LocalCfg,
     /// Remote machines reached over SSH.
@@ -81,21 +83,24 @@ pub struct WorkflowCfg {
     pub tasks: Vec<TaskCfg>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskCfg {
     pub id: String,
-    /// "local" or a [[node]] name.
-    #[serde(default = "local_node")]
+    /// "local" (the default) or a [[node]] name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node: String,
     /// Directory on that node the agent runs in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target: String,
-    #[serde(default = "claude_runner")]
+    /// Runner (default: the profile's or the component's, else "claude").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub runner: String,
     /// Profile to run with; its runner, if it names one, replaces `runner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// `{target}` and `{node}` are filled in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prompt: String,
     /// Task ids that must succeed first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -103,16 +108,146 @@ pub struct TaskCfg {
     /// Extra attempts after a failure.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub retries: u32,
+    /// A [[component]] to start from; the task's own fields win.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// Run another [[workflow]] as this one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// Where the graph editor draws it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pos: Option<[i32; 2]>,
+}
+
+/// A reusable task: what a workflow task can start from.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentCfg {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runner: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+}
+
+/// A workflow with its components filled in and its sub-workflows
+/// inlined, ready to run. A sub-workflow step `s` becomes tasks `s__<id>`:
+/// its first tasks wait for what `s` needs, and whatever needs `s` waits for
+/// its last tasks.
+pub fn expand_workflow(
+    w: &WorkflowCfg,
+    all: &[WorkflowCfg],
+    components: &[ComponentCfg],
+) -> Result<WorkflowCfg> {
+    fn go(
+        w: &WorkflowCfg,
+        all: &[WorkflowCfg],
+        comps: &[ComponentCfg],
+        stack: &mut Vec<String>,
+    ) -> Result<Vec<TaskCfg>> {
+        let at = |m: String| format!("workflow '{}': {}", w.name, m);
+        let mut out: Vec<TaskCfg> = Vec::new();
+        // A sub-workflow step's id -> the ids of its last tasks.
+        let mut sinks: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for t in &w.tasks {
+            if let Some(sub) = &t.workflow {
+                if t.component.is_some() {
+                    return Err(at(format!(
+                        "task '{}' cannot have both a component and a workflow",
+                        t.id
+                    )));
+                }
+                if stack.contains(sub) || stack.len() > 8 {
+                    return Err(at(format!(
+                        "workflow '{}' includes itself (through task '{}')",
+                        sub, t.id
+                    )));
+                }
+                let sw = all.iter().find(|x| &x.name == sub).ok_or_else(|| {
+                    at(format!("task '{}' runs unknown workflow '{}'", t.id, sub))
+                })?;
+                stack.push(sub.clone());
+                let inner = go(sw, all, comps, stack)?;
+                stack.pop();
+                let prefix = |id: &str| format!("{}__{}", t.id, id);
+                let needed: std::collections::HashSet<&String> =
+                    inner.iter().flat_map(|x| x.needs.iter()).collect();
+                sinks.insert(
+                    t.id.clone(),
+                    inner
+                        .iter()
+                        .filter(|x| !needed.contains(&x.id))
+                        .map(|x| prefix(&x.id))
+                        .collect(),
+                );
+                for mut x in inner.clone() {
+                    x.needs = if x.needs.is_empty() {
+                        t.needs.clone()
+                    } else {
+                        x.needs.iter().map(|n| prefix(n)).collect()
+                    };
+                    x.id = prefix(&x.id);
+                    out.push(x);
+                }
+                continue;
+            }
+            let mut x = t.clone();
+            if let Some(cn) = &t.component {
+                let c = comps.iter().find(|c| &c.name == cn).ok_or_else(|| {
+                    at(format!("task '{}' uses unknown component '{}'", t.id, cn))
+                })?;
+                let fill = |v: &mut String, from: &str| {
+                    if v.is_empty() {
+                        *v = from.to_string();
+                    }
+                };
+                fill(&mut x.prompt, &c.prompt);
+                fill(&mut x.target, &c.target);
+                fill(&mut x.runner, &c.runner);
+                fill(&mut x.node, &c.node);
+                if x.profile.is_none() {
+                    x.profile = c.profile.clone();
+                }
+                if x.retries == 0 {
+                    x.retries = c.retries.unwrap_or(0);
+                }
+            }
+            if x.node.is_empty() {
+                x.node = crate::deck::nodes::LOCAL.into();
+            }
+            if x.runner.is_empty() {
+                x.runner = "claude".into();
+            }
+            x.component = None;
+            out.push(x);
+        }
+        // Whatever needed a sub-workflow step now needs its last tasks.
+        for x in &mut out {
+            x.needs = x
+                .needs
+                .iter()
+                .flat_map(|n| sinks.get(n).cloned().unwrap_or_else(|| vec![n.clone()]))
+                .collect();
+        }
+        Ok(out)
+    }
+    let mut stack = vec![w.name.clone()];
+    let tasks = go(w, all, components, &mut stack)?;
+    Ok(WorkflowCfg { tasks, ..w.clone() })
 }
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
-}
-fn local_node() -> String {
-    crate::deck::nodes::LOCAL.into()
-}
-fn claude_runner() -> String {
-    "claude".into()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -363,6 +498,7 @@ pub struct Settings {
     pub presets: Vec<PresetCfg>,
     pub profiles: Vec<ProfileCfg>,
     pub connectors: Vec<ConnectorCfg>,
+    pub components: Vec<ComponentCfg>,
     pub bind: String,
     pub read_only: bool,
     pub config_path: Option<PathBuf>,
@@ -436,6 +572,9 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
         }
         if t.prompt.trim().is_empty() {
             return Err(at(format!("task '{}' has an empty prompt", t.id)));
+        }
+        if t.target.trim().is_empty() {
+            return Err(at(format!("task '{}' has no target", t.id)));
         }
     }
     for t in &w.tasks {
@@ -987,13 +1126,29 @@ pub fn build_settings(
         });
     }
     let node_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
+    unique("component", file.component.iter().map(|c| c.name.as_str()))?;
+    for c in &file.component {
+        known(&c.profile, &format!("component '{}'", c.name))?;
+    }
+    for w in &file.workflow {
+        for t in &w.tasks {
+            if t.workflow.is_none() {
+                known(
+                    &t.profile,
+                    &format!("workflow '{}' task '{}'", w.name, t.id),
+                )?;
+            }
+        }
+    }
     let mut workflows = Vec::new();
     for w in &file.workflow {
-        validate_workflow(w, &node_names)?;
         if workflows.iter().any(|x: &WorkflowCfg| x.name == w.name) {
             return Err(format!("workflow name '{}' is used twice", w.name));
         }
-        let mut w = w.clone();
+        // Ids are checked on the workflow as written, the rest once expanded.
+        crate::deck::nodes::validate_name(&w.name).map_err(|e| format!("workflow name: {}", e))?;
+        let mut w = expand_workflow(w, &file.workflow, &file.component)?;
+        validate_workflow(&w, &node_names)?;
         // Local targets are relative to the config file; remote ones are the remote's business.
         for t in &mut w.tasks {
             if t.node == crate::deck::nodes::LOCAL {
@@ -1009,6 +1164,7 @@ pub fn build_settings(
         presets,
         profiles: file.profile.clone(),
         connectors: file.connector.clone(),
+        components: file.component.clone(),
         local_max_parallel: file.local.max_parallel.unwrap_or(4).max(1),
         nodes,
         workflows,
@@ -1136,7 +1292,93 @@ mod tests {
         assert_eq!(c.local.max_parallel, Some(4));
         assert_eq!(c.node[0].name, "build-box");
         assert_eq!(c.workflow[0].tasks.len(), 3);
-        assert!(validate_workflow(&c.workflow[0], &["build-box".into()]).is_ok());
+        let w = expand_workflow(&c.workflow[0], &c.workflow, &c.component).unwrap();
+        assert!(validate_workflow(&w, &["build-box".into()]).is_ok());
+    }
+
+    #[test]
+    fn components_and_sub_workflows_expand() {
+        let c: ConfigFile = toml::from_str(
+            r#"
+[[component]]
+name = "review"
+prompt = "review {target}"
+profile = "p"
+retries = 2
+
+[[workflow]]
+name = "inner"
+[[workflow.task]]
+id = "a"
+target = "/a"
+prompt = "x"
+[[workflow.task]]
+id = "b"
+target = "/b"
+prompt = "y"
+needs = ["a"]
+
+[[workflow]]
+name = "outer"
+[[workflow.task]]
+id = "first"
+component = "review"
+target = "/srv"
+[[workflow.task]]
+id = "sub"
+workflow = "inner"
+needs = ["first"]
+pos = [120, 40]
+[[workflow.task]]
+id = "last"
+component = "review"
+target = "/t"
+prompt = "my own prompt"
+needs = ["sub"]
+"#,
+        )
+        .unwrap();
+        let w = expand_workflow(&c.workflow[1], &c.workflow, &c.component).unwrap();
+        let ids: Vec<&str> = w.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["first", "sub__a", "sub__b", "last"]);
+        let t = |id: &str| w.tasks.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(t("first").prompt, "review {target}");
+        assert_eq!(t("first").profile.as_deref(), Some("p"));
+        assert_eq!(t("first").retries, 2);
+        assert_eq!(t("first").node, "local");
+        assert_eq!(t("first").runner, "claude");
+        assert_eq!(
+            t("last").prompt,
+            "my own prompt",
+            "the task's own fields win"
+        );
+        assert_eq!(
+            t("sub__a").needs,
+            ["first"],
+            "the sub-workflow starts after its step's needs"
+        );
+        assert_eq!(t("sub__b").needs, ["sub__a"]);
+        assert_eq!(
+            t("last").needs,
+            ["sub__b"],
+            "what needed the step waits for its last task"
+        );
+        assert!(validate_workflow(&w, &[]).is_ok());
+
+        // A workflow that includes itself is refused.
+        let mut looped = c.workflow.clone();
+        looped[0].tasks.push(TaskCfg {
+            id: "again".into(),
+            workflow: Some("outer".into()),
+            ..Default::default()
+        });
+        let e = expand_workflow(&looped[1], &looped, &c.component).unwrap_err();
+        assert!(e.contains("includes itself"), "{}", e);
+        let mut bad = c.workflow[1].clone();
+        bad.tasks[0].component = Some("nope".into());
+        assert!(expand_workflow(&bad, &c.workflow, &c.component)
+            .unwrap_err()
+            .contains("unknown component"));
     }
 
     #[test]
