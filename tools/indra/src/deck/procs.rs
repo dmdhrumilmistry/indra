@@ -8,6 +8,7 @@
 //! show which agents a run started and what each one is doing.
 
 use crate::deck::config::Runner;
+use crate::deck::nodes::Node;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -49,11 +50,15 @@ pub struct SubAgent {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcView {
     pub id: u64,
+    /// "local" or the name of the node it runs on.
+    pub node: String,
     pub runner: String,
     pub harness: String,
     pub prompt: String,
     pub cwd: String,
     pub command: Vec<String>,
+    /// Remote host name, once the node reports it.
+    pub host: Option<String>,
     pub started: u64,
     pub ended: Option<u64>,
     /// running | exited | failed | stopped
@@ -76,14 +81,18 @@ struct State {
     tools: BTreeMap<String, usize>,
     agents: Vec<SubAgent>,
     cost_usd: Option<f64>,
+    /// Output format of the agent itself (for remote jobs, learnt from the node).
+    format: String,
+    host: Option<String>,
 }
 
 pub struct Proc {
     id: u64,
+    node: String,
     runner: String,
     harness: String,
     prompt: String,
-    cwd: PathBuf,
+    cwd: String,
     command: Vec<String>,
     started: u64,
     log: PathBuf,
@@ -132,11 +141,13 @@ impl Proc {
         let st = self.state.lock().unwrap();
         ProcView {
             id: self.id,
+            node: self.node.clone(),
             runner: self.runner.clone(),
             harness: self.harness.clone(),
             prompt: self.prompt.clone(),
-            cwd: self.cwd.display().to_string(),
+            cwd: self.cwd.clone(),
             command: self.command.clone(),
+            host: st.host.clone(),
             started: self.started,
             ended: st.ended,
             status: st.status.clone(),
@@ -168,6 +179,55 @@ impl Proc {
                 .collect(),
             rx,
         )
+    }
+
+    /// One line of the agent's own stdout, in its format.
+    fn agent_line(&self, line: &str) {
+        let claude = self.state.lock().unwrap().format == "claude-stream-json";
+        if claude {
+            self.claude_line(line);
+        } else if !line.trim().is_empty() {
+            self.push("text", line.to_string(), None);
+        }
+    }
+
+    /// One envelope line from `indra node exec` on a remote node.
+    fn node_line(&self, line: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            if !line.trim().is_empty() {
+                self.push("text", line.to_string(), None);
+            }
+            return;
+        };
+        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        match v.get("t").and_then(Value::as_str).unwrap_or("") {
+            "start" => {
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.format = s("format");
+                    st.host = Some(s("host")).filter(|h| !h.is_empty());
+                }
+                self.push(
+                    "system",
+                    format!(
+                        "running on {} as pid {}",
+                        s("host"),
+                        v.get("pid").map(|p| p.to_string()).unwrap_or_default()
+                    ),
+                    None,
+                );
+            }
+            "out" => self.agent_line(&s("l")),
+            "err" => {
+                let l = s("l");
+                if !l.trim().is_empty() {
+                    self.push("stderr", l, None);
+                }
+            }
+            "error" => self.push("error", s("msg"), None),
+            "exit" => {}
+            _ => {}
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -356,11 +416,23 @@ pub struct Procs {
     log_dir: PathBuf,
 }
 
-pub struct Launch<'a> {
-    pub runner: &'a Runner,
-    pub harness: &'a str,
-    pub prompt: &'a str,
-    pub target: &'a Path,
+/// Where and what to launch.
+pub enum Launch<'a> {
+    /// A runner from this machine's config, in a local directory.
+    Local {
+        runner: &'a Runner,
+        harness: &'a str,
+        prompt: &'a str,
+        target: &'a Path,
+    },
+    /// A runner, by name, on a remote node, in a directory on that node.
+    Remote {
+        node: &'a Node,
+        runner: &'a str,
+        harness: &'a str,
+        prompt: &'a str,
+        target: &'a str,
+    },
 }
 
 impl Procs {
@@ -397,63 +469,136 @@ impl Procs {
             .count()
     }
 
-    /// The exact argument vector a launch would execute (also used by tests).
-    pub fn command_for(l: &Launch) -> Result<(PathBuf, Vec<String>), String> {
-        let program = l.runner.program.clone().ok_or_else(|| {
-            format!(
-                "runner '{}': '{}' is not installed or not on PATH",
-                l.runner.name, l.runner.command
-            )
-        })?;
-        let target = l.target.to_string_lossy();
-        // {target} inside the prompt is intended (presets use it); the
-        // prompt is substituted last so its text is never expanded again.
-        let prompt = l.prompt.replace("{target}", &target);
-        let args = l
-            .runner
-            .args
-            .iter()
-            .map(|a| a.replace("{target}", &target).replace("{prompt}", &prompt))
-            .collect();
-        Ok((program, args))
+    /// Agents running on one node.
+    pub fn running_on(&self, node: &str) -> usize {
+        self.procs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.node == node && p.is_running())
+            .count()
+    }
+
+    /// The exact argument vector a local launch would execute (also used by tests).
+    pub fn command_for(
+        runner: &Runner,
+        prompt: &str,
+        target: &Path,
+    ) -> Result<(PathBuf, Vec<String>), String> {
+        crate::deck::nodes::runner_argv(runner, prompt, target)
     }
 
     pub fn start(self: &Arc<Self>, l: Launch) -> Result<u64, String> {
-        let (program, args) = Self::command_for(&l)?;
-        if !l.target.is_dir() {
-            return Err(format!("target is not a directory: {}", l.target.display()));
+        // Resolve the launch into a program, its arguments, and what the UI shows.
+        struct Plan {
+            program: PathBuf,
+            args: Vec<String>,
+            cwd: Option<PathBuf>,
+            stdin: Option<String>,
+            node: String,
+            runner: String,
+            harness: String,
+            prompt: String,
+            target: String,
+            format: String,
+            remote: bool,
         }
+        let plan = match l {
+            Launch::Local {
+                runner,
+                harness,
+                prompt,
+                target,
+            } => {
+                let (program, args) = Self::command_for(runner, prompt, target)?;
+                if !target.is_dir() {
+                    return Err(format!("target is not a directory: {}", target.display()));
+                }
+                Plan {
+                    program,
+                    args,
+                    cwd: Some(target.to_path_buf()),
+                    stdin: None,
+                    node: crate::deck::nodes::LOCAL.into(),
+                    runner: runner.name.clone(),
+                    harness: harness.into(),
+                    prompt: prompt.into(),
+                    target: target.display().to_string(),
+                    format: runner.format.clone(),
+                    remote: false,
+                }
+            }
+            Launch::Remote {
+                node,
+                runner,
+                harness,
+                prompt,
+                target,
+            } => {
+                let (program, args) = node.ssh_command_for("exec")?;
+                let job = crate::deck::nodes::Job {
+                    runner: runner.into(),
+                    prompt: prompt.replace("{node}", &node.name),
+                    target: target.into(),
+                };
+                Plan {
+                    program,
+                    args,
+                    cwd: None,
+                    stdin: Some(serde_json::to_string(&job).map_err(|e| e.to_string())?),
+                    node: node.name.clone(),
+                    runner: runner.into(),
+                    harness: harness.into(),
+                    prompt: prompt.into(),
+                    target: target.into(),
+                    format: String::new(),
+                    remote: true,
+                }
+            }
+        };
         std::fs::create_dir_all(&self.log_dir)
             .map_err(|e| format!("cannot create {}: {}", self.log_dir.display(), e))?;
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let started = now();
-        let log = self
-            .log_dir
-            .join(format!("{}-{}-{}.log", started, id, l.runner.name));
+        let log = self.log_dir.join(format!(
+            "{}-{}-{}-{}.log",
+            started, id, plan.node, plan.runner
+        ));
 
-        let mut cmd = tokio::process::Command::new(&program);
-        cmd.args(&args)
-            .current_dir(l.target)
-            .stdin(Stdio::null())
+        let mut cmd = tokio::process::Command::new(&plan.program);
+        cmd.args(&plan.args)
+            .stdin(if plan.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(c) = &plan.cwd {
+            cmd.current_dir(c);
+        }
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd
             .spawn()
-            .map_err(|e| format!("cannot start {}: {}", program.display(), e))?;
+            .map_err(|e| format!("cannot start {}: {}", plan.program.display(), e))?;
+        // A remote job lives as long as its stdin stays open: the waiter task
+        // below writes the job, then holds stdin until the job ends.
+        let mut job_stdin = child.stdin.take();
+        let payload = plan.stdin.clone();
 
         let (tx, _) = broadcast::channel(1024);
         let (stop_tx, stop_rx) = oneshot::channel();
         let proc = Arc::new(Proc {
             id,
-            runner: l.runner.name.clone(),
-            harness: l.harness.to_string(),
-            prompt: l.prompt.to_string(),
-            cwd: l.target.to_path_buf(),
-            command: std::iter::once(program.display().to_string())
-                .chain(args.iter().cloned())
+            node: plan.node.clone(),
+            runner: plan.runner.clone(),
+            harness: plan.harness.clone(),
+            prompt: plan.prompt.clone(),
+            cwd: plan.target.clone(),
+            command: std::iter::once(plan.program.display().to_string())
+                .chain(plan.args.iter().cloned())
                 .collect(),
             started,
             log: log.clone(),
@@ -466,6 +611,8 @@ impl Procs {
                 tools: BTreeMap::new(),
                 agents: Vec::new(),
                 cost_usd: None,
+                format: plan.format.clone(),
+                host: None,
             }),
             tx,
             stop: Mutex::new(Some(stop_tx)),
@@ -473,12 +620,19 @@ impl Procs {
         self.procs.lock().unwrap().insert(id, proc.clone());
         proc.push(
             "system",
-            format!("started {} in {}", l.runner.name, l.target.display()),
+            if plan.remote {
+                format!(
+                    "started {} on node {} in {}",
+                    plan.runner, plan.node, plan.target
+                )
+            } else {
+                format!("started {} in {}", plan.runner, plan.target)
+            },
             None,
         );
 
         let logf = Arc::new(Mutex::new(std::fs::File::create(&log).ok()));
-        let claude = l.runner.format == "claude-stream-json";
+        let remote = plan.remote;
         let pid = child.id();
 
         let out = child.stdout.take();
@@ -491,10 +645,10 @@ impl Procs {
                 if let Some(f) = lf1.lock().unwrap().as_mut() {
                     let _ = writeln!(f, "{}", line);
                 }
-                if claude {
-                    p1.claude_line(&line);
-                } else if !line.trim().is_empty() {
-                    p1.push("text", line, None);
+                if remote {
+                    p1.node_line(&line);
+                } else {
+                    p1.agent_line(&line);
                 }
             }
         });
@@ -514,12 +668,28 @@ impl Procs {
 
         let p3 = proc.clone();
         tokio::spawn(async move {
+            if let (Some(si), Some(payload)) = (job_stdin.as_mut(), payload) {
+                let line = format!("{}\n", payload);
+                if let Err(e) = tokio::io::AsyncWriteExt::write_all(si, line.as_bytes()).await {
+                    p3.push(
+                        "error",
+                        format!("could not send the job to the node: {}", e),
+                        None,
+                    );
+                }
+            }
             let mut stopped = false;
             let status = tokio::select! {
                 s = child.wait() => s,
                 _ = stop_rx => {
                     stopped = true;
                     p3.push("system", "stop requested".into(), None);
+                    // Closing a remote job's stdin makes the node stop the agent's tree;
+                    // then the local ssh (or the local agent) is terminated as well.
+                    drop(job_stdin.take());
+                    if remote {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+                    }
                     terminate_tree(pid);
                     match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
                         Ok(s) => s,
@@ -572,7 +742,7 @@ impl Procs {
 
 /// Ask the whole process tree to stop: the runner usually has children of
 /// its own (shells, MCP servers, subagents).
-fn terminate_tree(pid: Option<u32>) {
+pub(crate) fn terminate_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     #[cfg(unix)]
     {
@@ -612,22 +782,11 @@ mod tests {
     #[test]
     fn prompt_is_one_argument_and_never_re_expanded() {
         let r = runner("text", Some(PathBuf::from("/bin/r")));
-        let l = Launch {
-            runner: &r,
-            harness: "h",
-            prompt: "review {target}; rm -rf / {prompt}",
-            target: Path::new("/t"),
-        };
-        let (_, args) = Procs::command_for(&l).unwrap();
+        let (_, args) =
+            Procs::command_for(&r, "review {target}; rm -rf / {prompt}", Path::new("/t")).unwrap();
         assert_eq!(args, vec!["-p", "review /t; rm -rf / {prompt}", "--cwd=/t"]);
         let r = runner("text", None);
-        let l = Launch {
-            runner: &r,
-            harness: "h",
-            prompt: "x",
-            target: Path::new("/t"),
-        };
-        assert!(Procs::command_for(&l)
+        assert!(Procs::command_for(&r, "x", Path::new("/t"))
             .unwrap_err()
             .contains("not installed"));
     }
@@ -637,10 +796,11 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let p = Proc {
             id: 1,
+            node: "local".into(),
             runner: "claude".into(),
             harness: "h".into(),
             prompt: "p".into(),
-            cwd: PathBuf::from("."),
+            cwd: ".".into(),
             command: vec![],
             started: 0,
             log: PathBuf::from("x.log"),
@@ -653,6 +813,8 @@ mod tests {
                 tools: BTreeMap::new(),
                 agents: Vec::new(),
                 cost_usd: None,
+                format: "claude-stream-json".into(),
+                host: None,
             }),
             tx,
             stop: Mutex::new(None),

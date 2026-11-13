@@ -19,7 +19,9 @@ use std::process::ExitCode;
     long_about = "One CLI for AI agent harnesses.\n\n\
         indra mem     graph memory: Markdown notes with typed [[links]], ranked recall, Obsidian-compatible\n\
         indra serve   web console: agents, skills, prompts, graph maps, memory, runs, launch and watch agents\n\
-        indra ls      the console's picture in the terminal\n\n\
+        indra ls      the console's picture in the terminal\n\
+        indra nodes   the machines agents run on, local and over SSH\n\
+        indra run     run a multi-step, multi-node workflow and follow it\n\n\
         The security harness is the default profile; any Claude Code project or custom harness works too."
 )]
 struct Cli {
@@ -47,6 +49,12 @@ enum Cmd {
     Check(deck::cli::CheckArgs),
     /// Write a commented starter indra.toml for custom harnesses and runners
     Init(deck::cli::InitArgs),
+    /// Check the machines agents run on: this one and every [[node]] over SSH
+    Nodes(deck::cli::NodesArgs),
+    /// Run a workflow from indra.toml and follow it here (omit the name to list them)
+    Run(deck::cli::RunArgs),
+    /// The remote side of a node; the hub runs `indra node ...` over SSH
+    Node(deck::cli::NodeArgs),
 }
 
 fn main() -> ExitCode {
@@ -57,6 +65,9 @@ fn main() -> ExitCode {
         Cmd::Ls(a) => deck::cli::run_ls(a),
         Cmd::Check(a) => deck::cli::run_check(a),
         Cmd::Init(a) => deck::cli::init(a),
+        Cmd::Nodes(a) => deck::cli::run_nodes(a),
+        Cmd::Run(a) => deck::cli::run_workflow(a),
+        Cmd::Node(a) => deck::cli::run_node(a),
     };
     match res {
         Ok(code) => code,
