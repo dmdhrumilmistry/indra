@@ -21,14 +21,14 @@ picked up automatically, and any other harness is a few lines of TOML.
 ## Install
 
 **Prebuilt:** download `indra-<target>` from the latest `indra-v*`
-[release](https://github.com/dmdhrumilmistry/security-harness/releases), rename it to `indra`
+[release](https://github.com/dmdhrumilmistry/indra/releases), rename it to `indra`
 (`indra.exe` on Windows) and put it on your `PATH`. Builds exist for Linux (x86_64 and arm64,
 static), macOS (Apple silicon and Intel) and Windows (x86_64).
 
 **From source** (any platform with [Rust](https://rustup.rs) 1.80+):
 
 ```bash
-cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra
+cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra
 # or, from a clone:
 cargo install --locked --path tools/indra
 ```
@@ -256,14 +256,14 @@ findings and known false positives before hunting, and records each run's result
 ## Console: `indra serve`
 
 ```bash
-cd ~/code/security-harness            # or any project; see "Profiles" below
+cd ~/code/indra                       # or any project; see "Profiles" below
 indra serve --target ~/code/my-api    # the codebase whose runs to watch and where agents run
 ```
 
 ```text
 indra 0.1.0
-  harness  security-harness  (~/code/security-harness/plugins/security-harness)
-  harness  claude-code  (~/code/security-harness)
+  harness  security-harness  (~/code/indra/plugins/security-harness)
+  harness  claude-code  (~/code/indra)
   runners  claude
 
 Open: http://127.0.0.1:7878/?token=3f9c...

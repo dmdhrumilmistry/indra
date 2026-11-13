@@ -102,9 +102,9 @@ with Cargo:
 
 ```
 # Prebuilt: download indra-<target> from the latest `indra-v*` release of
-# https://github.com/dmdhrumilmistry/security-harness/releases into a directory on PATH
+# https://github.com/dmdhrumilmistry/indra/releases into a directory on PATH
 # (for example ~/.local/bin, or %LOCALAPPDATA%\Programs\indra on Windows).
-cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness indra   # any OS with Rust
+cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra   # any OS with Rust
 ```
 
 If neither works, set `indra:false`: the pipeline runs without long-term memory.

@@ -6,7 +6,7 @@
       "tool": {
         "driver": {
           "name": "security-harness",
-          "informationUri": "https://github.com/dmdhrumilmistry/security-harness",
+          "informationUri": "https://github.com/dmdhrumilmistry/indra",
           "version": "0.1.0",
           "rules": [
             {

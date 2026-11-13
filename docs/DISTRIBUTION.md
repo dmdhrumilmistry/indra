@@ -33,7 +33,7 @@ Native plugin. `.claude-plugin/marketplace.json` makes the repo its own
 marketplace, so no third-party hosting is required:
 
 ```
-/plugin marketplace add dmdhrumilmistry/security-harness
+/plugin marketplace add dmdhrumilmistry/indra
 /plugin install security-harness@security-harness
 ```
 
@@ -43,7 +43,7 @@ Native extension. The manifest sits at the repo root, and Gemini loads the
 bundled skills from `skills/`:
 
 ```bash
-gemini extensions install https://github.com/dmdhrumilmistry/security-harness
+gemini extensions install https://github.com/dmdhrumilmistry/indra
 ```
 
 Manifest fields used (`name`, `version`, `description`, `contextFileName`,
@@ -87,7 +87,7 @@ The gallery crawls public repos daily. Three requirements: public repo, the
 manifest is already in place, so add the topic and cut a matching release:
 
 ```bash
-gh repo edit dmdhrumilmistry/security-harness --add-topic gemini-cli-extension
+gh repo edit dmdhrumilmistry/indra --add-topic gemini-cli-extension
 
 # Keep the release tag and the manifest version in step.
 git tag v0.2.0 && git push origin v0.2.0
@@ -97,7 +97,7 @@ gh release create v0.2.0 --title "v0.2.0" --generate-notes
 Also worth adding for discoverability:
 
 ```bash
-gh repo edit dmdhrumilmistry/security-harness \
+gh repo edit dmdhrumilmistry/indra \
   --add-topic claude-code-plugin \
   --add-topic agent-skills \
   --add-topic appsec \
@@ -113,8 +113,8 @@ Details to paste into the form:
 
 - **Name:** `security-harness` (immutable once published; the UI label is the
   `displayName`, `Security Harness`)
-- **Repository:** <https://github.com/dmdhrumilmistry/security-harness>
-- **Marketplace:** `dmdhrumilmistry/security-harness`
+- **Repository:** <https://github.com/dmdhrumilmistry/indra>
+- **Marketplace:** `dmdhrumilmistry/indra`
 - **License:** MIT
 - **Category:** security
 - **Description:** Multi-agent application-security review harness. A router
@@ -131,7 +131,7 @@ present.
 
 Each wants an entry in its own list. Suggested one-liner:
 
-> **[security-harness](https://github.com/dmdhrumilmistry/security-harness)** -
+> **[indra](https://github.com/dmdhrumilmistry/indra)** -
 > Multi-agent application-security review: recon, parallel per-class vulnerability
 > hunting, exploit chaining, impact verification, and SARIF/PDF reporting.
 
