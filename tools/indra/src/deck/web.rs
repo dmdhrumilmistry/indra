@@ -1435,7 +1435,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(unix)]
     /// The Settings page: edits keep the file's comments, apply at once, and
     /// a bad, stale or locked edit writes nothing.
     #[tokio::test]
@@ -1624,6 +1623,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn launch_stream_and_validation() {
         let (app, dir) = fixture("procs", false);
