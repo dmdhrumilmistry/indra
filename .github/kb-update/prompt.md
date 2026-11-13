@@ -1,8 +1,8 @@
 # Knowledge-base auto-update - task prompt
 
 You are running non-interactively inside a GitHub Actions job on the
-`security-harness` repository. Your job is to **incrementally improve the security
-knowledge bases** (`plugins/security-harness/skills/sh-kb-*/SKILL.md` and their
+`indra` repository. Your job is to **incrementally improve the security
+knowledge bases** (`plugins/indra/skills/sh-kb-*/SKILL.md` and their
 `references/*.md`) using fresh, reputable public sources, and to leave your changes
 in the working tree for a pull request. You do **not** commit or push - a later
 workflow step opens the PR.
@@ -37,8 +37,8 @@ the PR summary, and continue with the remaining sources.
 
 1. Read `.github/kb-update/trusted-sources.md` for the allowlist and rules.
 2. Read the existing KB so you don't duplicate what's already there. Skim each
-   `plugins/security-harness/skills/sh-kb-*/SKILL.md` and any
-   `plugins/security-harness/skills/sh-kb-*/references/*.md`.
+   `plugins/indra/skills/sh-kb-*/SKILL.md` and any
+   `plugins/indra/skills/sh-kb-*/references/*.md`.
 3. Pick **2-4 vulnerability classes** to improve this run (rotate over time; prefer
    classes that look stalest or where you found genuinely new, well-sourced
    material). Do not try to touch every class every run - small, high-signal diffs.

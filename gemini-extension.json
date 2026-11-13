@@ -1,5 +1,5 @@
 {
-  "name": "security-harness",
+  "name": "indra",
   "version": "0.2.0",
   "description": "Multi-agent application-security review: map a codebase, hunt vulnerabilities against 15 per-class knowledge bases, chain findings into escalations, verify real impact, and report to README/JSON/SARIF/PDF.",
   "contextFileName": "GEMINI.md",

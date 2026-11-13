@@ -1,4 +1,9 @@
-# indra
+<p align="center"><img src="../../assets/logo.svg" alt="" width="112"></p>
+
+<h1 align="center">indra CLI</h1>
+
+<p align="center">Graph memory and an agent web console, in one small binary.<br><a href="https://dmdhrumilmistry.github.io/indra/">Website</a> &middot; <a href="../../README.md">The indra harness</a></p>
+
 
 One small CLI for AI agent harnesses: a **graph memory** your agents (and you) can read and
 write, and a **web console** to view, monitor and run the agents themselves. One ~2.5 MB Rust
@@ -237,7 +242,7 @@ render as fields with the Dataview plugin.
   `O_EXCL`, so two agents never overwrite each other's note.
 - Treat recalled text as data. A note can contain anything someone wrote into it.
 
-The security-harness plugin's `sh-memory` skill is a complete example: it recalls past
+The indra plugin's `sh-memory` skill is a complete example: it recalls past
 findings and known false positives before hunting, and records each run's results afterwards.
 
 ### Design notes and limits
@@ -262,7 +267,7 @@ indra serve --target ~/code/my-api    # the codebase whose runs to watch and whe
 
 ```text
 indra 0.1.0
-  harness  security-harness  (~/code/indra/plugins/security-harness)
+  harness  indra  (~/code/indra/plugins/indra)
   harness  claude-code  (~/code/indra)
   runners  claude
 
@@ -295,7 +300,7 @@ automatically:
 
 | Profile | Found when | Agents | Skills | Prompts | Runs |
 |---|---|---|---|---|---|
-| `security-harness` | you run inside this repository, or the plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/run-*`, stages recon -> hunt -> chain -> verify -> report |
+| `indra` | you run inside this repository, or the indra plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/run-*`, stages recon -> hunt -> chain -> verify -> report |
 | `claude-code` | the project or `~/.claude` has agents, skills or commands | `.claude/agents/*.md` | `.claude/skills/*/SKILL.md` | `CLAUDE.md`, `AGENTS.md`, commands | - |
 
 A custom harness is a few lines of TOML, in `indra.toml` (current directory), then
@@ -345,7 +350,7 @@ format  = "claude-stream-json"          # or "text"
 
 [[preset]]                              # saved prompts on the Launch page
 name    = "Nightly quick review"
-harness = "security-harness"
+harness = "indra"
 runner  = "claude"
 prompt  = "/sh-security-review {target} depth:quick"
 ```

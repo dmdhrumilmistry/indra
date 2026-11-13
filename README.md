@@ -1,41 +1,92 @@
-# indra
+<p align="center">
+  <img src="assets/banner.svg" alt="indra: security agents, graph memory, and an agent console" width="100%">
+</p>
 
-**indra** (formerly `security-harness`) is a multi-agent **application-security review harness** for
-Claude Code and other AI agents, plus the [`indra` CLI](tools/indra/README.md): a graph memory and a
-web console for running and watching agents. The harness ships as the `security-harness` plugin. One
-router skill dispatches to a full offensive-security pipeline that **maps** a codebase, **hunts**
-vulnerabilities with a per-class knowledge base, **chains** findings into escalations, **verifies** real
-impact, and **reports** to README / JSON / SARIF / doc / PDF.
+<p align="center">
+  <a href="https://github.com/dmdhrumilmistry/indra/actions/workflows/indra.yml"><img src="https://github.com/dmdhrumilmistry/indra/actions/workflows/indra.yml/badge.svg" alt="indra CLI build"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4f46e5" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-plugin-f59e0b" alt="Claude Code plugin">
+  <img src="https://img.shields.io/badge/Gemini%20CLI-extension-0ea5e9" alt="Gemini CLI extension">
+  <img src="https://img.shields.io/badge/CLI-Linux%20%7C%20macOS%20%7C%20Windows-1e1b4b" alt="Linux, macOS and Windows">
+</p>
 
-> Scope: this harness performs **static** analysis (source review, data-flow tracing, PoC/payload
+<p align="center">
+  <b><a href="https://dmdhrumilmistry.github.io/indra/">Website</a></b> &nbsp;&middot;&nbsp;
+  <a href="#install">Install</a> &nbsp;&middot;&nbsp;
+  <a href="#usage">Usage</a> &nbsp;&middot;&nbsp;
+  <a href="#indra-memory-and-agent-console">Memory &amp; console</a> &nbsp;&middot;&nbsp;
+  <a href="#pull-request-review">PR review</a> &nbsp;&middot;&nbsp;
+  <a href="tools/indra/README.md">CLI docs</a>
+</p>
+
+**indra** is a multi-agent **application-security review harness** for Claude Code and other AI agents.
+One request runs a team of specialist agents that **map** a codebase, **hunt** vulnerabilities with a
+per-class knowledge base, **chain** findings into escalations, **verify** real impact, and **report** to
+README, JSON, SARIF, HTML and PDF. Every run **remembers** what it learned, and the `indra` CLI gives you
+a web console to launch agents and watch them work.
+
+```
+/plugin marketplace add dmdhrumilmistry/indra
+/plugin install indra@indra
+/indra full security review of ./api
+```
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h3>A review team</h3>
+      Recon, one hunter per vulnerability class in parallel, an exploit chainer, a verifier that refutes
+      first, and a reporter. Each stage runs on the model its job needs.
+    </td>
+    <td width="33%" valign="top">
+      <h3>Memory that compounds</h3>
+      <code>indra mem</code> keeps past findings, known guards and confirmed false positives as a graph of
+      Markdown notes, and hands them to the next run's hunters.
+    </td>
+    <td width="33%" valign="top">
+      <h3>Watch it work</h3>
+      <code>indra serve</code> shows every subagent, its tool calls, refused permissions and cost, live,
+      plus graph maps of your harness and memory.
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="assets/screenshots/live-agents.png" alt="The indra console following a live review: subagents, their tool calls, and a refused permission" width="100%">
+</p>
+
+> **Scope:** indra performs **static** analysis (source review, data-flow tracing, PoC and payload
 > construction) on code you own or are authorized to test. It does not attack live third-party systems.
 
 ## What's inside
 
 ```
-security-harness/                         # a plugin marketplace
-└── plugins/security-harness/
-    ├── skills/
-    │   ├── sh-router            # single entry point - routes any appsec request
-    │   ├── sh-security-review   # the pipeline orchestrator (Stages 0-6)
-    │   ├── sh-pr-review         # review one pull request, post inline comments
-    │   ├── sh-memory            # long-term graph memory across runs (via indra)
-    │   └── sh-kb-*  (15)        # per-vuln-class knowledge bases
-    ├── agents/
-    │   ├── sh-recon             # map: Graft graph + stack/SBOM/CVE + attack surface
-    │   ├── sh-hunter            # find: source→sink hunting, one per class (parallel)
-    │   ├── sh-chainer           # escalate: combine findings into attack chains
-    │   ├── sh-verifier          # confirm: offensive + seceng + dev verification + PoC
-    │   └── sh-reporter          # deliver: README/JSON/SARIF/HTML/PDF/doc
-    └── references/              # shared contracts (finding schema, SARIF map, state files, rubrics)
-tools/indra/                              # indra: one Rust CLI for graph memory and the agent web console
+indra/                           # this repository: a plugin marketplace + the indra CLI
+├── plugins/indra/               # the indra plugin
+│   ├── skills/
+│   │   ├── indra                # /indra - the entry point, routes any appsec request
+│   │   ├── sh-security-review   # the pipeline orchestrator (stages 0-6)
+│   │   ├── sh-pr-review         # review one pull request, post inline comments
+│   │   ├── sh-memory            # long-term graph memory across runs
+│   │   └── sh-kb-*  (15)        # per-vulnerability-class knowledge bases
+│   ├── agents/
+│   │   ├── sh-recon             # map: code graph, stack, SBOM/CVE, attack surface
+│   │   ├── sh-hunter            # find: source-to-sink hunting, one per class, in parallel
+│   │   ├── sh-chainer           # escalate: combine findings into attack chains
+│   │   ├── sh-verifier          # confirm: refute first, then prove impact with a PoC
+│   │   └── sh-reporter          # deliver: README/JSON/SARIF/HTML/PDF/doc
+│   └── references/              # shared contracts (finding schema, SARIF map, rubrics)
+├── tools/indra/                 # the indra CLI (Rust): graph memory + agent web console
+├── site/                        # the project website (GitHub Pages)
+└── assets/                      # logo, banner and screenshots
 ```
 
 ### Vulnerability classes covered (the `sh-kb-*` skills)
 
-access-control (IDOR/BOLA/priv-esc) · sqli · xss · ssrf · injection (cmd/code/SSTI/LDAP) · auth (session/JWT)
-· deserialization · path-traversal (LFI/RFI) · secrets · csrf · xxe · open-redirect · crypto · race-conditions
-· file-upload. Dependency CVEs/SBOM are handled by the recon stage.
+access-control (IDOR/BOLA/priv-esc) &middot; sqli &middot; xss &middot; ssrf &middot; injection (cmd/code/SSTI/LDAP) &middot;
+auth (session/JWT) &middot; deserialization &middot; path-traversal (LFI/RFI) &middot; secrets &middot; csrf &middot; xxe &middot;
+open-redirect &middot; crypto &middot; race-conditions &middot; file-upload. Dependency CVEs and the SBOM are handled
+by the recon stage.
 
 ## Install
 
@@ -46,13 +97,13 @@ checklist are in [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md).
 
 ```
 /plugin marketplace add dmdhrumilmistry/indra
-/plugin install security-harness
+/plugin install indra@indra
 ```
 
 `/plugin marketplace add` accepts any of: a GitHub `owner/repo` (as above), a full git URL
 (`https://github.com/dmdhrumilmistry/indra.git`), or a local path to a clone
 (e.g. `/plugin marketplace add ./indra` from the directory containing your checkout).
-Then run `/plugin install security-harness` and reload when prompted.
+Then run `/plugin install indra@indra` and reload when prompted.
 
 **Gemini CLI** - a native extension, manifest at the repo root:
 
@@ -90,12 +141,12 @@ All of them are optional - the pipeline degrades gracefully to native search + m
 
 ## Usage
 
-Invoke the router with a natural-language request:
+Ask `/indra` in plain language:
 
 ```
-/sh-router full security review of ./api
-/sh-router find SQLi and IDOR in src/
-/sh-router just map this codebase        # recon only
+/indra full security review of ./api
+/indra find SQLi and IDOR in src/
+/indra just map this codebase        # recon only
 ```
 
 Or call the pipeline directly:
@@ -199,6 +250,14 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
   watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
   final cost. Stop stops the whole process tree.
+
+<table>
+  <tr>
+    <td width="33%"><img src="assets/screenshots/graph-map.png" alt="Graph map of the harness"><br><sub><b>Graph map:</b> stages, agents, skills and prompts</sub></td>
+    <td width="33%"><img src="assets/screenshots/run.png" alt="A run being monitored"><br><sub><b>Runs:</b> stage progress and findings per class</sub></td>
+    <td width="33%"><img src="assets/screenshots/memory.png" alt="The memory graph"><br><sub><b>Memory:</b> findings, guards and false positives</sub></td>
+  </tr>
+</table>
 
 The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
 `.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.
@@ -335,9 +394,9 @@ the crash.
 
 | Platform | Metrics | Cache |
 |---|---|---|
-| **Linux / BSD** | `$XDG_DATA_HOME/security-harness/metrics`<br>default `~/.local/share/security-harness/metrics` | `$XDG_CACHE_HOME/security-harness`<br>default `~/.cache/security-harness` |
-| macOS | `~/Library/Application Support/security-harness/metrics` | `~/Library/Caches/security-harness` |
-| Windows | `%LOCALAPPDATA%\security-harness\metrics` | `%LOCALAPPDATA%\security-harness\cache` |
+| **Linux / BSD** | `$XDG_DATA_HOME/indra/metrics`<br>default `~/.local/share/indra/metrics` | `$XDG_CACHE_HOME/indra`<br>default `~/.cache/indra` |
+| macOS | `~/Library/Application Support/indra/metrics` | `~/Library/Caches/indra` |
+| Windows | `%LOCALAPPDATA%\indra\metrics` | `%LOCALAPPDATA%\indra\cache` |
 
 Linux follows the XDG Base Directory spec, so both honour `XDG_DATA_HOME` and
 `XDG_CACHE_HOME` when set and fall back to `~/.local/share` and `~/.cache` when they are
@@ -361,7 +420,7 @@ for a while first, so you know what it says about your codebase before it says i
 front of your team.
 
 When you are ready, "Enforcing the check on a repository" in
-[`references/pr-review-mapping.md`](plugins/security-harness/references/pr-review-mapping.md)
+[`references/pr-review-mapping.md`](plugins/indra/references/pr-review-mapping.md)
 has a copy-paste workflow for **your** repo, plus the fail-safe that stops a dead job
 leaving a required check stuck on `pending`.
 
@@ -386,14 +445,14 @@ actually introduces or aggravates can fail it.
 7. **Remember** (optional, `sh-memory`) - record verified findings, false positives and a few
    learnings into the long-term memory graph for the next run.
 
-Subagents share nothing but files; the contract is in `plugins/security-harness/references/state-files.md`.
+Subagents share nothing but files; the contract is in `plugins/indra/references/state-files.md`.
 
 ## Extending
 
 Add a new vulnerability class by creating `skills/sh-kb-<class>/SKILL.md` following the shared template
 (When to hunt · Sources & sinks · Detection recipe · Payloads/PoC · False-positive filters · CWE/OWASP ·
 Chaining hints · Mitigation), then add its slug to the `class` enum in `references/finding-schema.json`
-and the routing table in `skills/sh-router/SKILL.md`.
+and the routing table in `skills/indra/SKILL.md`.
 
 ## Automated knowledge-base updates
 

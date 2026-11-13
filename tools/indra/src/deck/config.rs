@@ -236,15 +236,21 @@ pub fn which(cmd: &str) -> Option<PathBuf> {
 
 // ---- built-in profiles ----------------------------------------------------
 
-/// The security-harness plugin directory: in this repository (walking up
+/// The indra plugin directory (`plugins/indra`, or `security-harness` from
+/// before the rename): in this repository (walking up
 /// from `cwd`), or as installed by Claude Code under `~/.claude/plugins`.
+/// Folder names the plugin has been shipped under.
+const PLUGIN_DIRS: [&str; 2] = ["indra", "security-harness"];
+
 pub fn find_security_harness(cwd: &Path) -> Option<PathBuf> {
     let looks_right = |d: &Path| d.join("agents").is_dir() && d.join("skills").is_dir();
     let mut dir = cwd.to_path_buf();
     loop {
-        let cand = dir.join("plugins").join("security-harness");
-        if looks_right(&cand) {
-            return Some(cand);
+        for name in PLUGIN_DIRS {
+            let cand = dir.join("plugins").join(name);
+            if looks_right(&cand) {
+                return Some(cand);
+            }
         }
         if !dir.pop() {
             break;
@@ -261,7 +267,7 @@ pub fn find_security_harness(cwd: &Path) -> Option<PathBuf> {
             if !p.is_dir() {
                 continue;
             }
-            if e.file_name() == "security-harness" && looks_right(&p) {
+            if PLUGIN_DIRS.iter().any(|n| e.file_name() == *n) && looks_right(&p) {
                 return Some(p);
             }
             if depth < 5 {
@@ -280,7 +286,7 @@ pub fn security_harness_profile(plugin: &Path, targets: &[PathBuf]) -> Harness {
     };
     let global_memory = crate::mem::vault::locate(None);
     Harness {
-        name: "security-harness".into(),
+        name: "indra".into(),
         description: "Multi-agent application-security review: recon, parallel hunters, chain, verify, report.".into(),
         root: plugin.to_path_buf(),
         agents: vec!["agents/*.md".into()],
@@ -364,7 +370,7 @@ fn default_presets() -> Vec<PresetCfg> {
     let p = |name: &str, prompt: &str| PresetCfg {
         name: name.into(),
         prompt: prompt.into(),
-        harness: Some("security-harness".into()),
+        harness: Some("indra".into()),
         runner: Some("claude".into()),
     };
     vec![
@@ -471,7 +477,7 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
         }
     }
     // The security harness is the default view when it is present.
-    harnesses.sort_by_key(|h| (h.name != "security-harness", h.builtin));
+    harnesses.sort_by_key(|h| (h.name != "indra", h.builtin));
 
     let mut runner_cfgs = file.runner.clone();
     for d in default_runners() {
@@ -525,7 +531,7 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
 pub const SAMPLE: &str = r#"# indra configuration.
 #
 # Two harness profiles are built in and detected automatically:
-#   security-harness  - this repository's plugin (or the installed plugin)
+#   indra             - the indra security-review plugin (this repository, or installed)
 #   claude-code       - .claude/agents, .claude/skills and commands, here and in ~/.claude
 # Add your own harness below; a [[harness]] with a built-in name replaces it.
 
@@ -565,7 +571,7 @@ bind = "127.0.0.1:7878"     # keep it on loopback; a token is required either wa
 # Presets are saved prompts on the Launch page.
 # [[preset]]
 # name    = "Nightly review"
-# harness = "security-harness"
+# harness = "indra"
 # runner  = "claude"
 # prompt  = "/sh-security-review {target} depth:quick"
 "#;

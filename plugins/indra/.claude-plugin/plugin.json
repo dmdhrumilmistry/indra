@@ -1,8 +1,8 @@
 {
-  "name": "security-harness",
-  "displayName": "Security Harness",
+  "name": "indra",
+  "displayName": "Indra",
   "version": "0.2.0",
-  "description": "Multi-agent application-security review harness. A router skill dispatches to a full pipeline (recon -> hunt -> chain -> verify -> report) backed by ~15 per-class vulnerability knowledge skills, using Graft for codebase mapping and SCA tools for SBOM/CVE.",
+  "description": "Multi-agent application-security review harness. The /indra skill dispatches to a full pipeline (recon -> hunt -> chain -> verify -> report) backed by ~15 per-class vulnerability knowledge skills, using Graft for codebase mapping and SCA tools for SBOM/CVE.",
   "author": {
     "name": "Dhrumil Mistry",
     "url": "https://github.com/dmdhrumilmistry"

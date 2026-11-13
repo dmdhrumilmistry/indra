@@ -12,9 +12,9 @@ skill version, the model, and the file contents all still match what produced
 it. Anything unrecognised is a miss.
 
 Cache location, outside any repository so a temp clone can still use it:
-  Windows  %LOCALAPPDATA%\\security-harness\\cache
-  macOS    ~/Library/Caches/security-harness
-  else     $XDG_CACHE_HOME/security-harness, or ~/.cache/security-harness
+  Windows  %LOCALAPPDATA%\\indra\\cache
+  macOS    ~/Library/Caches/indra
+  else     $XDG_CACHE_HOME/indra, or ~/.cache/indra
 
 Commands:
   kb-version                       hash of every sh-kb-* knowledge base
@@ -96,12 +96,12 @@ def cache_root():
         return os.path.join(env, "v%d" % SCHEMA)
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "security-harness", "cache", "v%d" % SCHEMA)
+        return os.path.join(base, "indra", "cache", "v%d" % SCHEMA)
     if sys.platform == "darwin":
         return os.path.join(os.path.expanduser("~"), "Library", "Caches",
-                            "security-harness", "v%d" % SCHEMA)
+                            "indra", "v%d" % SCHEMA)
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "security-harness", "v%d" % SCHEMA)
+    return os.path.join(base, "indra", "v%d" % SCHEMA)
 
 
 def repo_slug(repo):

@@ -1,6 +1,6 @@
 ---
 name: sh-security-review
-description: "Run the full multi-agent security review pipeline on a codebase - recon/mapping (Graft + SBOM/CVE), parallel vulnerability hunting backed by ~15 per-class knowledge bases, escalation chaining, impact verification, and reporting to README/JSON/SARIF/doc/PDF. Use when the user asks to security-review, audit, pentest, or find vulnerabilities in a codebase. Usually invoked via the sh-router skill."
+description: "Run the full multi-agent security review pipeline on a codebase - recon/mapping (Graft + SBOM/CVE), parallel vulnerability hunting backed by ~15 per-class knowledge bases, escalation chaining, impact verification, and reporting to README/JSON/SARIF/doc/PDF. Use when the user asks to security-review, audit, pentest, or find vulnerabilities in a codebase. Usually invoked via the indra skill."
 argument-hint: "[target path, default: cwd] [classes:sqli,xss,...] [stage:recon|hunt|chain|verify|report|remember] [depth:quick|deep] [memory:off]"
 ---
 
@@ -230,7 +230,7 @@ degraded (Graft/SCA/PDF absent), say so plainly and how it affected coverage/con
 
 - `stage:hunt classes:sqli` on an existing run -> just spawn the sqli hunter against current recon.
 - `stage:remember` on an existing run -> just Stage 6, e.g. after the user corrected a verdict by hand.
-- The router (`sh-router`) may call this skill with a narrowed scope for targeted requests
+- The router (`indra`) may call this skill with a narrowed scope for targeted requests
   ("find SQLi in ./src") - honor `classes:` and skip irrelevant stages (e.g. chaining a single class).
 
 ## Failure handling

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Security Harness Finding",
+  "title": "indra Finding",
   "description": "One vulnerability finding. Written by sh-hunter (status=candidate), enriched by sh-chainer (chained_with), and finalized by sh-verifier (status + poc + cvss). One JSON object per line in findings.jsonl / verified.jsonl.",
   "type": "object",
   "required": [

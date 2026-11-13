@@ -358,9 +358,9 @@ deleted at the end of the run:
 
 | Platform | Location |
 |---|---|
-| Linux / BSD | `$XDG_CACHE_HOME/security-harness`, else `~/.cache/security-harness` |
-| macOS | `~/Library/Caches/security-harness` |
-| Windows | `%LOCALAPPDATA%\security-harness\cache` |
+| Linux / BSD | `$XDG_CACHE_HOME/indra`, else `~/.cache/indra` |
+| macOS | `~/Library/Caches/indra` |
+| Windows | `%LOCALAPPDATA%\indra\cache` |
 
 `SH_REVIEW_CACHE_DIR` overrides it.
 

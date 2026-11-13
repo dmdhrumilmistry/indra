@@ -9,8 +9,8 @@ One canonical copy of the skills, mirrored where each ecosystem looks for them.
 
 | Path | Purpose | Generated? |
 |---|---|---|
-| `plugins/security-harness/skills/` | canonical source of truth | no, edit here |
-| `plugins/security-harness/.claude-plugin/plugin.json` | Claude Code plugin manifest | no |
+| `plugins/indra/skills/` | canonical source of truth | no, edit here |
+| `plugins/indra/.claude-plugin/plugin.json` | Claude Code plugin manifest | no |
 | `.claude-plugin/marketplace.json` | Claude Code marketplace manifest | no |
 | `skills/` | Gemini CLI loads an extension's skills from the extension root | **yes** |
 | `gemini-extension.json` | Gemini CLI extension manifest | no |
@@ -34,7 +34,7 @@ marketplace, so no third-party hosting is required:
 
 ```
 /plugin marketplace add dmdhrumilmistry/indra
-/plugin install security-harness@security-harness
+/plugin install indra@indra
 ```
 
 ### Gemini CLI
@@ -111,8 +111,8 @@ reviewed against quality and security standards.
 
 Details to paste into the form:
 
-- **Name:** `security-harness` (immutable once published; the UI label is the
-  `displayName`, `Security Harness`)
+- **Name:** `indra` (immutable once published; the UI label is the
+  `displayName`, `Indra`)
 - **Repository:** <https://github.com/dmdhrumilmistry/indra>
 - **Marketplace:** `dmdhrumilmistry/indra`
 - **License:** MIT
@@ -149,7 +149,7 @@ make some of these unnecessary.
 ## Release checklist
 
 1. `python3 scripts/sync-agent-skills.py --check`
-2. Version matches in `plugins/security-harness/.claude-plugin/plugin.json`,
+2. Version matches in `plugins/indra/.claude-plugin/plugin.json`,
    `.claude-plugin/marketplace.json`, and `gemini-extension.json`
 3. No em dashes: `python3 -c "import sys,os;[sys.exit('dash in '+os.path.join(r,f)) for r,d,fs in os.walk('.') if '.git' not in r for f in fs if any(c in open(os.path.join(r,f),encoding='utf-8',errors='ignore').read() for c in map(chr,(0x2014,0x2013,0x2015)))]"`
 4. Tag and release with the same version as the manifests

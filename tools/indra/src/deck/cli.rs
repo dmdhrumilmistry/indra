@@ -2,7 +2,7 @@
 //!
 //! View a harness's agents, skills and prompts (and edit them), see how they
 //! connect, browse memory graphs, monitor runs, and launch agents and watch
-//! them work. The security-harness profile is the default; any harness
+//! them work. The indra security-review profile is the default; any harness
 //! described by a few globs works too.
 
 use crate::deck::{config, discover, procs, runs, web};

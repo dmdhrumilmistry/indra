@@ -63,12 +63,12 @@ def metrics_dir():
         return env
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "security-harness", "metrics")
+        return os.path.join(base, "indra", "metrics")
     if sys.platform == "darwin":
         return os.path.join(os.path.expanduser("~"), "Library", "Application Support",
-                            "security-harness", "metrics")
+                            "indra", "metrics")
     base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    return os.path.join(base, "security-harness", "metrics")
+    return os.path.join(base, "indra", "metrics")
 
 
 def _append(name, record):

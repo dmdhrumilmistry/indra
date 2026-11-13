@@ -1,4 +1,6 @@
-# Security Harness
+<p align="center"><img src="https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/assets/logo.svg" alt="" width="96"></p>
+
+# indra
 
 Multi-agent application-security review for AI coding agents. It maps a codebase,
 hunts vulnerabilities against 15 per-class knowledge bases, chains findings into
@@ -10,7 +12,7 @@ escalations, verifies real impact, and writes a report.
 
 ```
 /plugin marketplace add dmdhrumilmistry/indra
-/plugin install security-harness@security-harness
+/plugin install indra@indra
 ```
 
 **Gemini CLI**
@@ -29,7 +31,7 @@ python3 scripts/sync-agent-skills.py --install agents
 
 ## Use
 
-Ask in plain language. The `sh-router` skill interprets the request and dispatches.
+Ask in plain language. The `indra` skill interprets the request and dispatches.
 
 ```
 security review this repo

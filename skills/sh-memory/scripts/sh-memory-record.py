@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record a finished security-harness run into an indra memory vault.
+"""Record a finished indra security review run into an indra memory vault.
 
 Why a script and not the model: turning verified.jsonl into notes is exact
 bookkeeping. Doing it deterministically means a finding is never "remembered"

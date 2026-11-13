@@ -5,7 +5,7 @@ argument-hint: "[recall <query> | record <run_dir> | remember <learning> | graph
 allowed-tools: Read, Write, Grep, Glob, Bash
 ---
 
-# Security Harness - Memory
+# indra - Memory
 
 A review that forgets everything when it ends will re-report the same false positive next week and
 re-learn the same framework quirk on every codebase. This skill gives the harness a memory that persists
