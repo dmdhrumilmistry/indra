@@ -239,10 +239,10 @@ findings and known false positives before hunting, and records each run's result
 ## Development
 
 ```bash
-cd tools/memex
-cargo test            # unit tests + end-to-end tests against the real binary
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cd tools                       # a Cargo workspace with agentdeck, which uses memex as a library
+cargo test -p memex            # unit tests + end-to-end tests against the real binary
+cargo clippy -p memex --all-targets -- -D warnings
+cargo fmt --all --check
 ```
 
 MIT licensed, like the rest of this repository.

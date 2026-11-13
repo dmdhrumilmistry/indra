@@ -7,4 +7,4 @@ __pycache__/
 .security-harness/
 
 # Rust build output
-tools/memex/target/
+tools/target/

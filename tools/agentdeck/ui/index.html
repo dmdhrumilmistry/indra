@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentdeck</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand"><img src="/favicon.svg" alt="" width="22" height="22"><span>agentdeck</span></div>
+    <label class="hsel"><span>Harness</span><select id="harness"></select></label>
+    <nav id="nav">
+      <a href="#/overview" data-route="overview">Overview</a>
+      <a href="#/agents" data-route="agents">Agents</a>
+      <a href="#/skills" data-route="skills">Skills</a>
+      <a href="#/prompts" data-route="prompts">Prompts</a>
+      <a href="#/graph" data-route="graph">Graph map</a>
+      <a href="#/memory" data-route="memory">Memory</a>
+      <a href="#/runs" data-route="runs">Runs</a>
+      <a href="#/launch" data-route="launch">Launch</a>
+      <a href="#/procs" data-route="procs">Processes <b id="running-badge" class="badge" hidden></b></a>
+    </nav>
+    <div class="side-foot">
+      <span id="ro-badge" class="pill warn" hidden>read-only</span>
+      <button id="theme" class="ghost" type="button">Theme</button>
+      <span id="version" class="muted"></span>
+    </div>
+  </aside>
+  <main id="main" tabindex="-1"></main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

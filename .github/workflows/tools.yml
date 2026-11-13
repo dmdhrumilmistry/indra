@@ -1,7 +1,8 @@
-name: memex
+name: tools
 
-# Tests the memex CLI (tools/memex) on Linux, macOS and Windows, and on a
-# `memex-v*` tag publishes prebuilt binaries to a GitHub release.
+# Tests the Rust tools in tools/ (memex, agentdeck) on Linux, macOS and
+# Windows. A `memex-v*` or `agentdeck-v*` tag publishes that tool's prebuilt
+# binaries to a GitHub release.
 #
 # No third-party actions: the runners already ship rustup, and `gh` uploads the
 # release assets, so the only code that runs here is this repository's.
@@ -9,23 +10,23 @@ name: memex
 on:
   push:
     branches: [main]
-    paths: ["tools/memex/**", ".github/workflows/memex.yml"]
-    tags: ["memex-v*"]
+    paths: ["tools/**", ".github/workflows/tools.yml"]
+    tags: ["memex-v*", "agentdeck-v*"]
   pull_request:
-    paths: ["tools/memex/**", ".github/workflows/memex.yml"]
+    paths: ["tools/**", ".github/workflows/tools.yml"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: memex-${{ github.ref }}
+  group: tools-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 defaults:
   run:
     shell: bash
-    working-directory: tools/memex
+    working-directory: tools
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,15 +49,15 @@ jobs:
           rustup default stable
       - name: Format
         if: runner.os == 'Linux'
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   release:
     name: release (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/memex-v')
+    if: startsWith(github.ref, 'refs/tags/memex-v') || startsWith(github.ref, 'refs/tags/agentdeck-v')
     needs: test
     runs-on: ${{ matrix.os }}
     permissions:
@@ -82,12 +83,20 @@ jobs:
         if: matrix.musl
         run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        id: build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          bin="${TAG%%-v*}"   # memex-v0.1.0 -> memex
+          cargo build --locked --release -p "$bin" --target ${{ matrix.target }}
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
       - name: Package
         id: pkg
+        env:
+          BIN: ${{ steps.build.outputs.bin }}
         run: |
-          name="memex-${{ matrix.target }}${{ matrix.exe }}"
-          cp "target/${{ matrix.target }}/release/memex${{ matrix.exe }}" "$name"
+          name="$BIN-${{ matrix.target }}${{ matrix.exe }}"
+          cp "target/${{ matrix.target }}/release/$BIN${{ matrix.exe }}" "$name"
           if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - name: Upload to release
@@ -99,6 +108,6 @@ jobs:
           # Every matrix job races to create the release; losing that race is fine.
           export GH_REPO="$GITHUB_REPOSITORY"
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --notes "memex prebuilt binaries. See tools/memex/README.md." \
+            || gh release create "$TAG" --title "$TAG" --notes "Prebuilt binaries. See tools/README.md." \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber

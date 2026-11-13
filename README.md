@@ -27,6 +27,7 @@ security-harness/                         # a plugin marketplace
     │   └── sh-reporter          # deliver: README/JSON/SARIF/HTML/PDF/doc
     └── references/              # shared contracts (finding schema, SARIF map, state files, rubrics)
 tools/memex/                              # the memex CLI: Rust, graph-based Markdown memory
+tools/agentdeck/                          # agentdeck: web console to view, monitor and run agent harnesses
 ```
 
 ### Vulnerability classes covered (the `sh-kb-*` skills)
@@ -175,6 +176,33 @@ memex --vault .security-harness/memory export -o graph.html     # interactive gr
 The vault is an ordinary Obsidian-compatible folder, so you can also open it in Obsidian.
 memex works fine on its own as a general-purpose note graph for people and agents. See
 [`tools/memex/README.md`](tools/memex/README.md).
+
+## Agent console (agentdeck)
+
+[`agentdeck`](tools/agentdeck/README.md) is a local web console for the harness, and for any
+other agent harness. It is a ~2 MB Rust binary with the UI embedded.
+
+```bash
+cargo install --locked --git https://github.com/dmdhrumilmistry/security-harness agentdeck
+cd security-harness && agentdeck --target ~/code/my-api      # prints a URL with an access token
+```
+
+- **Agents, skills, prompts:** read and edit every definition the harness is made of, and see
+  what each one uses and is used by.
+- **Graph map:** stages run agents, agents spawn agents and load the `sh-kb-*` skills,
+  everything reads its references.
+- **Memory:** the memex vaults drawn as graphs.
+- **Runs:** each `.security-harness/run-*` with stage progress, findings per class, severity and
+  status counts, and every file it wrote, live.
+- **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
+  watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
+  final cost. Stop stops the whole process tree.
+
+The security harness is the default profile. A plain Claude Code project (`.claude/agents`,
+`.claude/skills`) is picked up automatically, and a custom harness is a few lines of TOML.
+It is locked down like a remote shell: loopback only, a token on every call, DNS-rebinding and
+CSRF checks, no shell, and file access confined to the harness. `agentdeck ls` and
+`agentdeck check` give the same picture in the terminal.
 
 ## Pull request review
 

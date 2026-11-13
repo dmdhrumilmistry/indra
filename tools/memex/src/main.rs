@@ -4,14 +4,7 @@
 //! typed `rel:: [[target]]` relations. The folder is a valid Obsidian vault;
 //! this CLI adds typed-graph queries, ranked recall and exports on top.
 
-mod export;
-mod frontmatter;
-mod graph;
-mod note;
-mod search;
-mod time;
-mod tree;
-mod vault;
+use memex::{export, frontmatter, graph, note, search, time, tree, vault};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use graph::{Dir, Graph, Step};
