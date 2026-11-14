@@ -19,14 +19,18 @@ on:
         description: "Release this commit as indra-v<version> (e.g. 0.2.0; must match tools/indra/Cargo.toml). Empty: just test."
         required: false
         default: ""
+      latest:
+        description: "Only mark the existing release indra-v<version> (e.g. 0.5.0) as Latest; builds nothing."
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: indra-${{ github.ref }}-${{ inputs.release }}
+  group: indra-${{ github.ref }}-${{ inputs.release }}-${{ inputs.latest }}
   # A release, by tag or by hand, always runs to the end.
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.release == '' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.release == '' && inputs.latest == '' }}
 
 defaults:
   run:
@@ -39,6 +43,8 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }})
+    # Marking a release Latest needs no build.
+    if: inputs.latest == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -159,3 +165,27 @@ jobs:
           cat SHA256SUMS
           cp ../install.sh ../install.ps1 .
           gh release upload "$TAG" SHA256SUMS install.sh install.ps1 --clobber
+          # Complete now: make it the repository's Latest release (it is
+          # created as not-latest so a half-uploaded release never is).
+          gh release edit "$TAG" --latest
+
+  # Mark an existing release Latest, without building anything.
+  latest:
+    name: mark latest
+    if: inputs.latest != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Mark it Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ format('indra-v{0}', inputs.latest) }}
+        run: |
+          export GH_REPO="$GITHUB_REPOSITORY"
+          case "$TAG" in indra-vindra-v*) TAG="${TAG#indra-v}" ;; esac
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease
+          gh release edit "$TAG" --latest
