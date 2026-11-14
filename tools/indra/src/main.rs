@@ -5,8 +5,13 @@
 //! `indra serve` is a console over the agents of a harness.
 
 mod deck;
+mod findings;
 mod mem;
 mod paths;
+mod publish;
+mod review;
+mod site;
+mod skills;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -61,6 +66,32 @@ enum Cmd {
     Agents(deck::cli::AgentsArgs),
     /// Follow an agent of a running console and steer it from this terminal
     Attach(deck::cli::AttachArgs),
+    /// Publish plans for Jira, Confluence, GitHub Issues or Notion from a review run
+    Publish(publish::PublishArgs),
+    /// PR review support: the review cache, local metrics, posting to GitHub
+    Review(review::ReviewArgs),
+    /// Sync the skill mirror, or install the skills for an agent
+    Skills(skills::SkillsArgs),
+    /// Maintainer tools: build the website
+    #[command(hide = true)]
+    Dev {
+        #[command(subcommand)]
+        cmd: DevCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevCmd {
+    /// Build the website (landing page + docs) into _site
+    Site(site::SiteArgs),
+    /// Find em and en dashes in the repository (exit 1 if any), or --fix them
+    Dashes {
+        /// The repository (default: this folder)
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -77,6 +108,15 @@ fn main() -> ExitCode {
         Cmd::Secret(a) => deck::cli::run_secret(a),
         Cmd::Agents(a) => deck::cli::run_agents(a),
         Cmd::Attach(a) => deck::cli::run_attach(a),
+        Cmd::Publish(a) => publish::run(a),
+        Cmd::Review(a) => review::run(a),
+        Cmd::Skills(a) => skills::run(a),
+        Cmd::Dev {
+            cmd: DevCmd::Site(a),
+        } => site::run(a),
+        Cmd::Dev {
+            cmd: DevCmd::Dashes { repo, fix },
+        } => site::dashes(repo, fix),
     };
     match res {
         Ok(code) => code,

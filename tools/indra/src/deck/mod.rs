@@ -16,6 +16,7 @@ pub mod procs;
 pub mod runs;
 pub mod secrets;
 pub mod term;
+pub mod tools;
 pub mod trackers;
 pub mod web;
 pub mod workflows;

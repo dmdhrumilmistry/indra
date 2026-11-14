@@ -24,6 +24,9 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 webrtc = { version = "0.14", optional = true }
 portable-pty = "0.9"
+sha2 = "0.10"
+fancy-regex = "0.20.2"
+regex = "1"
 
 [features]
 default = ["webrtc"]

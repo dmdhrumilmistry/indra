@@ -95,9 +95,11 @@ brew install --cask wkhtmltopdf                                                 
 sudo apt-get install -y wkhtmltopdf                                                            # Debian/Ubuntu (only if apt + non-interactive sudo already work)
 ```
 
-### indra  (long-term memory via `indra mem` - optional, see the sh-memory skill)
+### indra  (memory, the PR review cache, metrics and posting, publish plans)
 
-A single static binary. Prefer a prebuilt release binary (no toolchain needed), else build from source
+A single static binary: long-term memory (`indra mem`, see the sh-memory skill), and the
+deterministic parts of the PR review (`indra review cache|metrics|post`) and of publishing
+(`indra publish plan`). No interpreter is needed for any of them. Prefer a prebuilt release binary (no toolchain needed), else build from source
 with Cargo:
 
 ```
@@ -107,7 +109,8 @@ with Cargo:
 cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra   # any OS with Rust
 ```
 
-If neither works, set `indra:false`: the pipeline runs without long-term memory.
+If neither works, set `indra:false`: a security review runs without long-term memory, but a PR
+review cannot cache, record metrics or post until it is installed.
 
 ## After installs
 

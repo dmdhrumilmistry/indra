@@ -48,7 +48,58 @@ pub struct Def {
 /// Expand a glob relative to `base`. Supports `*` and `?` within a path
 /// segment, `**` for any number of directories, `~/` and absolute patterns.
 /// Hidden entries match only when the pattern segment names them explicitly.
+/// Every path under `base` matching `pattern`: `*` and `?` within a name, `**`
+/// for any depth, and `{a,b}` for alternatives (`.security-harness/{run,pr}-*`).
 pub fn glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
+    let alts = braces(pattern);
+    if alts.len() > 1 {
+        let mut out: Vec<PathBuf> = alts.iter().flat_map(|p| glob_one(base, p)).collect();
+        out.sort();
+        out.dedup();
+        return out;
+    }
+    glob_one(base, pattern)
+}
+
+/// `a{b,c}d` as `abd` and `acd` (nested and repeated braces too). A pattern
+/// without a closed brace is itself.
+fn braces(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    let mut depth = 0;
+    let mut close = None;
+    let mut commas = vec![];
+    for (i, c) in pattern[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            ',' if depth == 1 => commas.push(open + i),
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return vec![pattern.to_string()];
+    };
+    let (head, tail) = (&pattern[..open], &pattern[close + 1..]);
+    let mut cuts = vec![open];
+    cuts.extend(commas);
+    cuts.push(close);
+    let mut out = vec![];
+    for w in cuts.windows(2) {
+        let alt = &pattern[w[0] + 1..w[1]];
+        out.extend(braces(&format!("{}{}{}", head, alt, tail)));
+    }
+    out
+}
+
+fn glob_one(base: &Path, pattern: &str) -> Vec<PathBuf> {
     let pattern = pattern.replace('\\', "/");
     let first_wild = pattern.find(['*', '?']).unwrap_or(pattern.len());
     let fixed_end = pattern[..first_wild].rfind('/').map(|i| i + 1).unwrap_or(0);
@@ -423,6 +474,9 @@ mod tests {
         assert!(!wild_match("*.md", "a.mdx"));
         assert!(wild_match("*", ""));
         assert!(wild_match("*a*b", "xxaYYb"));
+        assert_eq!(braces(".s/{run,pr}-*"), vec![".s/run-*", ".s/pr-*"]);
+        assert_eq!(braces("{a,b{c,d}}x"), vec!["ax", "bcx", "bdx"]);
+        assert_eq!(braces("no{brace"), vec!["no{brace"]);
     }
 
     #[test]

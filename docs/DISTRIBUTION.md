@@ -21,8 +21,8 @@ One canonical copy of the skills, mirrored where each ecosystem looks for them.
 Regenerate the mirror after any skill edit:
 
 ```bash
-python3 scripts/sync-agent-skills.py
-python3 scripts/sync-agent-skills.py --check   # CI-friendly, non-zero if stale
+indra skills sync
+indra skills sync --check   # CI-friendly, non-zero if stale
 ```
 
 ## Per-ecosystem support
@@ -56,7 +56,7 @@ source of truth for every agent. For the skills, copy them into a discovery
 directory:
 
 ```bash
-python3 scripts/sync-agent-skills.py --install agents
+indra skills install --to agents
 ```
 
 ### opencode and other agentskills.io agents
@@ -66,10 +66,10 @@ opencode discovers `SKILL.md` from `.agents/skills/`, `~/.agents/skills/`,
 `~/.config/opencode/skills/`. The `--install` flag writes to whichever you want:
 
 ```bash
-python3 scripts/sync-agent-skills.py --install agents     # ~/.agents/skills
-python3 scripts/sync-agent-skills.py --install opencode   # ~/.config/opencode/skills
-python3 scripts/sync-agent-skills.py --install claude     # ~/.claude/skills
-python3 scripts/sync-agent-skills.py --install agents --scope workspace
+indra skills install --to agents                       # ~/.agents/skills
+indra skills install --to opencode                     # ~/.config/opencode/skills
+indra skills install --to claude                       # ~/.claude/skills
+indra skills install --to agents --scope workspace     # ./.agents/skills
 ```
 
 `~/.agents/skills/` is the interoperable path, so prefer it unless a specific
@@ -148,8 +148,8 @@ make some of these unnecessary.
 
 ## Release checklist
 
-1. `python3 scripts/sync-agent-skills.py --check`
+1. `indra skills sync --check`
 2. Version matches in `plugins/indra/.claude-plugin/plugin.json`,
    `.claude-plugin/marketplace.json`, and `gemini-extension.json`
-3. No em dashes: `python3 -c "import sys,os;[sys.exit('dash in '+os.path.join(r,f)) for r,d,fs in os.walk('.') if '.git' not in r for f in fs if any(c in open(os.path.join(r,f),encoding='utf-8',errors='ignore').read() for c in map(chr,(0x2014,0x2013,0x2015)))]"`
+3. No em dashes: `indra dev dashes`
 4. Tag and release with the same version as the manifests

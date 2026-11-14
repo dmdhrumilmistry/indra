@@ -28,20 +28,8 @@ Other typography rules:
 A repo-wide sweep is available if a dash slips in:
 
 ```bash
-python3 - <<'PY'
-import os, io
-DASHES = {chr(0x2014): '-', chr(0x2013): '-', chr(0x2015): '-'}
-for root, dirs, fs in os.walk('.'):
-    dirs[:] = [d for d in dirs if d != '.git']
-    for f in fs:
-        p = os.path.join(root, f)
-        try: s = io.open(p, encoding='utf-8').read()
-        except Exception: continue
-        if any(k in s for k in DASHES):
-            for k, v in DASHES.items(): s = s.replace(k, v)
-            io.open(p, 'w', encoding='utf-8', newline='').write(s)
-            print('fixed', p)
-PY
+indra dev dashes          # list any (exit 1 if found; CI runs this)
+indra dev dashes --fix    # replace them with a plain hyphen
 ```
 
 ## Repository layout
@@ -54,12 +42,11 @@ plugins/indra/                      # the plugin itself
   references/                       # shared reference docs
 gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file
-skills/                             # GENERATED mirror of the canonical skills
-scripts/sync-agent-skills.py        # regenerates that mirror
+skills/                             # GENERATED mirror of the canonical skills (`indra skills sync`)
 site/                               # the GitHub Pages landing page (deployed by .github/workflows/pages.yml)
-scripts/build-site.py               # builds the website: site/ + assets/ + docs pages rendered from the Markdown
+site/pages.toml                     # the docs pages `indra dev site` renders from the Markdown
 assets/                             # logo, banner, social image and screenshots (README, site, console icon)
-tools/indra/                        # indra: one Rust CLI - graph memory (indra mem) and agent web console (indra serve)
+tools/indra/                        # indra: the one Rust binary - memory, console, review tooling, site builder; no Python anywhere
 docs/DISTRIBUTION.md                # packaging and public-listing steps
 docs/guides/                        # user guides: processes, pivoting, knowledge base and integrations
 .github/actions/ai-agent/           # pluggable agent runner (claude | codex | gemini | custom)
@@ -71,8 +58,8 @@ docs/guides/                        # user guides: processes, pivoting, knowledg
 `plugins/indra/skills/` and run:
 
 ```bash
-python3 scripts/sync-agent-skills.py           # regenerate
-python3 scripts/sync-agent-skills.py --check   # verify it is current
+indra skills sync           # regenerate
+indra skills sync --check   # verify it is current (CI runs this)
 ```
 
 It exists because Gemini CLI loads an extension's skills from the extension root,

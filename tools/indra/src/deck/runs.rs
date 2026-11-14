@@ -1,5 +1,5 @@
 //! Monitoring runs: a run is a directory under a target (for the security
-//! harness, `<target>/.security-harness/run-*`). Progress comes from which
+//! harness, `<target>/.security-harness/{run,pr}-*`). Progress comes from which
 //! stage files exist, results from a JSONL file, activity from timestamps.
 
 use crate::deck::config::Harness;

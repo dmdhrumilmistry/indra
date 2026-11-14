@@ -820,7 +820,7 @@ pub fn security_harness_profile(plugin: &Path, targets: &[PathBuf]) -> Harness {
             global_memory.to_string_lossy().into_owned(),
         ],
         targets: targets.to_vec(),
-        runs: Some(".security-harness/run-*".into()),
+        runs: Some(".security-harness/{run,pr}-*".into()),
         findings: vec!["verified.jsonl".into(), "findings.jsonl".into()],
         group_by: Some("class".into()),
         stages: vec![

@@ -20,6 +20,8 @@ and Indra, king of the devas, is a fitting name for the thing that commands the 
 | `indra ls`, `indra check` | The console's picture in the terminal, and a config check. |
 | `indra nodes`, `indra run` | Agents on this machine and on remote ones over SSH: node health, and multi-step workflows run in dependency order across them. |
 | `indra init` | A commented `indra.toml` for custom harnesses, runners and presets. |
+| `indra review`, `indra publish`, `indra mem record-run` | The deterministic parts of a review: the PR review cache, local metrics, posting to GitHub, publish plans, recording a run into memory. See [Review tooling](#review-tooling). |
+| `indra skills` | Sync the skills mirror, or install the skills for Claude Code, Codex or opencode. |
 
 The [security harness](../../README.md) is the default profile, any Claude Code project is
 picked up automatically, and any other harness is a few lines of TOML.
@@ -307,7 +309,7 @@ automatically:
 
 | Profile | Found when | Agents | Skills | Prompts | Runs |
 |---|---|---|---|---|---|
-| `indra` | you run inside this repository, or the indra plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/run-*`, stages recon -> hunt -> chain -> verify -> report |
+| `indra` | you run inside this repository, or the indra plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/{run,pr}-*`, stages recon -> hunt -> chain -> verify -> report |
 | `claude-code` | the project or `~/.claude` has agents, skills or commands | `.claude/agents/*.md` | `.claude/skills/*/SKILL.md` | `CLAUDE.md`, `AGENTS.md`, commands | - |
 
 A custom harness is a few lines of TOML, in `indra.toml` (current directory), then
@@ -323,7 +325,7 @@ skills   = ["skills/*/SKILL.md"]
 prompts  = ["prompts/**/*.md"]
 memory   = ["{target}/.memory"]         # memory vaults; {target} expands per target
 targets  = ["../project-a"]
-runs     = ".runs/*"                    # one directory per run, under each target
+runs     = ".runs/*"                    # one directory per run, under each target ({a,b} for alternatives)
 findings = ["results.jsonl"]            # JSONL results inside a run
 group_by = "agent"                      # which field names the agent that produced a result
 stages   = [
@@ -792,6 +794,54 @@ spread over three machines.
 
 Remote nodes need a POSIX shell (Linux, macOS, BSD). `local` works everywhere.
 
+## Review tooling
+
+The deterministic parts of a review are subcommands of the same binary, so the indra plugin's
+skills need no interpreter on any platform:
+
+| Command | What it does |
+|---|---|
+| `indra mem record-run <run_dir>` | Record a finished run's `verified.jsonl` into memory: findings, false positives as learnings, class and file hubs, `chains-with` links. A finding seen again (by fingerprint) gets a "seen again" line. Never copies evidence, payloads or secrets. `--dry-run` prints the `indra mem` commands instead. |
+| `indra publish plan <run_dir> --to jira\|github\|confluence\|notion` | The exact records to publish, with `indra-fingerprint:` markers for de-duplication; refuses if evidence or a payload would leak into one. |
+| `indra review cache --skills <dir> get\|put\|changed\|stat\|prune\|clear\|key\|kb-version` | The PR review cache. Keys hash every `sh-kb-*` knowledge base, the skill version and the model, and it fails closed: a stale "clean" never suppresses a finding. |
+| `indra review metrics start\|event\|finish\|report\|path\|purge` | Local-only run metrics (tokens, duration, model, cache reuse) in append-only JSONL; credentials are redacted before they are written. |
+| `indra review post --repo R --pr N --payload P --verdict V` | Post the review and set the commit status through `gh`, recovering a 422 by moving comments into the body, and never leaving the status at `pending`. |
+| `indra skills sync [--check]`, `indra skills install --to agents\|claude\|opencode` | Keep the repository's `skills/` mirror current, or install the skills where an agent looks for them. |
+
+Maintainer commands: `indra dev site` builds the website (`site/` plus the docs pages listed in
+`site/pages.toml`, rendered from the Markdown, with a broken-link check), and `indra dev dashes
+[--fix]` finds em and en dashes.
+
+### The same, from the console
+
+Every one of these is also in `indra serve`, calling the same code, so the command line and the
+console always agree:
+
+- **A run's page** (Runs, then a run) has **Next steps** when the run has a `verified.jsonl` or a
+  PR review payload: **Record into memory** (with a preview of the commands), **Publish** (pick
+  the destination, lowest severity and whether to include needs-runtime findings; download or copy
+  the plan for the sh-publish skill), and **Post to GitHub** for a PR review (a dry run first; the
+  repository and PR number come from the run's `run.json` and can be changed).
+- **Tools** shows the review cache (with prune and clear, per repository or all), the local
+  metrics (totals, per model, per run; drop old records or delete them), the skills (whether the
+  `skills/` mirror is current, sync it, install the skills for an agent, for you or in a target),
+  and the maintainer chores (build the site into `_site`, look for dashes).
+
+Writes are refused when the console is read-only; previews and dry runs are not. Posting runs
+`gh` as you, on the machine running `indra serve`, after you confirm.
+
+| Call | Same as |
+|---|---|
+| `GET /api/run/actions?key=` | what the run supports, its repository and PR |
+| `POST /api/run/record` `{key, dry_run}` | `indra mem record-run` |
+| `POST /api/run/publish` `{key, to, min_severity, statuses, max}` | `indra publish plan` |
+| `POST /api/run/post` `{key, repo, pr, dry_run, no_status}` | `indra review post` |
+| `GET /api/tools` | `indra review cache stat`, `indra review metrics report`, `indra skills sync --check` |
+| `POST /api/tools/cache` `{action: prune\|clear, max_age_days, repo}` | `indra review cache prune\|clear` |
+| `POST /api/tools/metrics/purge` `{older_than_days}` | `indra review metrics purge` |
+| `POST /api/tools/skills/sync`, `POST /api/tools/skills/install` `{to, scope, target}` | `indra skills sync`, `indra skills install` |
+| `POST /api/tools/site`, `GET /api/tools/dashes` | `indra dev site`, `indra dev dashes` |
+
 ## Development
 
 ```bash
@@ -804,7 +854,10 @@ cargo run -- serve --target /path/to/project
 ```
 
 `src/mem/` is the memory engine, `src/deck/` the console, `ui/` its front end (plain
-JavaScript, embedded at build time). Dependencies: `axum`, `tokio`, `clap`, `serde`,
+JavaScript, embedded at build time), `src/review.rs`, `src/publish.rs` and
+`src/mem/record.rs` the review tooling, `src/skills.rs` and `src/site.rs` the maintainer
+tools. The tests start stand-in agents written in Python, so `cargo test` needs `python3` on
+Unix; nothing that ships does. Dependencies: `axum`, `tokio`, `clap`, `serde`,
 `serde_json`, `toml`, `getrandom` (and `libc` on Unix).
 
 MIT licensed, like the rest of this repository.

@@ -3,8 +3,8 @@ name: pages
 # Publishes the project site to GitHub Pages at
 # https://dmdhrumilmistry.github.io/indra/: the landing page (site/), the brand
 # assets (assets/), and the documentation pages, rendered from the repository's
-# Markdown by scripts/build-site.py. Pull requests build the site (and fail on
-# broken links) without deploying it.
+# Markdown by `indra dev site` (pages listed in site/pages.toml). Pull requests
+# build the site (and fail on broken links) without deploying it.
 #
 # One-time setup: Settings > Pages > Build and deployment > Source: GitHub Actions.
 # Only GitHub's own actions are used.
@@ -18,7 +18,7 @@ on:
       - "docs/**"
       - "README.md"
       - "tools/indra/README.md"
-      - "scripts/build-site.py"
+      - "tools/indra/src/site.rs"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
@@ -27,7 +27,7 @@ on:
       - "docs/**"
       - "README.md"
       - "tools/indra/README.md"
-      - "scripts/build-site.py"
+      - "tools/indra/src/site.rs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -47,7 +47,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the site and the docs
-        run: python3 scripts/build-site.py --out _site
+        # The runners ship rustup; the site builder is part of the indra binary.
+        run: cargo run --locked --quiet --no-default-features --manifest-path tools/indra/Cargo.toml -- dev site --out _site
       - if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
       - if: github.event_name != 'pull_request'
