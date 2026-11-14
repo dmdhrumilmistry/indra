@@ -55,6 +55,42 @@
 
   var S = { ov: null, h: store("indra.h") || "", cleanup: [] };
 
+  // Save text as a file the browser downloads.
+  function saveFile(name, text, type) {
+    var url = URL.createObjectURL(new Blob([text], { type: type || "application/octet-stream" }));
+    var a = h("a", { href: url, download: name, hidden: true });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+  function jsonFile(name, data) { saveFile(name, JSON.stringify(data, null, 2) + "\n", "application/json"); }
+  // Ask for files, or a whole folder. Resolves with [{path, name, text}] for
+  // the files `keep` accepts (by name and size), plus how many were skipped.
+  function pickFiles(o) {
+    return new Promise(function (resolve) {
+      var inp = h("input", { type: "file", hidden: true, accept: o.accept || null });
+      if (o.multiple || o.folder) inp.multiple = true;
+      if (o.folder) inp.setAttribute("webkitdirectory", "");
+      inp.addEventListener("change", function () {
+        var all = Array.prototype.slice.call(inp.files || []); inp.remove();
+        var keep = all.filter(function (f) { return f.size <= 5 * 1048576 && (!o.keep || o.keep(f.name)); });
+        Promise.all(keep.map(function (f) { return f.text().then(function (t) { return { path: f.webkitRelativePath || f.name, name: f.name, text: t }; }); }))
+          .then(function (files) {
+            files.skipped = all.length - keep.length;
+            files.all = all.map(function (f) { return f.webkitRelativePath || f.name; });
+            resolve(files);
+          });
+      });
+      document.body.appendChild(inp); inp.click();
+    });
+  }
+  // A JSON file holding a list: [ ... ] or { items: [ ... ] }.
+  function listFrom(text) {
+    var v = JSON.parse(text);
+    if (Array.isArray(v)) return v;
+    if (v && Array.isArray(v.items)) return v.items;
+    throw new Error("expected a JSON list");
+  }
+
   function api(path, opts) {
     opts = opts || {};
     var init = { method: opts.method || "GET", credentials: "same-origin", headers: {} };
@@ -312,7 +348,50 @@
     var titles = { agent: "Agents", skill: "Skills", prompt: "Prompts" };
     var subs = { agent: "Agent definitions: who does what, on which model, with which tools.",
       skill: "Skills the agents load. Click one to read or edit it.", prompt: "Reference documents and prompt files the harness uses." };
-    m.appendChild(header(titles[kind], subs[kind]));
+    var ro = S.ov.read_only;
+    m.appendChild(header(titles[kind], subs[kind], ro ? null : [
+      h("a", { class: "btn", href: "#/market", text: "From a marketplace" }),
+      h("button", { type: "button", onclick: function () { importDefs(); } }, "Import .md"),
+      h("button", { type: "button", class: "primary", onclick: function () { newDef(); } }, "New " + kind)]));
+    var formBox = h("div"); m.appendChild(formBox);
+    function template(name) {
+      return kind === "agent" ? "---\nname: " + name + "\ndescription: What it does, and when to use it\ntools: Read, Grep, Glob\n---\n\nYou are " + name + ".\n"
+        : kind === "skill" ? "---\nname: " + name + "\ndescription: When an agent should load this skill\n---\n\n# " + name + "\n\n"
+        : "# " + name + "\n\n";
+    }
+    function create(name, content) {
+      return api("/api/def", { method: "POST", body: { h: S.h, kind: kind, name: name, content: content } });
+    }
+    function newDef() {
+      var name = h("input", { type: "text", required: true, placeholder: "my-" + kind, pattern: "[A-Za-z0-9_.\\-]+" });
+      var ta = h("textarea", { class: "code", spellcheck: "false", "aria-label": "Content" }); ta.value = template("my-" + kind);
+      var touched = false; ta.addEventListener("input", function () { touched = true; });
+      name.addEventListener("input", function () { if (!touched) ta.value = template(name.value.trim() || "my-" + kind); });
+      formBox.textContent = "";
+      formBox.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+        e.preventDefault();
+        create(name.value.trim(), ta.value).then(function (r) { toast("Created " + r.path); if (r.id) location.hash = "#/def/" + encodeURIComponent(r.id); else route(); })
+          .catch(function (err) { toast(err.message, true); });
+      } }, h("h3", { text: "New " + kind }), h("label", null, "Name", h("small", { text: "Letters, digits, - and _. It becomes the file (or folder) name." }), name),
+        h("label", null, "Content", ta), h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Create"), h("button", { type: "button", onclick: function () { formBox.textContent = ""; } }, "Cancel"))));
+      name.focus();
+    }
+    function importDefs() {
+      pickFiles({ multiple: true, accept: ".md,.markdown,text/markdown", keep: function (n) { return /\.(md|markdown)$/i.test(n); } }).then(function (fs) {
+        if (!fs.length) return;
+        var done = 0, failed = [];
+        fs.reduce(function (p, f) {
+          return p.then(function () {
+            var parts = f.path.split("/"), stem = f.name.replace(/\.(md|markdown)$/i, "");
+            var name = /^skill$/i.test(stem) && parts.length > 1 ? parts[parts.length - 2] : stem;
+            return create(name, f.text).then(function () { done++; }).catch(function (e) { failed.push(f.name + ": " + e.message); });
+          });
+        }, Promise.resolve()).then(function () {
+          toast("Imported " + done + " file(s)" + (failed.length ? "; " + failed.length + " failed: " + failed[0] : ""), failed.length > 0);
+          route();
+        });
+      });
+    }
     var filter = h("input", { type: "search", placeholder: "Filter by name or description", "aria-label": "Filter" });
     m.appendChild(h("div", { class: "row" }, filter));
     var holder = h("div");
@@ -346,7 +425,14 @@
     api("/api/def" + hq({ id: id })).then(function (r) {
       var d = r.def, hash = r.hash, original = r.content;
       m.appendChild(header(d.name, d.description, [
-        h("span", { class: "pill", text: d.kind }), d.model ? h("span", { class: "pill", text: d.model }) : null]));
+        h("span", { class: "pill", text: d.kind }), d.model ? h("span", { class: "pill", text: d.model }) : null,
+        h("button", { type: "button", onclick: function () { saveFile(d.abs.split(/[\\/]/).pop(), ta.value, "text/markdown"); } }, "Download"),
+        S.ov.read_only ? null : h("button", { type: "button", class: "danger", onclick: function () {
+          if (!window.confirm("Delete " + d.path + "? This removes the file.")) return;
+          api("/api/def" + hq({ id: d.id }), { method: "DELETE" }).then(function () {
+            toast("Deleted " + d.path); location.hash = "#/" + ({ agent: "agents", skill: "skills", prompt: "prompts" }[d.kind] || "overview");
+          }).catch(function (e) { toast(e.message, true); });
+        } }, "Delete")]));
       var ta = h("textarea", { class: "code", spellcheck: "false", "aria-label": "File content", value: original });
       var save = h("button", { class: "primary", type: "button", disabled: true }, "Save");
       var revert = h("button", { type: "button", disabled: true }, "Revert");
@@ -395,33 +481,302 @@
     });
   }
 
-  function pageMemory(m, idx) {
-    m.appendChild(header("Memory", "Memory vaults this harness reads and writes: past findings, learnings and their relations."));
-    api("/api/memory" + hq()).then(function (list) {
-      if (!list.length) { m.appendChild(empty("This harness has no memory vaults configured.")); return; }
-      var cur = idx === undefined ? (list.find(function (v) { return v.exists && v.notes; }) || list[0]).index : Number(idx);
-      m.appendChild(h("div", { class: "grid" }, list.map(function (v) {
-        return h("div", { class: "card click" + (v.index === cur ? " sel" : ""), tabindex: "0", role: "button",
-          onclick: function () { location.hash = "#/memory/" + v.index; } },
-          h("div", { class: "cmd", text: v.path }),
-          h("div", { class: "stats" }, h("div", { class: "stat" }, h("b", { text: String(v.notes) }), h("span", { text: "notes" })),
-            h("div", { class: "stat" }, h("b", { text: String(v.links) }), h("span", { text: "links" }))),
-          v.exists ? null : h("p", { class: "muted", text: "Not created yet: the first review run with memory enabled creates it." }));
+  // ---- knowledge ------------------------------------------------------------------
+  // Memory vaults managed in place, the learnings inbox, the graph, and health.
+  var KTABS = [["notes", "Notes"], ["learnings", "Learnings"], ["graph", "Graph"], ["health", "Health"]];
+  function csv(s) { return String(s || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
+  function pageKnowledge(m, arg) {
+    var parts = String(arg || "").split("/");
+    var tab = KTABS.some(function (t) { return t[0] === parts[0]; }) ? parts[0] : "notes";
+    var want = parts.length > 1 && parts[1] !== "" ? Number(parts[1]) : null;
+    var noteId = parts.length > 2 ? parts.slice(2).join("/") : null;
+    var ro = S.ov.read_only;
+    m.appendChild(header("Knowledge", "What agents know: the memory vaults they read and write, and the learnings they propose for you to review."));
+    var top = h("div"), tabsBox = h("div"), body = h("div", { class: "stack" });
+    m.appendChild(top); m.appendChild(tabsBox); m.appendChild(body);
+    function go(t, i, id) { location.hash = "#/knowledge/" + t + "/" + i + (id ? "/" + encodeURIComponent(id) : ""); }
+    api("/api/knowledge" + hq()).then(function (k) {
+      var vaults = k.vaults;
+      var cur = want !== null && vaults.some(function (v) { return v.index === want; }) ? want
+        : ((vaults.find(function (v) { return v.exists && v.notes; }) || vaults.find(function (v) { return v.exists; }) || vaults[0] || { index: 0 }).index);
+      var v = vaults.find(function (x) { return x.index === cur; });
+      if (vaults.length) {
+        top.appendChild(h("div", { class: "vaults", role: "list", "aria-label": "Memory vaults" }, vaults.map(function (x) {
+          var pick = function () { go(tab === "learnings" ? "notes" : tab, x.index); };
+          return h("div", { class: "vault" + (x.index === cur ? " sel" : ""), role: "listitem", tabindex: "0", title: x.path,
+            onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
+            h("span", { class: "vlabel", text: vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
+            h("code", { class: "vpath", text: x.path }),
+            x.exists ? h("span", { class: "vstats" },
+              h("span", null, h("b", { text: String(x.notes) }), " notes"),
+              h("span", null, h("b", { text: String(x.links) }), " links"),
+              h("span", { class: x.dangling ? "warn" : "" }, h("b", { text: String(x.dangling) }), " dangling"))
+              : h("span", { class: "vstats" }, h("span", { class: "muted", text: "not created yet" }), ro ? null : h("button", { type: "button", onclick: function (e) {
+                e.stopPropagation();
+                api("/api/knowledge/init", { method: "POST", body: { h: S.h, i: x.index } }).then(function () { toast("Vault created"); go("notes", x.index); route(); })
+                  .catch(function (err) { toast(err.message, true); });
+              } }, "Create it")));
+        })));
+      } else {
+        top.appendChild(h("div", { class: "note", text: "This harness names no memory vaults. Add memory = [\"~/notes\"] (or \"{target}/.memory\") to it in Settings > Harnesses. Learnings can still be collected below." }));
+      }
+      tabsBox.appendChild(h("nav", { class: "tabs", "aria-label": "Knowledge sections" }, KTABS.map(function (t) {
+        return h("a", { href: "#/knowledge/" + t[0] + "/" + cur, class: t[0] === tab ? "on" : "", "aria-current": t[0] === tab ? "page" : null },
+          t[1], t[0] === "learnings" && k.learnings ? h("b", { class: "badge warn", text: String(k.learnings) }) : null);
       })));
-      var v = list.find(function (x) { return x.index === cur; });
-      if (!v || !v.exists) return;
-      m.appendChild(h("h2", { text: "Graph" }));
-      api("/api/memory/graph" + hq({ i: cur })).then(function (g) {
-        var gv = graphView(m, g, function (n, panel) {
+      if (tab === "learnings") return learnings(vaults, cur);
+      if (!v || !v.exists) { body.appendChild(empty(vaults.length ? "Create this vault first." : "No vault to show.")); return; }
+      if (tab === "graph") return graph(cur);
+      if (tab === "health") return health(cur);
+      notes(cur, noteId);
+    }).catch(function (e) { body.appendChild(empty(e.message)); });
+
+    function notes(i, id) {
+      var search = h("input", { type: "search", placeholder: "Search notes", "aria-label": "Search notes", value: store("indra.kq") || "" });
+      var kind = h("select", { "aria-label": "Type" }, h("option", { value: "", text: "Any type" }));
+      var list = h("div", { class: "klist" }), detail = h("div");
+      var exp = function (fmt) { return "/api/knowledge/export" + hq({ i: i, format: fmt }); };
+      var bar = h("div", { class: "row" }, search, kind, ro ? null : h("button", { type: "button", class: "primary", onclick: function () { newNote(); } }, "New note"),
+        ro ? null : h("button", { type: "button", onclick: function () { importNotes(); } }, "Import"),
+        h("details", { class: "menu" }, h("summary", { class: "btn" }, "Export"), h("div", { class: "menubox" },
+          h("a", { href: exp("bundle"), download: "" }, "indra bundle (.json, to import elsewhere)"),
+          h("a", { href: exp("html"), download: "" }, "Graph as an offline page (.html)"),
+          h("a", { href: exp("json"), download: "" }, "Graph as JSON"),
+          h("a", { href: exp("mermaid"), download: "" }, "Mermaid diagram"),
+          h("a", { href: exp("dot"), download: "" }, "Graphviz DOT"))));
+      body.appendChild(bar);
+      body.appendChild(h("div", { class: "kgrid" }, list, detail));
+      var titles = h("datalist", { id: "note-titles" }); body.appendChild(titles);
+      var t = null;
+      search.addEventListener("input", function () { clearTimeout(t); t = setTimeout(load, 200); });
+      kind.addEventListener("change", load);
+      function load() {
+        store("indra.kq", search.value);
+        api("/api/knowledge/notes" + hq({ i: i, q: search.value || null, type: kind.value || null })).then(function (r) {
+          if (kind.options.length === 1) r.types.forEach(function (x) { kind.appendChild(h("option", { value: x, text: x })); });
+          list.textContent = ""; titles.textContent = "";
+          r.notes.forEach(function (n) { titles.appendChild(h("option", { value: n.title })); });
+          if (!r.notes.length) { list.appendChild(empty(search.value ? "Nothing matches." : "No notes yet.")); return; }
+          r.notes.forEach(function (n) {
+            list.appendChild(h("a", { class: "kitem" + (n.id === id ? " sel" : ""), href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(n.id) },
+              h("div", { class: "row" }, h("b", { text: n.title }), n.type ? h("span", { class: "pill", text: n.type }) : null),
+              n.snippet ? h("div", { class: "muted small", text: n.snippet }) : null,
+              h("div", { class: "muted small", text: [n.tags.map(function (x) { return "#" + x; }).join(" "), n.links + " links", n.updated || ""].filter(Boolean).join(" | ") })));
+          });
+        }).catch(function (e) { list.textContent = ""; list.appendChild(empty(e.message)); });
+      }
+      load();
+      if (id) show(id); else detail.appendChild(empty("Pick a note to read or edit it."));
+      function show(nid) {
+        api("/api/knowledge/note" + hq({ i: i, id: nid })).then(function (d) {
+          detail.textContent = "";
+          var ta = h("textarea", { class: "notetext", "aria-label": "Note text", spellcheck: "false" }); ta.value = d.text;
+          var hash = d.hash;
+          var rels = d.relations.filter(function (r) { return r.dir === "out"; }), back = d.relations.filter(function (r) { return r.dir === "in"; });
+          function relList(title, xs) {
+            return [h("h3", { text: title }), xs.length ? h("ul", { class: "links" }, xs.map(function (r) {
+              return h("li", null, h("span", { class: "rel", text: r.rel }), h("a", { href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(r.note.id), text: r.note.title }));
+            })) : h("p", { class: "muted", text: "none" })];
+          }
+          var to = h("input", { type: "text", list: "note-titles", placeholder: "another note", "aria-label": "Link to" });
+          var rel = h("input", { type: "text", value: "related", "aria-label": "Relation", size: "12" });
+          detail.appendChild(h("div", { class: "card" },
+            h("div", { class: "row" }, h("h2", { text: d.title }), d.type ? h("span", { class: "pill", text: d.type }) : null),
+            h("p", { class: "muted small", text: [d.tags.map(function (x) { return "#" + x; }).join(" "), d.source ? "source: " + d.source : "", d.updated ? "updated " + d.updated : ""].filter(Boolean).join(" | ") }),
+            h("div", { class: "split2" }, h("div", null, relList("Links out", rels)), h("div", null, relList("Backlinks", back))),
+            d.unresolved.length ? h("p", { class: "muted small", text: "Unresolved: " + d.unresolved.join(", ") }) : null,
+            ro ? null : h("form", { class: "row", onsubmit: function (e) {
+              e.preventDefault();
+              if (!to.value.trim()) return;
+              api("/api/knowledge/link", { method: "POST", body: { h: S.h, i: i, from: d.id, to: to.value.trim(), rel: rel.value.trim() || "related" } })
+                .then(function (r) { toast(r.changed ? "Linked" : "Already linked"); show(d.id); load(); }).catch(function (err) { toast(err.message, true); });
+            } }, h("span", { class: "muted", text: "Link to" }), to, h("span", { class: "muted", text: "as" }), rel, h("button", { type: "submit" }, "Link")),
+            h("h3", { text: "Text" }), ta,
+            h("p", { class: "muted small", text: d.path }),
+            h("div", { class: "row" },
+              ro ? null : h("button", { type: "button", class: "primary", onclick: function () {
+                api("/api/knowledge/note", { method: "PUT", body: { h: S.h, i: i, id: d.id, text: ta.value, hash: hash } })
+                  .then(function (r) { hash = r.hash; toast("Saved"); show(d.id); load(); }).catch(function (err) { toast(err.message, true); });
+              } }, "Save"),
+              h("button", { type: "button", onclick: function () { saveFile(d.id.split("/").pop() + ".md", ta.value, "text/markdown"); } }, "Download .md"),
+              ro ? null : h("button", { type: "button", class: "danger", onclick: function () {
+                if (!window.confirm("Delete the note \"" + d.title + "\"? Links to it become unresolved.")) return;
+                api("/api/knowledge/note" + hq({ i: i, id: d.id }), { method: "DELETE" }).then(function () { toast("Deleted"); go("notes", i); })
+                  .catch(function (err) { toast(err.message, true); });
+              } }, "Delete"))));
+        }).catch(function (e) { detail.textContent = ""; detail.appendChild(empty(e.message)); });
+      }
+      function importNotes() {
+        var files = [], from = h("select", { "aria-label": "Source" }, [["auto", "Detect"], ["markdown", "Markdown folder"], ["obsidian", "Obsidian vault"], ["notion", "Notion export (unzipped)"], ["github-wiki", "GitHub wiki (cloned)"]]
+          .map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+        var folder = h("input", { type: "text", placeholder: "optional, e.g. imported/notion" }), tags = h("input", { type: "text", placeholder: "optional, comma separated" });
+        var overwrite = h("input", { type: "checkbox" });
+        var picked = h("p", { class: "picked muted", text: "Nothing picked yet." }), out = h("div");
+        var md = function (n) { return /\.(md|markdown|json)$/i.test(n); };
+        function take(list) {
+          files = []; var bundles = 0;
+          list.forEach(function (f) {
+            if (/\.json$/i.test(f.name)) {
+              try { var b = JSON.parse(f.text); if (b && b.format === "indra-vault") { bundles++; b.notes.forEach(function (n) { files.push({ path: n.path, text: n.text }); }); } } catch (e) { /* not a bundle */ }
+            } else files.push({ path: f.path, text: f.text });
+          });
+          if (bundles || (from.value === "auto" && (list.all || []).some(function (p) { return /(^|\/)\.obsidian\//.test(p); }))) from.value = "obsidian";
+          picked.textContent = files.length + " note file(s)" + (bundles ? " from " + bundles + " bundle(s)" : "") + (list.skipped ? ", " + list.skipped + " other file(s) left out" : "") + ".";
+          go.disabled = preview.disabled = !files.length;
+        }
+        function run(dry) {
+          go.disabled = preview.disabled = true; out.textContent = dry ? "Checking..." : "Importing...";
+          api("/api/knowledge/import", { method: "POST", body: { h: S.h, i: i, files: files, from: from.value, folder: folder.value.trim() || null, tags: csv(tags.value), overwrite: overwrite.checked, dry_run: dry } })
+            .then(function (r) {
+              out.textContent = "";
+              out.appendChild(h("div", { class: "note " + (dry ? "" : "ok") },
+                h("b", { text: (dry ? "Would import " : "Imported ") + r.imported.length + " note(s)" + (r.from ? " as " + r.from : "") + "." }),
+                h("div", { text: "Links converted: " + r.links_converted + ". Skipped (exist already): " + r.skipped_existing.length + ". Unresolved links: " + r.unresolved.length + "." }),
+                r.skipped_existing.length ? h("div", { class: "muted small", text: "Existing: " + r.skipped_existing.slice(0, 12).join(", ") + (r.skipped_existing.length > 12 ? "..." : "") + " (tick Replace to overwrite them)" }) : null));
+              if (!dry) { toast("Imported " + r.imported.length + " note(s)"); load(); } else { go.disabled = preview.disabled = false; }
+            }).catch(function (e) { out.textContent = ""; out.appendChild(h("div", { class: "note bad", text: e.message })); go.disabled = preview.disabled = false; });
+        }
+        var preview = h("button", { type: "button", disabled: true, onclick: function () { run(true); } }, "Preview");
+        var go = h("button", { type: "button", class: "primary", disabled: true, onclick: function () { run(false); } }, "Import");
+        detail.textContent = "";
+        detail.appendChild(h("div", { class: "card form importbox" }, h("h3", { text: "Import notes" }),
+          h("p", { class: "muted small", text: "Pick Markdown files, a whole folder (an Obsidian vault, an unzipped Notion export, a cloned GitHub wiki), or an indra bundle exported from another vault. Links are converted to [[wikilinks]]; existing notes are kept unless you tick Replace." }),
+          h("div", { class: "row" },
+            h("button", { type: "button", onclick: function () { pickFiles({ multiple: true, accept: ".md,.markdown,.json", keep: md }).then(take); } }, "Choose files"),
+            h("button", { type: "button", onclick: function () { pickFiles({ folder: true, keep: md }).then(take); } }, "Choose a folder")),
+          picked,
+          h("div", { class: "row" }, h("label", null, "Source", from), h("label", null, "Into folder", folder), h("label", null, "Add tags", tags)),
+          h("label", { class: "check" }, overwrite, h("span", { text: "Replace notes that exist already" })),
+          h("div", { class: "row" }, preview, go, h("button", { type: "button", onclick: function () { go_back(); } }, "Close")), out));
+        function go_back() { detail.textContent = ""; if (noteId) show(noteId); else detail.appendChild(empty("Pick a note to read or edit it.")); }
+      }
+      function newNote() {
+        var f = { title: h("input", { type: "text", required: true }), type: h("input", { type: "text", list: "note-types", placeholder: "learning, pattern, finding, decision..." }),
+          tags: h("input", { type: "text", placeholder: "comma separated" }), links: h("input", { type: "text", placeholder: "titles of notes it relates to, comma separated" }),
+          body: h("textarea", { placeholder: "What should an agent know?" }) };
+        detail.textContent = "";
+        detail.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+          e.preventDefault();
+          api("/api/knowledge/notes", { method: "POST", body: { h: S.h, i: i, title: f.title.value, type: f.type.value, tags: csv(f.tags.value), links: csv(f.links.value), body: f.body.value } })
+            .then(function (r) { toast("Created " + r.id); go("notes", i, r.id); }).catch(function (err) { toast(err.message, true); });
+        } }, h("h3", { text: "New note" }), h("label", null, "Title", f.title), h("label", null, "Type", f.type),
+          h("datalist", { id: "note-types" }, ["learning", "pattern", "finding", "technique", "tool", "decision"].map(function (x) { return h("option", { value: x }); })),
+          h("label", null, "Tags", f.tags), h("label", null, "Links", f.links), h("label", null, "Text", f.body),
+          h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Create"), h("button", { type: "button", onclick: function () { go("notes", i, noteId); route(); } }, "Cancel"))));
+        f.title.focus();
+      }
+    }
+
+    function learnings(vaults, cur) {
+      var holder = h("div", { class: "stack" });
+      body.appendChild(h("p", { class: "muted", text: "Agents launched with \"Ask for learnings\" (or a profile with reflect = true) propose what they learned before they finish. Nothing reaches memory until you accept it: it then becomes a learning note, with where it came from, and later agents are given it when it is relevant." }));
+      body.appendChild(holder);
+      var existing = vaults.filter(function (v) { return true; });
+      function vaultSelect() {
+        var s = h("select", { "aria-label": "Vault" }, existing.map(function (v) { return h("option", { value: String(v.index), text: v.path + (v.exists ? "" : " (created on accept)") }); }));
+        s.value = String(cur);
+        return s;
+      }
+      function load() {
+        api("/api/learnings").then(function (list) {
+          holder.textContent = "";
+          var open = list.filter(function (l) { return l.status === "proposed"; }), done = list.filter(function (l) { return l.status !== "proposed"; });
+          holder.appendChild(h("div", { class: "row" },
+            h("button", { type: "button", disabled: !list.length, onclick: function () {
+              jsonFile("learnings.json", list.map(function (l) { return { title: l.title, body: l.body, tags: l.tags, status: l.status, origin: l.origin, note: l.note || null }; }));
+            } }, "Export"),
+            ro ? null : h("button", { type: "button", onclick: function () {
+              pickFiles({ accept: ".json,application/json" }).then(function (fs) {
+                if (!fs.length) return;
+                var items; try { items = listFrom(fs[0].text); } catch (e) { toast(fs[0].name + ": " + e.message, true); return; }
+                api("/api/learnings/import", { method: "POST", body: { items: items.map(function (x) { return { title: String(x.title || ""), body: String(x.body || ""), tags: x.tags || [] }; }) } })
+                  .then(function (r) { toast("Added " + r.added + " learning(s) to the inbox"); load(); refreshOverview(); }).catch(function (e) { toast(e.message, true); });
+              });
+            } }, "Import"),
+            done.length && !ro ? h("button", { type: "button", onclick: function () {
+              if (!window.confirm("Remove the " + done.length + " accepted learning(s) from this list? Their notes stay in memory.")) return;
+              Promise.all(done.map(function (l) { return api("/api/learnings/" + l.id, { method: "DELETE" }); })).then(load).catch(function (e) { toast(e.message, true); });
+            } }, "Clear accepted") : null));
+          if (!ro) holder.appendChild(addForm());
+          if (!open.length) holder.appendChild(empty("Nothing waiting for review."));
+          open.forEach(function (l) { holder.appendChild(card(l)); });
+          if (done.length) holder.appendChild(h("details", { class: "card" }, h("summary", { text: "Accepted (" + done.length + ")" }),
+            h("ul", { class: "links" }, done.map(function (l) {
+              var vi = vaults.findIndex(function (v) { return l.note && v.path === l.note[0]; });
+              return h("li", null, h("span", { class: "rel", text: ago(l.created) }),
+                vi >= 0 ? h("a", { href: "#/knowledge/notes/" + vaults[vi].index + "/" + encodeURIComponent(l.note[1]), text: l.title }) : h("span", { text: l.title }),
+                ro ? null : h("button", { type: "button", class: "ghost small", title: "Remove from this list (the note stays)", onclick: function () {
+                  api("/api/learnings/" + l.id, { method: "DELETE" }).then(load).catch(function (e) { toast(e.message, true); });
+                } }, "Remove"));
+            }))));
+        }).catch(function (e) { holder.textContent = ""; holder.appendChild(empty(e.message)); });
+      }
+      function origin(o) {
+        var bits = [o.by === "agent" ? "proposed by the agent" : "added by a person"];
+        if (o.runner) bits.push(o.runner + (o.profile ? " (" + o.profile + ")" : ""));
+        if (o.target) bits.push("in " + o.target);
+        return h("p", { class: "muted small" }, o.proc ? h("a", { href: "#/proc/" + o.proc, text: "process #" + o.proc }) : null, (o.proc ? ", " : "") + bits.join(", "));
+      }
+      function card(l) {
+        var title = h("input", { type: "text", value: l.title, "aria-label": "Title" });
+        var text = h("textarea", { "aria-label": "Learning" }); text.value = l.body;
+        var tags = h("input", { type: "text", value: l.tags.join(", "), "aria-label": "Tags", placeholder: "tags, comma separated" });
+        var links = h("input", { type: "text", list: "note-titles", placeholder: "link to notes (titles, comma separated)", "aria-label": "Links" });
+        var vs = vaultSelect();
+        function patch() { return api("/api/learnings/" + l.id, { method: "PATCH", body: { title: title.value, body: text.value, tags: csv(tags.value) } }); }
+        return h("div", { class: "card form learning" }, origin(l.origin),
+          h("label", null, "Title", title), h("label", null, "What it learned", text), h("label", null, "Tags", tags),
+          ro ? null : h("div", { class: "fields" }, h("label", null, "Into vault", vs), h("label", null, "Link to notes", links)),
+          ro ? null : h("div", { class: "row" },
+            h("button", { type: "button", class: "primary", onclick: function () {
+              patch().then(function () { return api("/api/learnings/" + l.id + "/accept", { method: "POST", body: { h: S.h, i: Number(vs.value), links: csv(links.value) } }); })
+                .then(function (r) { toast((r.note.created ? "Saved as " : "Merged into ") + r.note.id); load(); refreshOverview(); })
+                .catch(function (err) { toast(err.message, true); });
+            } }, "Accept into memory"),
+            h("button", { type: "button", onclick: function () { patch().then(function () { toast("Saved"); }).catch(function (err) { toast(err.message, true); }); } }, "Save edits"),
+            h("button", { type: "button", class: "danger", onclick: function () {
+              api("/api/learnings/" + l.id, { method: "DELETE" }).then(function () { load(); refreshOverview(); }).catch(function (err) { toast(err.message, true); });
+            } }, "Discard")));
+      }
+      function addForm() {
+        var t = h("input", { type: "text", placeholder: "Add a learning yourself: a short title", "aria-label": "New learning title" });
+        var b = h("textarea", { placeholder: "What should future agents know?", "aria-label": "New learning", rows: "2" });
+        return h("details", { class: "card" }, h("summary", { text: "Add a learning" }), h("form", { class: "form", onsubmit: function (e) {
+          e.preventDefault();
+          api("/api/learnings", { method: "POST", body: { title: t.value, body: b.value } }).then(function () { load(); refreshOverview(); }).catch(function (err) { toast(err.message, true); });
+        } }, t, b, h("div", null, h("button", { type: "submit" }, "Add to the inbox"))));
+      }
+      body.appendChild(h("datalist", { id: "note-titles" }));
+      load();
+    }
+
+    function graph(i) {
+      api("/api/memory/graph" + hq({ i: i })).then(function (g) {
+        var gv = graphView(body, g, function (n, panel) {
           panel.appendChild(h("h3", { text: n.type }));
           panel.appendChild(h("h2", { text: n.title }));
           if (n.raw.tags && n.raw.tags.length) panel.appendChild(h("div", { class: "chips" }, n.raw.tags.map(function (t) { return h("span", { class: "pill", text: "#" + t }); })));
+          panel.appendChild(h("a", { href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(n.id), text: "Open and edit" }));
           if (n.raw.body) panel.appendChild(h("pre", { text: n.raw.body.trim() }));
           panel.appendChild(h("div", null, linkList("Links out", n.out.map(function (l) { return { rel: l.rel, title: l.n.title, id: l.n.id }; }), function (l) { gv.select(l.id); })));
           panel.appendChild(h("div", null, linkList("Backlinks", n.inc.map(function (l) { return { rel: l.rel, title: l.n.title, id: l.n.id }; }), function (l) { gv.select(l.id); })));
         });
-      });
-    });
+      }).catch(function (e) { body.appendChild(empty(e.message)); });
+    }
+
+    function health(i) {
+      api("/api/knowledge/health" + hq({ i: i })).then(function (r) {
+        var link = function (id, title) { return h("a", { href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(id), text: title }); };
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "Dangling links (" + r.dangling.length + ")" }),
+          h("p", { class: "muted small", text: "Links to notes that do not exist. Create the note, or fix the link." }),
+          r.dangling.length ? h("ul", { class: "links" }, r.dangling.map(function (d) {
+            return h("li", null, link(d.from, d.title), h("span", { class: "rel", text: " -" + d.rel + "-> " }), h("span", { text: d.target }));
+          })) : h("p", { class: "muted", text: "none" })));
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "Orphans (" + r.orphans.length + ")" }),
+          h("p", { class: "muted small", text: "Notes nothing links to and that link nowhere: recall reaches them only by search. Link them to related notes." }),
+          r.orphans.length ? h("ul", { class: "links" }, r.orphans.map(function (o) { return h("li", null, link(o.id, o.title)); })) : h("p", { class: "muted", text: "none" })));
+      }).catch(function (e) { body.appendChild(empty(e.message)); });
+    }
   }
 
   function segs(stages) { return h("div", { class: "segs", title: stages.map(function (s) { return s.name + ": " + s.state; }).join(", ") }, stages.map(function (s) { return h("i", { class: s.state }); })); }
@@ -514,6 +869,7 @@
   function pageLaunch(m) {
     var ov = S.ov, hs = harness();
     m.appendChild(header("Launch an agent", "Runs a runner on any node, in one of its target directories, and streams what it does."));
+    m.appendChild(launchTabs("one"));
     if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
     if (!hs) { m.appendChild(empty("No harness configured.")); return; }
     var holder = h("div", { class: "muted", text: "Checking nodes..." });
@@ -536,9 +892,12 @@
         MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var effort = h("select", { "aria-label": "Effort" }, h("option", { value: "", text: "default" }),
         ["low", "medium", "high", "xhigh", "max"].map(function (x) { return h("option", { value: x, text: x }); }));
+      var memory = h("input", { type: "checkbox" }), reflect = h("input", { type: "checkbox" });
+      var memNote = h("div", { class: "muted small" });
       function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
       function fillProfile() {
         var p = prof() || {};
+        memory.checked = !!p.memory; reflect.checked = !!p.reflect;
         if (p.runner && Array.prototype.some.call(runner.options, function (o) { return o.value === p.runner; })) runner.value = p.runner;
         model.placeholder = p.model || "default"; mode.options[0].text = p.permission_mode ? "profile: " + p.permission_mode : "default";
         effort.options[0].text = p.effort ? "profile: " + p.effort : "default";
@@ -592,15 +951,25 @@
         if (model.value.trim()) o.model = model.value.trim();
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
-        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o } })
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
           .then(function (r) { location.hash = "#/proc/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "Preset", preset),
         h("label", null, "Prompt", h("small", { text: "{target} becomes the target path, {node} the node name." }), prompt),
-        h("div", { class: "row" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", null, "Target", target)),
-        h("div", { class: "row" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+        h("div", { class: "fields" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", { class: "wide" }, "Target", target)),
+        h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
         modelList(),
+        h("div", { class: "card knowctl" },
+          h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
+          h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: function () {
+            var p = prompt.value.trim(); if (!p) { memNote.textContent = "Write the prompt first."; return; }
+            memNote.textContent = "Recalling...";
+            api("/api/knowledge/recall" + hq({ q: p })).then(function (r) {
+              memNote.textContent = r.notes.length ? "It would get: " + r.notes.map(function (n) { return n.title; }).join("; ") : "Nothing relevant in memory for this prompt.";
+            }).catch(function (e) { memNote.textContent = e.message; });
+          } }, "Preview what it would get"), memNote),
+          h("label", { class: "check" }, reflect, h("span", null, h("b", { text: "Ask for learnings at the end" }), h("small", { text: " - before it finishes, a Claude Code agent proposes what it learned; review them under Knowledge > Learnings" })))),
         note,
         h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On a remote node the job travels as JSON over SSH." }), preview),
         h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. A remote node runs only runners from its own configuration." }),
@@ -839,10 +1208,359 @@
       }))));
   }
 
+  // ---- marketplace -------------------------------------------------------------------
+  // Plugins and skills from Claude Code plugin marketplaces (or skill repos),
+  // installed where Claude Code, Codex or a harness will find them.
+  function pageMarket(m, arg) {
+    var parts = String(arg || "").split("/"), want = parts[0] || store("indra.market") || "", tab = parts[1] === "installed" ? "installed" : "browse";
+    var ro = S.ov.read_only, hs = harness();
+    m.appendChild(header("Marketplace", "Plugins, skills and agents from Claude Code plugin marketplaces and skill repositories, installed for Claude Code, Codex or a harness. Fetching happens only when you press Refresh."));
+    var top = h("div"), tabs = h("div"), body = h("div", { class: "stack" });
+    m.appendChild(top); m.appendChild(tabs); m.appendChild(body);
+    api("/api/market").then(function (r) {
+      var list = r.marketplaces, cur = list.find(function (x) { return x.name === want; }) || list.find(function (x) { return x.plugins; }) || list[0];
+      if (cur) store("indra.market", cur.name);
+      top.appendChild(h("div", { class: "vaults" }, list.map(function (x) {
+        var pick = function () { location.hash = "#/market/" + encodeURIComponent(x.name); };
+        var st = x.state || {};
+        var refresh = h("button", { type: "button", disabled: ro, onclick: function (e) {
+          e.stopPropagation(); refresh.disabled = true; refresh.textContent = "Fetching...";
+          api("/api/market/refresh", { method: "POST", body: { m: x.name } }).then(function () { toast("Fetched " + x.name); route(); })
+            .catch(function (err) { toast(err.message, true); refresh.disabled = false; refresh.textContent = "Refresh"; });
+        } }, x.plugins == null ? "Fetch" : "Refresh");
+        return h("div", { class: "vault" + (cur && x.name === cur.name ? " sel" : ""), tabindex: "0", title: x.description || x.source, onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
+          h("b", { text: x.name }), x.builtin ? h("span", { class: "pill", text: "built in" }) : null,
+          h("code", { class: "vpath", text: x.source + (x.ref ? "@" + x.ref : "") }),
+          h("span", { class: "vstats" }, x.plugins == null ? h("span", { class: "muted", text: "not fetched" }) : h("span", null, h("b", { text: String(x.plugins) }), " plugins"),
+            st.fetched ? h("span", { class: "muted", text: ago(st.fetched) }) : null, st.error ? h("span", { class: "warn", title: st.error, text: "fetch failed" }) : null),
+          refresh);
+      })));
+      if (canEdit()) top.appendChild(h("details", { class: "addmk" }, h("summary", { text: "Add a marketplace" }), (function () {
+        var name = h("input", { type: "text", placeholder: "my-team", required: true }), src = h("input", { type: "text", placeholder: "owner/repo, https://.../repo.git, or a folder", required: true }), ref = h("input", { type: "text", placeholder: "optional branch, tag or commit" });
+        return h("form", { class: "form", onsubmit: function (e) {
+          e.preventDefault();
+          var v = { name: name.value.trim(), source: src.value.trim() }; if (ref.value.trim()) v.ref = ref.value.trim();
+          addToSection("marketplace", v).then(function () { toast("Added " + v.name + "; press Fetch"); location.hash = "#/market/" + encodeURIComponent(v.name); route(); }).catch(function (err) { toast(err.message, true); });
+        } }, h("div", { class: "fields" }, h("label", null, "Name", name), h("label", { class: "wide" }, "Source", src), h("label", null, "Ref", ref)),
+          h("p", { class: "muted small", text: "Any Claude Code plugin marketplace (a repository with .claude-plugin/marketplace.json), or a repository of skills (folders with SKILL.md)." }),
+          h("div", null, h("button", { type: "submit", class: "primary" }, "Add")));
+      })()));
+      tabs.appendChild(h("nav", { class: "tabs" },
+        h("a", { href: "#/market/" + encodeURIComponent(cur ? cur.name : ""), class: tab === "browse" ? "on" : "", text: "Browse" }),
+        h("a", { href: "#/market/" + encodeURIComponent(cur ? cur.name : "") + "/installed", class: tab === "installed" ? "on" : "" }, "Installed", r.installed.length ? h("b", { class: "badge", text: String(r.installed.length) }) : null)));
+      if (tab === "installed") return installed(r.installed);
+      if (!cur) { body.appendChild(empty("No marketplaces.")); return; }
+      if (cur.plugins == null) { body.appendChild(empty(cur.state && cur.state.error ? "Fetching failed: " + cur.state.error : "Press Fetch to download " + cur.name + " (" + cur.source + ").")); return; }
+      browse(cur);
+    }).catch(function (e) { body.appendChild(empty(e.message)); });
+
+    function browse(mk) {
+      var search = h("input", { type: "search", placeholder: "Search plugins and skills", "aria-label": "Search" });
+      var cat = h("select", { "aria-label": "Category" }, h("option", { value: "", text: "All categories" }));
+      var list = h("div", { class: "klist" }), detail = h("div");
+      body.appendChild(h("div", { class: "row" }, search, cat));
+      body.appendChild(h("div", { class: "kgrid" }, list, detail));
+      detail.appendChild(empty("Pick a plugin to see what is inside and install it."));
+      api("/api/market/plugins" + q({ m: mk.name })).then(function (c) {
+        var plugins = c.plugins;
+        var cats = {}; plugins.forEach(function (p) { if (p.category) cats[p.category] = 1; });
+        Object.keys(cats).sort().forEach(function (k) { cat.appendChild(h("option", { value: k, text: k })); });
+        function draw() {
+          var f = search.value.trim().toLowerCase();
+          var rows = plugins.filter(function (p) { return (!cat.value || p.category === cat.value) && (!f || (p.name + " " + (p.description || "") + " " + (p.category || "")).toLowerCase().indexOf(f) >= 0); });
+          list.textContent = "";
+          if (!rows.length) { list.appendChild(empty("Nothing matches.")); return; }
+          rows.slice(0, 400).forEach(function (p) {
+            list.appendChild(h("a", { class: "kitem", href: "#", onclick: function (e) { e.preventDefault(); Array.prototype.forEach.call(list.children, function (x) { x.classList.remove("sel"); }); e.currentTarget.classList.add("sel"); show(mk, p); } },
+              h("div", { class: "row" }, h("b", { text: p.name }), p.category ? h("span", { class: "pill", text: p.category }) : null,
+                p.installed && p.installed.length ? h("span", { class: "pill ok", text: "installed" }) : null, !p.installable ? h("span", { class: "pill warn", text: "Claude Code only" }) : null),
+              p.description ? h("div", { class: "muted small clip2", text: p.description }) : null));
+          });
+        }
+        search.addEventListener("input", draw); cat.addEventListener("change", draw); draw();
+      }).catch(function (e) { list.appendChild(empty(e.message)); });
+
+      function show(mk, p) {
+        detail.textContent = "";
+        var inside = p.source_kind !== "here" ? h("div", { class: "muted small", text: "This plugin lives in another repository (" + p.source_kind + "); Look inside fetches it." }) : null;
+        var card = h("div", { class: "card form" },
+          h("div", { class: "row" }, h("h2", { text: p.name }), p.version ? h("span", { class: "pill", text: "v" + p.version }) : null, p.category ? h("span", { class: "pill", text: p.category }) : null),
+          p.description ? h("p", { text: p.description }) : null,
+          h("p", { class: "muted small" }, p.author ? "By " + p.author + ". " : "", p.homepage ? h("a", { href: p.homepage, target: "_blank", rel: "noopener noreferrer", text: "Homepage" }) : null),
+          inside);
+        detail.appendChild(card);
+        if (ro) return;
+        if (!p.installable) { card.appendChild(nativeForm(mk, p, true)); return; }
+        var look = h("button", { type: "button", class: "primary", onclick: function () {
+          look.disabled = true; look.textContent = "Looking...";
+          api("/api/market/inspect", { method: "POST", body: { m: mk.name, plugin: p.name } }).then(function (r) { look.remove(); installForm(card, mk, p, r); })
+            .catch(function (err) { toast(err.message, true); look.disabled = false; look.textContent = "Look inside"; });
+        } }, "Look inside");
+        card.appendChild(h("div", { class: "row" }, look));
+        card.appendChild(nativeForm(mk, p, false));
+      }
+    }
+
+    function targetsSelect() {
+      return h("select", { "aria-label": "Project" }, (hs ? hs.targets : []).map(function (t, i) { return h("option", { value: String(i), text: t }); }));
+    }
+
+    function installForm(card, mk, p, r) {
+      if (!r.items.length) { card.appendChild(h("p", { class: "muted", text: "No skills, agents or commands to copy." + (r.native.length ? " It has " + r.native.join(", ") + ": install it with Claude Code below." : "") })); return; }
+      var boxes = r.items.map(function (it) { var cb = h("input", { type: "checkbox", checked: true }); cb.dataset.key = it.kind + " " + it.name; return { it: it, cb: cb }; });
+      var native = card.querySelector("details.native");
+      var add = function (el) { card.insertBefore(el, native); };
+      add(h("h3", { text: "Inside (" + r.items.length + ")" }));
+      add(h("div", { class: "rowlist" }, boxes.map(function (b) {
+        return h("label", { class: "check rowitem" }, b.cb, h("span", { class: "pill", text: b.it.kind }), h("span", { class: "grow" }, h("b", { text: b.it.name }), b.it.description ? h("span", { class: "muted small", text: "  " + b.it.description.slice(0, 160) }) : null));
+      })));
+      if (r.native.length) add(h("div", { class: "note warn", text: "It also has " + r.native.join(", ") + ", which only Claude Code's own plugin install sets up (below). Copying brings the skills, agents and commands." }));
+      var dest = h("select", { "aria-label": "Install for" },
+        [["claude-user", "Claude Code, for me (~/.claude)"], ["claude-project", "Claude Code, in a project (.claude)"], ["codex-user", "Codex, for me (~/.agents/skills, skills only)"],
+          ["codex-project", "Codex, in a project (.agents/skills, skills only)"], ["harness", "The " + (hs ? hs.name : "") + " harness (its own folders)"], ["new-harness", "A new harness, read from this plugin"]]
+          .map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var proj = targetsSelect(), projLabel = h("label", { hidden: true }, "Project", proj);
+      dest.addEventListener("change", function () { projLabel.hidden = dest.value.indexOf("-project") < 0; });
+      var overwrite = h("input", { type: "checkbox" });
+      var go = h("button", { type: "button", class: "primary", onclick: function () {
+        if (dest.value === "new-harness") {
+          addToSection("harness", { name: p.name, root: r.root, agents: ["agents/*.md"], skills: ["skills/*/SKILL.md"], prompts: ["commands/*.md"] })
+            .then(function () { toast("Added harness " + p.name); }).catch(function (err) { toast(err.message, true); });
+          return;
+        }
+        go.disabled = true;
+        api("/api/market/install", { method: "POST", body: { m: mk.name, plugin: p.name, dest: dest.value, h: S.h, target: Number(proj.value || 0),
+          items: boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return b.cb.dataset.key; }), overwrite: overwrite.checked } })
+          .then(function (x) { toast("Installed " + x.items.length + " item(s) under " + x.base); go.disabled = false; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } }, "Install");
+      add(h("h3", { text: "Install" }));
+      add(h("div", { class: "fields" }, h("label", { class: "wide" }, "For", dest), projLabel));
+      add(h("label", { class: "check" }, overwrite, h("span", { text: "Replace files that exist already" })));
+      add(h("div", { class: "note warn", text: "Install only from sources you trust: skills and agents tell agents what to do, and a skill's scripts run with your permissions when an agent uses them." }));
+      add(h("div", { class: "row" }, go, r.commit ? h("span", { class: "muted small", text: "commit " + r.commit.slice(0, 10) }) : null));
+    }
+
+    function nativeForm(mk, p, only) {
+      var scope = h("select", { "aria-label": "Scope" }, h("option", { value: "user", text: "for me (user)" }), h("option", { value: "project", text: "in a project" }));
+      var proj = targetsSelect(), projLabel = h("label", { hidden: true }, "Project", proj);
+      scope.addEventListener("change", function () { projLabel.hidden = scope.value !== "project"; });
+      var out = h("pre", { class: "view small", hidden: true });
+      var go = h("button", { type: "button", onclick: function () {
+        go.disabled = true; go.textContent = "Installing...";
+        api("/api/market/native", { method: "POST", body: { m: mk.name, plugin: p.name, scope: scope.value, h: S.h, target: Number(proj.value || 0) } })
+          .then(function (x) { out.hidden = false; out.textContent = x.output || "done"; toast("Installed with Claude Code"); })
+          .catch(function (err) { out.hidden = false; out.textContent = err.message; })
+          .then(function () { go.disabled = false; go.textContent = "Install with Claude Code"; });
+      } }, "Install with Claude Code");
+      return h("details", { class: "native", open: only || null }, h("summary", { text: "Or install it as a Claude Code plugin (with its hooks and MCP servers)" }),
+        h("p", { class: "muted small", text: "Runs claude plugin marketplace add, then claude plugin install " + p.name + "@<marketplace> on this machine. Claude Code then manages it (/plugin to see it)." }),
+        h("div", { class: "fields" }, h("label", null, "Scope", scope), projLabel), h("div", { class: "row" }, go), out);
+    }
+
+    function installed(list) {
+      if (!list.length) { body.appendChild(empty("Nothing installed from a marketplace yet.")); return; }
+      body.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+        h("thead", null, h("tr", null, ["Plugin", "Where", "What", "Version", "When", ""].map(function (t) { return h("th", { text: t }); }))),
+        h("tbody", null, list.slice().reverse().map(function (i) {
+          return h("tr", null, h("td", null, h("b", { text: i.plugin }), h("div", { class: "muted small", text: i.marketplace })),
+            h("td", null, h("div", { text: i.dest }), h("code", { class: "small", text: i.base })),
+            h("td", { class: "desc", text: i.items.join(", ") }),
+            h("td", { class: "muted", text: (i.version ? "v" + i.version + " " : "") + (i.commit ? i.commit.slice(0, 8) : "") }),
+            h("td", { class: "muted", text: ago(i.installed) }),
+            h("td", null, ro ? null : h("div", { class: "row" },
+              h("button", { type: "button", onclick: function (e) {
+                e.target.disabled = true;
+                api("/api/market/installed/" + i.id + "/update", { method: "POST" }).then(function () { toast("Updated " + i.plugin); route(); }).catch(function (err) { toast(err.message, true); e.target.disabled = false; });
+              } }, "Update"),
+              h("button", { type: "button", class: "danger", onclick: function () {
+                if (!window.confirm("Remove what was installed from " + i.plugin + " (" + i.items.length + " item(s) under " + i.base + ")?")) return;
+                api("/api/market/installed/" + i.id, { method: "DELETE" }).then(function () { toast("Removed"); route(); }).catch(function (err) { toast(err.message, true); });
+              } }, "Remove"))));
+        })))));
+    }
+  }
+
+  // ---- plan and delegate ------------------------------------------------------------
+  // A strong model plans; cheaper ones (Haiku, a local model) do the steps.
+  function launchTabs(on) {
+    return h("nav", { class: "tabs", "aria-label": "Launch modes" },
+      h("a", { href: "#/launch", class: on === "one" ? "on" : "", text: "One agent" }),
+      h("a", { href: "#/delegate", class: on === "plan" ? "on" : "", text: "Plan and delegate" }));
+  }
+  function profileLabel(name) {
+    var p = (S.ov.profiles || []).find(function (x) { return x.name === name; });
+    if (!p) return name;
+    return name + " (" + [p.runner || "claude", p.model || "default model"].join(", ") + ")";
+  }
+  function pageDelegate(m) {
+    var ov = S.ov, hs = harness();
+    m.appendChild(header("Plan and delegate", "A strong model reads the code and writes a plan; cheaper models carry out each step; an optional reviewer checks the result. Each role is a profile, so any runner works: Claude Code, Codex, Gemini CLI, or a local model through Ollama."));
+    m.appendChild(launchTabs("plan"));
+    if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
+    if (!hs) { m.appendChild(empty("No harness configured.")); return; }
+    var profiles = (ov.profiles || []).map(function (p) { return p.name; }), teams = ov.teams || [];
+    if (profiles.length < 1) {
+      m.appendChild(h("div", { class: "note warn" }, "Plan and delegate needs profiles for its roles. ", canEdit() ? h("a", { href: "#/settings/teams", text: "Set up a team in Settings > Teams" }) : "Add [[profile]] and [[team]] sections to indra.toml.", " (templates included)."));
+      return;
+    }
+    var holder = h("div", { class: "muted", text: "Checking nodes..." }); m.appendChild(holder);
+    loadNodes(false).then(function (nodes) {
+      holder.remove();
+      var sel = function (label, list, blank) { return h("select", { "aria-label": label }, blank ? h("option", { value: "", text: blank }) : null, list.map(function (x) { return h("option", { value: x, text: profileLabel(x) }); })); };
+      var team = h("select", { "aria-label": "Team" }, h("option", { value: "", text: "Pick the roles below" }), teams.map(function (t) { return h("option", { value: t.name, text: t.name + (t.description ? "  -  " + t.description : "") }); }));
+      var planner = sel("Planner", profiles), worker = sel("Worker", profiles), light = sel("Light steps", profiles, "the worker"), reviewer = sel("Reviewer", profiles, "no review step");
+      var review = h("input", { type: "checkbox", checked: true }), parallel = h("input", { type: "checkbox" });
+      var maxSteps = h("input", { type: "number", min: "1", max: "30", value: "8" });
+      var guess = function (re) { return profiles.find(function (p) { return re.test(p); }); };
+      planner.value = guess(/plan/i) || profiles[0]; worker.value = guess(/work|build|haiku|local/i) || profiles[0];
+      var roleBox = h("div", { class: "fields" }, h("label", null, "Planner", h("small", { text: "Reads and plans; changes nothing" }), planner),
+        h("label", null, "Worker", h("small", { text: "Does each step" }), worker),
+        h("label", null, "Light steps", h("small", { text: "Mechanical edits, cheapest model" }), light),
+        h("label", null, "Reviewer", h("small", { text: "Checks the result at the end" }), reviewer));
+      var opts2 = h("div", { class: "fields" }, h("label", null, "Most steps", maxSteps));
+      function fillTeam() {
+        var t = teams.find(function (x) { return x.name === team.value; });
+        roleBox.hidden = opts2.hidden = !!t;
+        if (t) { review.checked = !t.auto_run; parallel.checked = !!t.parallel; teamNote.textContent = "Planner " + profileLabel(t.planner) + "; worker " + profileLabel(t.worker) + (t.light_worker ? "; light steps " + profileLabel(t.light_worker) : "") + (t.reviewer ? "; reviewer " + profileLabel(t.reviewer) : "; no review step") + "."; }
+        else teamNote.textContent = "";
+      }
+      var teamNote = h("p", { class: "muted small" });
+      team.addEventListener("change", fillTeam);
+      var node = h("select", { "aria-label": "Node" }, nodes.map(function (n) { return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : "") }); }));
+      var target = h("select", { "aria-label": "Target" });
+      function fillNode() { var n = nodes.find(function (x) { return x.name === node.value; }) || nodes[0]; target.textContent = ""; n.targets.forEach(function (t, i) { target.appendChild(h("option", { value: String(i), text: t })); }); }
+      node.addEventListener("change", fillNode);
+      var prompt = h("textarea", { placeholder: "What should be built or changed? The planner turns it into steps.", "aria-label": "Task" });
+      var go = h("button", { class: "primary", type: "submit" }, "Plan it");
+      m.appendChild(h("form", { class: "form", onsubmit: function (e) {
+        e.preventDefault(); if (!prompt.value.trim()) { toast("Describe the task first", true); return; }
+        go.disabled = true;
+        var body = { h: hs.name, node: node.value, target: Number(target.value), prompt: prompt.value, auto_run: !review.checked };
+        if (team.value) body.team = team.value;
+        else body.roles = { planner: planner.value, worker: worker.value, light_worker: light.value || null, reviewer: reviewer.value || null, parallel: parallel.checked, auto_run: !review.checked, max_steps: Number(maxSteps.value) || 8 };
+        api("/api/delegations", { method: "POST", body: body }).then(function (r) { location.hash = "#/plan/" + r.id; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } },
+        h("label", null, "Task", prompt),
+        h("div", { class: "fields" }, h("label", null, "Node", node), h("label", { class: "wide" }, "Target", target)),
+        h("label", null, "Team", h("small", { text: "A saved set of roles (Settings > Teams), or pick them here." }), team), teamNote,
+        roleBox, opts2,
+        h("label", { class: "check" }, review, h("span", null, h("b", { text: "Let me review the plan before it runs" }), h("small", { text: " - edit, drop or add steps first" }))),
+        h("label", { class: "check" }, parallel, h("span", null, h("b", { text: "Independent steps may run at the same time" }), h("small", { text: " - they share the directory, so only when the plan keeps them apart" }))),
+        h("div", { class: "note", text: "Tokens: the planner reads and plans once; every step then runs on the worker's model with a short, self-contained brief, so the expensive model never does the typing. Costs per role show on the plan's page." }),
+        h("div", { class: "row" }, go, canEdit() ? h("a", { href: "#/settings/teams", text: "Save roles as a team" }) : null)));
+      fillNode(); fillTeam();
+    }).catch(function (e) { holder.textContent = e.message; });
+  }
+
+  var PLAN_STATE = { planning: "run live", review: "warn", running: "run live", done: "ok", failed: "bad", cancelled: "" };
+  function pagePlan(m, id) {
+    var top = h("div", { class: "stack" }), body = h("div", { class: "stack" });
+    m.appendChild(h("div", { class: "stack" }, top, body));
+    var editing = false;
+    function load() {
+      if (editing) return;
+      api("/api/delegations/" + id).then(function (r) { render(r); }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); });
+    }
+    function render(r) {
+      var d = r.delegation, ro = S.ov.read_only;
+      top.textContent = ""; body.textContent = "";
+      var cancel = ["planning", "review", "running"].indexOf(d.status) >= 0 && !ro ? h("button", { type: "button", class: "danger", onclick: function () {
+        if (!window.confirm("Cancel this plan?")) return;
+        api("/api/delegations/" + id + "/cancel", { method: "POST" }).then(load).catch(function (e) { toast(e.message, true); });
+      } }, "Cancel") : null;
+      top.appendChild(header("Plan #" + d.id + (d.team ? " - team " + d.team : ""), (d.node !== "local" ? d.node + ":" : "") + d.target,
+        [h("span", { class: "pill " + (PLAN_STATE[d.status] || ""), text: d.status }), r.total_cost_usd ? h("span", { class: "pill", text: "$" + r.total_cost_usd.toFixed(4) }) : null, cancel]));
+      top.appendChild(h("div", { class: "cmd lines", text: d.task }));
+      var roles = d.roles;
+      body.appendChild(h("div", { class: "card" }, h("h3", { text: "Roles" }), h("div", { class: "roles" },
+        [["planner", roles.planner], ["worker", roles.worker], ["light steps", roles.light_worker || roles.worker], ["reviewer", roles.reviewer || "none"]].map(function (x) {
+          var c = r.cost[x[0] === "light steps" ? "light_worker" : x[0]];
+          return h("div", { class: "stat" }, h("span", { text: x[0] }), h("b", { class: "small", text: x[1] === "none" ? "none" : profileLabel(x[1]) }), c ? h("span", { text: "$" + c.toFixed(4) }) : null);
+        }))));
+      if (d.error) body.appendChild(h("div", { class: "note bad", text: d.error }));
+      if (d.status === "planning") {
+        body.appendChild(h("div", { class: "card" }, h("p", null, "The planner is reading the code and writing the plan. "),
+          d.planner_proc ? h("a", { href: "#/proc/" + d.planner_proc, text: "Watch it (process #" + d.planner_proc + ")" }) : null));
+        return;
+      }
+      if (d.planner_proc) body.appendChild(h("p", { class: "muted small" }, "Planned by ", h("a", { href: "#/proc/" + d.planner_proc, text: "process #" + d.planner_proc }), r.planner && r.planner.cost_usd != null ? " ($" + r.planner.cost_usd.toFixed(4) + ")" : ""));
+      if (!d.plan) return;
+      if (d.status === "review" && !ro) return reviewForm(d);
+      if (d.plan.summary) body.appendChild(h("div", { class: "card" }, h("h3", { text: "Approach" }), h("p", { text: d.plan.summary })));
+      var byId = {}; r.steps.forEach(function (s) { byId[s.id] = s; });
+      var list = d.plan.steps.map(function (s, i) { return { n: i + 1, s: s, run: byId[s.id] }; });
+      if (byId.review) list.push({ n: "", s: { id: "review", title: "Review the result", size: "review", prompt: "" }, run: byId.review });
+      body.appendChild(h("div", { class: "card" }, h("h3", { text: "Steps" }), h("div", { class: "rowlist" }, list.map(function (x) {
+        var st = x.run ? x.run.state : "waiting";
+        return h("div", { class: "rowitem" }, h("b", { text: x.n ? x.n + "." : "" }), h("span", { class: "pill " + ({ succeeded: "ok", failed: "bad", running: "run live", cancelled: "", skipped: "warn" }[st] || ""), text: st }),
+          h("span", { class: "grow" }, h("b", { text: x.s.title }), h("span", { class: "muted small", text: "  " + (x.run ? profileLabel(x.run.profile || "") : x.s.size) })),
+          x.run && x.run.cost_usd ? h("span", { class: "muted small", text: "$" + x.run.cost_usd.toFixed(4) }) : null,
+          x.run && x.run.proc ? h("a", { href: "#/proc/" + x.run.proc, text: "process #" + x.run.proc }) : null);
+      })), d.workflow ? h("p", { class: "muted small" }, h("a", { href: "#/workflow/" + d.workflow, text: "Open it as workflow run #" + d.workflow })) : null));
+    }
+    function reviewForm(d) {
+      editing = true;
+      var plan = JSON.parse(JSON.stringify(d.plan));
+      var summary = h("textarea", { rows: "3", "aria-label": "Approach" }); summary.value = plan.summary || "";
+      var stepsBox = h("div", { class: "stack" });
+      function draw() {
+        stepsBox.textContent = "";
+        plan.steps.forEach(function (s, i) {
+          var title = h("input", { type: "text", value: s.title, "aria-label": "Title" });
+          var p = h("textarea", { rows: "5", "aria-label": "Instructions" }); p.value = s.prompt;
+          var size = h("select", { "aria-label": "Who does it" }, h("option", { value: "standard", text: "worker: " + profileLabel(d.roles.worker) }),
+            h("option", { value: "light", text: "light steps: " + profileLabel(d.roles.light_worker || d.roles.worker) })); size.value = s.size;
+          var needs = h("input", { type: "text", value: (s.needs || []).join(", "), placeholder: "ids of steps that come first", "aria-label": "After" });
+          [title, p, size, needs].forEach(function (el) { el.addEventListener("input", sync); el.addEventListener("change", sync); });
+          function sync() { s.title = title.value; s.prompt = p.value; s.size = size.value; s.needs = csv(needs.value); }
+          stepsBox.appendChild(h("div", { class: "card form step" },
+            h("div", { class: "row" }, h("b", { text: (i + 1) + "." }), h("code", { text: s.id }), h("span", { class: "grow" }),
+              h("button", { type: "button", class: "ghost", disabled: i === 0, onclick: function () { plan.steps.splice(i - 1, 0, plan.steps.splice(i, 1)[0]); draw(); } }, "Up"),
+              h("button", { type: "button", class: "ghost", disabled: i === plan.steps.length - 1, onclick: function () { plan.steps.splice(i + 1, 0, plan.steps.splice(i, 1)[0]); draw(); } }, "Down"),
+              h("button", { type: "button", class: "ghost danger", onclick: function () { plan.steps.splice(i, 1); draw(); } }, "Remove")),
+            h("label", null, "Step", title), h("label", null, "Instructions for the worker", p),
+            h("div", { class: "fields" }, h("label", null, "Who does it", size), h("label", null, "After", needs))));
+        });
+      }
+      draw();
+      body.appendChild(h("div", { class: "card form" }, h("h3", { text: "The planner's approach" }), summary));
+      body.appendChild(h("h2", { text: "Steps (" + plan.steps.length + ")" }));
+      body.appendChild(stepsBox);
+      body.appendChild(h("div", { class: "row" },
+        h("button", { type: "button", onclick: function () { plan.steps.push({ id: "step-" + (plan.steps.length + 1), title: "", prompt: "", needs: [], size: "standard" }); draw(); } }, "Add a step"),
+        h("button", { type: "button", class: "primary", onclick: function (e) {
+          plan.summary = summary.value; e.target.disabled = true;
+          api("/api/delegations/" + d.id + "/approve", { method: "POST", body: { plan: plan } })
+            .then(function () { editing = false; toast("Running the plan"); load(); })
+            .catch(function (err) { toast(err.message, true); e.target.disabled = false; });
+        } }, "Run the plan")));
+    }
+    load(); every(2500, load);
+  }
+
   function pageProcs(m) {
     m.appendChild(header("Processes", "Agents started from this console since it started. Logs stay on disk under " + S.ov.data_dir + "."));
+    var plans = h("div"); m.appendChild(plans);
     var holder = h("div"); m.appendChild(holder);
     function load() {
+      api("/api/delegations").then(function (list) {
+        plans.textContent = "";
+        if (!list.length) return;
+        plans.appendChild(h("h2", { text: "Plans" }));
+        plans.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["#", "Status", "Task", "Steps", "Roles", "Cost"].map(function (t) { return h("th", { text: t }); }))),
+          h("tbody", null, list.map(function (r) {
+            var d = r.delegation, go = function () { location.hash = "#/plan/" + d.id; };
+            return h("tr", { class: "click", tabindex: "0", onclick: go, onkeydown: function (e) { if (e.key === "Enter") go(); } },
+              h("td", { text: String(d.id) }), h("td", null, h("span", { class: "pill " + (PLAN_STATE[d.status] || ""), text: d.status })),
+              h("td", { class: "desc", text: d.task.slice(0, 120) }), h("td", { text: d.plan ? String(d.plan.steps.length) : "-" }),
+              h("td", { class: "muted", text: d.roles.planner + " > " + d.roles.worker }),
+              h("td", { text: r.total_cost_usd ? "$" + r.total_cost_usd.toFixed(4) : "-" }));
+          })))));
+        plans.appendChild(h("h2", { text: "Agents" }));
+      }).catch(function () { /* plans are optional */ });
       api("/api/procs").then(function (list) {
         holder.textContent = "";
         holder.appendChild(list.length ? procTable(list) : empty("Nothing launched yet."));
@@ -876,12 +1594,12 @@
     m.appendChild(h("div", { class: "card" },
       h("h3", { text: "Start a terminal" }),
       h("p", { class: "muted", text: "Opens in a new tab, in the directory you pick. It ends when you close the tab." }),
-      targets.length ? h("table", null, h("tbody", null, targets.map(function (t, i) {
+      targets.length ? h("div", { class: "rowlist" }, targets.map(function (t, i) {
         var at = hs.targets.length ? { h: hs.name, target: i } : { h: hs.name };
-        return h("tr", null, h("td", null, h("code", { text: t })), h("td", { class: "row" },
+        return h("div", { class: "rowitem" }, h("code", { class: "grow", text: t }), h("span", { class: "row" },
           h("a", { class: "btn", href: termUrl(Object.assign({ what: "shell" }, at)), target: "_blank", rel: "noopener" }, "Shell"),
           hasClaude ? h("a", { class: "btn", href: termUrl(Object.assign({ what: "claude" }, at)), target: "_blank", rel: "noopener" }, "Claude Code") : null));
-      }))) : empty("No harness, so no directory to start in.")));
+      })) : empty("No harness, so no directory to start in.")));
     var sessions = h("div");
     m.appendChild(h("div", { class: "card" },
       h("h3", { text: "Agent sessions" }),
@@ -890,11 +1608,11 @@
     m.appendChild(own);
     api("/api/procs").then(function (list) {
       var ok = list.filter(function (p) { return p.node === "local" && p.session; });
-      sessions.appendChild(ok.length ? h("table", null, h("tbody", null, ok.map(function (p) {
-        return h("tr", null, h("td", null, h("a", { href: "#/proc/" + p.id, text: "#" + p.id })), h("td", null, statusPill(p.status)),
-          h("td", { class: "muted", text: (p.prompt || "").slice(0, 80) }),
-          h("td", null, h("a", { class: "btn", href: termUrl({ what: "agent", proc: p.id }), target: "_blank", rel: "noopener" }, p.status === "running" ? "Fork in terminal" : "Open in terminal")));
-      }))) : empty("No local agent has reported a session yet (Claude Code does)."));
+      sessions.appendChild(ok.length ? h("div", { class: "rowlist" }, ok.map(function (p) {
+        return h("div", { class: "rowitem" }, h("a", { href: "#/proc/" + p.id, text: "#" + p.id }), statusPill(p.status),
+          h("span", { class: "muted grow clip1", text: p.prompt || "" }),
+          h("a", { class: "btn", href: termUrl({ what: "agent", proc: p.id }), target: "_blank", rel: "noopener" }, p.status === "running" ? "Fork in terminal" : "Open in terminal"));
+      })) : empty("No local agent has reported a session yet (Claude Code does)."));
     }).catch(function (e) { sessions.appendChild(empty(e.message)); });
   }
 
@@ -927,6 +1645,37 @@
       keepRow, pv.note, h("div", { class: "row" }, pv.go));
     // Waiting tool requests, and live control of an interactive agent.
     var approvals = h("div", { class: "card approvals", hidden: true, role: "region", "aria-label": "Tool requests waiting for you" });
+    var ctxCard = h("div", { class: "card context" });
+    var lf = { title: h("input", { type: "text", placeholder: "A short title", "aria-label": "Learning title" }),
+      body: h("textarea", { rows: "3", placeholder: "What should a future agent know?", "aria-label": "Learning" }) };
+    var learnForm = h("form", { class: "form", hidden: true, onsubmit: function (e) {
+      e.preventDefault();
+      api("/api/learnings", { method: "POST", body: { title: lf.title.value, body: lf.body.value, proc: Number(id) } })
+        .then(function () { toast("Added to Knowledge > Learnings"); lf.title.value = ""; lf.body.value = ""; learnForm.hidden = true; refreshOverview(); })
+        .catch(function (err) { toast(err.message, true); });
+    } }, lf.title, lf.body, h("div", null, h("button", { type: "submit" }, "Add to the inbox")));
+    function renderContext(p) {
+      ctxCard.textContent = "";
+      ctxCard.appendChild(h("h3", { text: "Context" }));
+      if (p.context_tokens) {
+        var win = p.context_window || 200000, pct = Math.min(100, Math.round(100 * p.context_tokens / win));
+        var fill = h("div", { class: "fill" + (pct >= 80 ? " hot" : "") }); fill.style.width = pct + "%";
+        ctxCard.appendChild(h("div", { class: "bar", title: p.context_tokens + " tokens in context at the last turn" }, h("span", { text: "window" }), h("div", { class: "track" }, fill),
+          h("b", { text: Math.round(p.context_tokens / 1000) + "k / " + Math.round(win / 1000) + "k" })));
+      } else {
+        ctxCard.appendChild(h("p", { class: "muted small", text: p.interactive || p.runner === "claude" ? "Context size appears after its first turn." : "This runner does not report its context size." }));
+      }
+      ctxCard.appendChild(h("p", { class: "small" }, h("b", { text: "Memory: " }), p.memory.length ? null : h("span", { class: "muted", text: "none given" })));
+      if (p.memory.length) ctxCard.appendChild(h("ul", { class: "links" }, p.memory.map(function (n) {
+        return h("li", null, h("a", { href: "#/knowledge/notes/" + n.vault + "/" + encodeURIComponent(n.id), text: n.title }));
+      })));
+      var rf = !p.reflect ? null : p.reflection === "asked" ? "Asked for learnings; waiting for its answer." : p.reflection === "received" ? "Its learnings are in Knowledge > Learnings." : "Will be asked for learnings before it finishes.";
+      if (rf) ctxCard.appendChild(h("p", { class: "small" }, h("b", { text: "Learnings: " }), rf));
+      if (!S.ov.read_only) {
+        ctxCard.appendChild(h("button", { type: "button", class: "ghost", onclick: function () { learnForm.hidden = !learnForm.hidden; if (!learnForm.hidden) lf.title.focus(); } }, "Save a learning from this agent"));
+        ctxCard.appendChild(learnForm);
+      }
+    }
     var cv = {
       mode: h("select", { "aria-label": "Permission mode" }, MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); })),
       model: h("input", { type: "text", list: "models", "aria-label": "Model", placeholder: "opus, sonnet, a full model id..." }),
@@ -986,7 +1735,7 @@
     m.appendChild(approvals);
     m.appendChild(h("div", { class: "split" },
       h("div", null, h("div", { class: "row" }, h("h2", { text: "Live feed" }), h("label", { class: "row muted" }, follow, "Follow")), feed),
-      h("div", null, controlCard, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
+      h("div", null, controlCard, ctxCard, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
         S.ov.read_only ? null : pivotCard)));
     function updatePivot(p, children) {
       var hasSession = !!p.session && p.can_resume;
@@ -1034,6 +1783,7 @@
       Promise.all([api("/api/procs/" + id), api("/api/procs")]).then(function (r) {
         renderInfo(r[0]);
         renderControl(r[0]);
+        renderContext(r[0]);
         updatePivot(r[0], r[1].filter(function (x) { return x.parent === Number(id); }).reverse());
       }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); });
     }
@@ -1080,7 +1830,24 @@
     var ov = S.ov, ro = ov.read_only;
     var importBox = h("div", { class: "row" });
     var add = h("button", { class: "primary", type: "button", disabled: ro }, "New item");
-    m.appendChild(header("Board", "Work for agents. Run an item with a profile; when the agent finishes it moves to Review (or Failed), and you move it to Done. Items from Jira, ClickUp or GitHub report every move back.", [importBox, add]));
+    var exportBtn = h("button", { type: "button", onclick: function () {
+      if (!data) return;
+      jsonFile("board.json", data.items.map(function (it) { return { title: it.title, body: it.body, labels: it.labels, column: it.column, profile: it.profile, runner: it.runner, node: it.node, target: it.target, source: it.source, result: it.result }; }));
+    } }, "Export");
+    var importFile = h("button", { type: "button", disabled: ro, onclick: function () {
+      pickFiles({ accept: ".json,application/json" }).then(function (fs) {
+        if (!fs.length) return;
+        var got; try { got = listFrom(fs[0].text); } catch (e) { toast(fs[0].name + ": " + e.message, true); return; }
+        got = got.filter(function (x) { return x && x.title; });
+        Promise.all(got.map(function (x) {
+          var b = { title: String(x.title), body: x.body || "", labels: x.labels || [] };
+          ["profile", "runner", "node", "target"].forEach(function (k) { if (x[k]) b[k] = x[k]; });
+          if (x.column && ["todo", "review", "done"].indexOf(x.column) >= 0) b.column = x.column;
+          return api("/api/board/items", { method: "POST", body: b });
+        })).then(function () { toast("Imported " + got.length + " item(s)"); load(); }).catch(function (e) { toast(e.message, true); load(); });
+      });
+    } }, "Import file");
+    m.appendChild(header("Board", "Work for agents. Run an item with a profile; when the agent finishes it moves to Review (or Failed), and you move it to Done. Items from Jira, ClickUp or GitHub report every move back.", [importBox, exportBtn, importFile, add]));
     var lanes = h("div", { class: "lanes" }), detail = h("div");
     m.appendChild(lanes); m.appendChild(detail);
     var data = null, open = null;
@@ -1100,6 +1867,22 @@
           .then(function (r) { toast("Agent process #" + r.proc + " started"); load(); }).catch(function (err) { toast(err.message, true); go.disabled = false; });
       } }, prof, node, target, go);
     }
+    function editItem(it) {
+      var f = { title: h("input", { type: "text", value: it.title, required: true }), body: h("textarea", null),
+        labels: h("input", { type: "text", value: (it.labels || []).join(", "), placeholder: "comma separated" }),
+        profile: h("select", null, h("option", { value: "", text: "none" }), (ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name }); })),
+        target: h("input", { type: "text", value: it.target || "", placeholder: "the harness's first target" }) };
+      f.body.value = it.body || ""; f.profile.value = it.profile || "";
+      detail.textContent = "";
+      detail.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+        e.preventDefault();
+        api("/api/board/items/" + it.id, { method: "PATCH", body: { title: f.title.value, body: f.body.value, labels: csv(f.labels.value), profile: f.profile.value, target: f.target.value.trim() } })
+          .then(function (x) { toast("Saved #" + it.id); load(); showDetail(x); }).catch(function (err) { toast(err.message, true); });
+      } }, h("h3", { text: "Edit #" + it.id }), h("label", null, "Title", f.title), h("label", null, "Description", f.body), h("label", null, "Labels", f.labels),
+        h("div", { class: "row" }, h("label", null, "Profile", f.profile), h("label", null, "Target", f.target)),
+        it.source ? h("p", { class: "muted small", text: "Changes stay on the board; the item in " + it.source.connector + " is not edited." }) : null,
+        h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Save"), h("button", { type: "button", onclick: function () { showDetail(it); } }, "Cancel"))));
+    }
     function showDetail(it) {
       open = it ? it.id : null; detail.textContent = "";
       if (!it) return;
@@ -1112,7 +1895,7 @@
         it.proc_id ? h("p", null, h("a", { href: "#/proc/" + it.proc_id, text: "Open agent process #" + it.proc_id })) : null,
         it.result ? [h("h3", { text: "Result" }), h("pre", { class: "view small", text: it.result })] : null,
         it.notes.length ? [h("h3", { text: "History" }), h("ul", { class: "links" }, it.notes.slice().reverse().map(function (n) { return h("li", null, h("span", { class: "muted", text: ago(n.ts) + "  " }), n.text); }))] : null,
-        ro || it.column === "running" ? null : h("div", { class: "row" }, h("button", { type: "button", class: "danger", onclick: function () {
+        ro || it.column === "running" ? null : h("div", { class: "row" }, h("button", { type: "button", onclick: function () { editItem(it); } }, "Edit"), h("button", { type: "button", class: "danger", onclick: function () {
           if (!window.confirm("Remove #" + it.id + " from the board? (Its tracker item is not touched.)")) return;
           api("/api/board/items/" + it.id, { method: "DELETE" }).then(function () { showDetail(null); load(); }).catch(function (e) { toast(e.message, true); });
         } }, "Remove from board"))));
@@ -1433,7 +2216,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Components"],
-    ["presets", "Presets"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
+    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -1446,11 +2229,21 @@
   function cfgProfileNames(c) { return (c.config.profile || []).map(function (p) { return p.name; }); }
   // Starting points for "Add profile".
   var PROFILE_TEMPLATES = [
-    { label: "Planner (Opus, plan mode)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "plan", effort: "high" } },
+    { label: "Planner (Opus, read-only)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "dontAsk", effort: "high",
+      allowed_tools: ["Read", "Grep", "Glob", "Bash(git log:*)", "Bash(git diff:*)", "Bash(ls:*)"] } },
+    { label: "Builder (Haiku)", v: { name: "builder", description: "Carries out small, well-specified steps cheaply", runner: "claude", model: "haiku", permission_mode: "acceptEdits",
+      allowed_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git diff:*)", "Bash(git status:*)"] } },
+    { label: "Opus with Haiku subagents", v: { name: "lead", description: "Opus leads; Claude Code's own subagents run on Haiku", runner: "claude", model: "opus", permission_mode: "acceptEdits", subagent_model: "haiku" } },
     { label: "Worker (Sonnet, accept edits)", v: { name: "worker", description: "Does the work the planner laid out", runner: "claude", model: "sonnet", permission_mode: "acceptEdits",
       allowed_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git diff:*)", "Bash(git status:*)"] } },
     { label: "Local model (Ollama)", v: { name: "local", description: "Claude Code against a local model served by Ollama", runner: "claude", model: "qwen3-coder",
       permission_mode: "manual", env: { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama", ANTHROPIC_API_KEY: "" } } }
+  ];
+
+  // Starting points for "Add team" (they name profiles from the templates above).
+  var TEAM_TEMPLATES = [
+    { label: "Opus plans, Haiku builds", v: { name: "opus-haiku", description: "Plan with Opus, build with Haiku, Opus reviews", planner: "planner", worker: "builder", reviewer: "planner" } },
+    { label: "Opus plans, local model builds", v: { name: "opus-local", description: "Plan with Opus, build on a self-hosted model through Ollama", planner: "planner", worker: "local", light_worker: "local", reviewer: "planner" } }
   ];
 
   var SCHEMA = {
@@ -1489,8 +2282,11 @@
       { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
-      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." }]; },
-      summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : ""); } },
+      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },
+      { k: "subagent_model", label: "Model for its subagents", list: "models", placeholder: "same as the agent", help: "Claude Code only (CLAUDE_CODE_SUBAGENT_MODEL): e.g. haiku, so an Opus agent hands its Task subagents to a cheaper model." },
+      { k: "memory", label: "Start with the memory notes most relevant to the prompt", type: "bool" },
+      { k: "reflect", label: "Before finishing, propose learnings for review (Claude Code)", type: "bool" }]; },
+      summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : "") + (p.memory ? ", memory" : "") + (p.reflect ? ", reflects" : ""); } },
     runner: { tab: "runners", noun: "runner", fields: function () { return [
       { k: "name", label: "Name", req: true, help: "How you pick it on Launch and in workflows. A built-in name (claude, codex, gemini) replaces the built-in." },
       { k: "command", label: "Program", req: true, help: "A program on PATH or a full path. It runs directly, never through a shell." },
@@ -1511,6 +2307,23 @@
       { k: "args", label: "Extra arguments for the remote indra", type: "list", help: "One per line, e.g. --config and /etc/indra.toml." },
       { k: "ssh_command", label: "ssh client", placeholder: "ssh" }]; },
       summary: function (n) { return n.ssh + "  -  " + (n.targets || []).length + " targets, " + (n.max_parallel || 2) + " agents at once"; } },
+    marketplace: { tab: "marketplaces", noun: "marketplace", fields: function () { return [
+      { k: "name", label: "Name", req: true, help: "A built-in name (indra, anthropic-skills, claude-plugins-official) replaces that built-in." },
+      { k: "source", label: "Source", req: true, placeholder: "owner/repo", help: "owner/repo on GitHub, an https git URL, or a folder on this machine." },
+      { k: "ref", label: "Branch, tag or commit", placeholder: "the default branch" },
+      { k: "description", label: "Description" }]; },
+      summary: function (x) { return x.source + (x.ref ? "@" + x.ref : ""); } },
+    team: { tab: "teams", noun: "team", fields: function (c) { var P = cfgProfileNames(c); return [
+      { k: "name", label: "Name", req: true, help: "Pick it under Launch > Plan and delegate." },
+      { k: "description", label: "Description" },
+      { k: "planner", label: "Planner", type: "select", req: true, options: opts(P), help: "Reads the code and writes the plan; give it a strong model and read-only tools (see the Planner profile template)." },
+      { k: "worker", label: "Worker", type: "select", req: true, options: opts(P), help: "Carries out each step: Haiku, a local model through Ollama, a small Codex model..." },
+      { k: "light_worker", label: "Light steps", type: "select", options: opts(P, "Same as the worker"), help: "For mechanical steps (renames, docs, boilerplate): the cheapest model." },
+      { k: "reviewer", label: "Reviewer", type: "select", options: opts(P, "No review step"), help: "Checks the result against the plan at the end and fixes small mistakes." },
+      { k: "max_steps", label: "Most steps", type: "number", placeholder: "8" },
+      { k: "auto_run", label: "Run the plan without waiting for my review", type: "bool" },
+      { k: "parallel", label: "Let independent steps run at the same time (they share the directory)", type: "bool" }]; },
+      summary: function (t) { return t.planner + " plans, " + t.worker + " builds" + (t.light_worker ? ", " + t.light_worker + " for light steps" : "") + (t.reviewer ? ", " + t.reviewer + " reviews" : "") + (t.auto_run ? "; runs without review" : ""); } },
     preset: { tab: "presets", noun: "preset", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
       { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} becomes the target path, {node} the node name." },
@@ -1668,7 +2481,7 @@
       }
       ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, secrets: secrets, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, teams: function () { list("team"); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, file: file })[tab]();
     }
 
     function general() {
@@ -1702,9 +2515,25 @@
         var first = body.querySelector("input,textarea,select"); if (first) first.focus();
       }
       var add = h("button", { class: "primary", type: "button", disabled: !c.editable, onclick: function () { edit(null, {}, "New " + d.noun); } }, "Add " + d.noun);
-      body.appendChild(h("div", { class: "row cfgbar" }, add, section === "profile" ? PROFILE_TEMPLATES.map(function (t) {
-        return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New profile: " + t.label); } }, "+ " + t.label);
-      }) : null));
+      var exportBtn = h("button", { type: "button", disabled: !items.length, onclick: function () { jsonFile(section + "s.json", items); } }, "Export");
+      var importBtn = h("button", { type: "button", disabled: !c.editable, onclick: function () {
+        pickFiles({ accept: ".json,application/json" }).then(function (fs) {
+          if (!fs.length) return;
+          var got; try { got = listFrom(fs[0].text); } catch (e) { toast(fs[0].name + ": " + e.message, true); return; }
+          got = got.filter(function (x) { return x && typeof x === "object" && x.name; });
+          if (!got.length) { toast("No " + d.noun + " with a name in " + fs[0].name, true); return; }
+          var clash = got.filter(function (x) { return names.indexOf(x.name) >= 0; }).map(function (x) { return x.name; });
+          if (clash.length && !window.confirm("Replace " + clash.length + " existing " + d.noun + "(s) with the same name (" + clash.join(", ") + ")?")) return;
+          var next = items.slice();
+          got.forEach(function (x) { var j = names.indexOf(x.name); if (j >= 0) next[j] = x; else next.push(x); });
+          saveSection(section, next, "Imported " + got.length + " " + d.noun + "(s)").catch(function (e) { toast(e.message, true); });
+        });
+      } }, "Import");
+      var templates = section === "profile" ? PROFILE_TEMPLATES : section === "team" ? TEAM_TEMPLATES : [];
+      body.appendChild(h("div", { class: "row cfgbar" }, add, templates.map(function (t) {
+        return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New " + d.noun + ": " + t.label); } }, "+ " + t.label);
+      }), exportBtn, importBtn));
+      if (section === "team") body.appendChild(h("p", { class: "muted", text: "A team plans with one profile and builds with cheaper ones: Launch > Plan and delegate. The templates name the planner, builder and local profiles; add those under Profiles first (they have templates too). Any runner can fill any role, for example a Codex planner with a local Ollama builder." }));
       if (section === "profile") body.appendChild(h("p", { class: "muted", text: "A profile is how an agent runs: plan with a strong model, do the work with the one you choose, or try it on a local model. Launch, presets, workflow tasks and fan-outs can pick one; model and mode can still change while the agent runs." }));
       body.appendChild(modelList() || h("span"));
       var grid = h("div", { class: "grid" });
@@ -1812,7 +2641,14 @@
       if (!c.editable) ta.readOnly = true;
       body.appendChild(h("p", { class: "muted", text: "The whole file. Comments and layout are yours; the forms keep them too, except inside the section they rewrite. `indra init` writes a starter with every option explained." }));
       body.appendChild(ta); body.appendChild(out);
-      body.appendChild(h("div", { class: "row" }, check, saveBtn));
+      body.appendChild(h("div", { class: "row" }, check, saveBtn,
+        h("button", { type: "button", onclick: function () { saveFile("indra.toml", ta.value, "application/toml"); } }, "Download indra.toml"),
+        h("button", { type: "button", disabled: !c.editable, onclick: function () {
+          pickFiles({ accept: ".toml,text/plain" }).then(function (fs) {
+            if (!fs.length) return;
+            ta.value = fs[0].text; show("Loaded " + fs[0].name + " into the editor. Check it, then Save to apply it.");
+          });
+        } }, "Load a file")));
     }
 
     load().catch(function (e) { body.textContent = ""; body.appendChild(empty(e.status === 404 ? "This console was started without access to a config file." : e.message)); });
@@ -1837,6 +2673,8 @@
       var b = $("running-badge"); b.hidden = !ov.running; b.textContent = String(ov.running);
       var a = $("approvals-badge"); a.hidden = !ov.approvals; a.textContent = String(ov.approvals || 0);
       a.title = ov.approvals ? ov.approvals + " tool request(s) waiting for you" : "";
+      var l = $("learnings-badge"); l.hidden = !ov.learnings; l.textContent = String(ov.learnings || 0);
+      l.title = ov.learnings ? ov.learnings + " learning(s) waiting for review" : "";
     });
   }
 
@@ -1845,7 +2683,7 @@
     S.cleanup = [];
     var parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
     var page = parts[0], arg = parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined;
-    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows" }[page] || page;
+    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows", memory: "knowledge", delegate: "launch", plan: "procs" }[page] || page;
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -1866,7 +2704,8 @@
         prompts: function () { pageDefs(m, "prompt"); },
         def: function () { pageDef(m, arg); },
         graph: function () { pageGraph(m, arg); },
-        memory: function () { pageMemory(m, arg); },
+        memory: function () { pageKnowledge(m, "graph/" + (arg || "")); },
+        knowledge: function () { pageKnowledge(m, arg); },
         runs: function () { pageRuns(m); },
         run: function () { pageRun(m, arg); },
         nodes: function () { pageNodes(m); },
@@ -1878,7 +2717,10 @@
         settings: function () { pageSettings(m, arg); },
         board: function () { pageBoard(m); },
         wfedit: function () { pageWorkflowEditor(m, arg); },
-        terminal: function () { pageTerminal(m); }
+        terminal: function () { pageTerminal(m); },
+        delegate: function () { pageDelegate(m); },
+        market: function () { pageMarket(m, arg); },
+        plan: function () { pagePlan(m, arg); }
       };
       (pages[page] || pages.overview)();
     }).catch(function (e) { if (e.message !== "unauthorized") { m.appendChild(empty(e.message)); } });

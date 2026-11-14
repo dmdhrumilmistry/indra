@@ -19,7 +19,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
 /// The top-level keys of `indra.toml`, in the order a new file gets them.
-pub const SECTIONS: [&str; 11] = [
+pub const SECTIONS: [&str; 13] = [
     "builtins",
     "server",
     "local",
@@ -31,6 +31,8 @@ pub const SECTIONS: [&str; 11] = [
     "component",
     "workflow",
     "connector",
+    "team",
+    "marketplace",
 ];
 
 /// The first lines of a config file the console creates.
@@ -90,6 +92,8 @@ fn fragment(section: &str, value: &Value) -> Result<Option<(String, Value)>> {
         "component" => typed::<Vec<crate::deck::config::ComponentCfg>>(section, value),
         "node" => typed::<Vec<NodeCfg>>(section, value),
         "workflow" => typed::<Vec<WorkflowCfg>>(section, value),
+        "team" => typed::<Vec<crate::deck::config::TeamCfg>>(section, value),
+        "marketplace" => typed::<Vec<crate::deck::config::MarketplaceCfg>>(section, value),
         _ => return Err(format!("unknown section '{}'", section)),
     }?;
     Ok(Some(r))
@@ -328,8 +332,8 @@ mod tests {
     /// Every top-level key of the config file can be edited from the console.
     #[test]
     fn every_section_is_editable() {
-        let keys = serde_json::to_value(ConfigFile::default()).unwrap();
-        let mut keys: Vec<String> = keys.as_object().unwrap().keys().cloned().collect();
+        let all = serde_json::to_value(ConfigFile::default()).unwrap();
+        let mut keys: Vec<String> = all.as_object().unwrap().keys().cloned().collect();
         keys.push("builtins".into()); // left out of the JSON while unset
         for k in keys {
             assert!(
@@ -338,6 +342,9 @@ mod tests {
                 k
             );
             set_section("", &k, &Value::Null).unwrap_or_else(|e| panic!("{}: {}", k, e));
+            // A real value too: every section must have a type to check it against.
+            let v = all.get(&k).cloned().unwrap_or(Value::Bool(true));
+            set_section("", &k, &v).unwrap_or_else(|e| panic!("{}: {}", k, e));
         }
     }
 

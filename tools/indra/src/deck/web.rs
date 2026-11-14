@@ -31,7 +31,7 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -54,6 +54,12 @@ pub struct App {
     pub board: Arc<crate::deck::board::Board>,
     /// The browser terminal (`indra serve --shell`): a shell on this machine.
     pub shell: std::sync::atomic::AtomicBool,
+    /// Learnings agents and people proposed, waiting for review.
+    pub learnings: Arc<crate::deck::knowledge::Learnings>,
+    /// Plan-and-delegate runs: a planner's plan carried out by workers.
+    pub delegations: crate::deck::delegate::Delegations,
+    /// Plugin and skill marketplaces, and what was installed from them.
+    pub market: crate::deck::market::Market,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -85,6 +91,10 @@ impl App {
         let board = Arc::new(crate::deck::board::Board::open(
             settings.data_dir.join("board.json"),
         ));
+        let learnings = Arc::new(crate::deck::knowledge::Learnings::open(
+            settings.data_dir.join("learnings.json"),
+        ));
+        let market = crate::deck::market::Market::open(&settings.data_dir);
         let shared = config::Shared::new(settings);
         let engine = Engine::new(procs.clone(), shared.clone());
         Arc::new(App {
@@ -97,6 +107,9 @@ impl App {
             config,
             board,
             shell: std::sync::atomic::AtomicBool::new(false),
+            learnings,
+            delegations: Default::default(),
+            market,
         })
     }
 
@@ -127,7 +140,7 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-
 
 // ---- errors ------------------------------------------------------------------
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl ApiError {
     pub fn message(self) -> String {
@@ -141,20 +154,23 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn bad(msg: impl Into<String>) -> ApiError {
+pub(crate) fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
-fn not_found(msg: impl Into<String>) -> ApiError {
+pub(crate) fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, msg.into())
 }
-fn forbidden(msg: impl Into<String>) -> ApiError {
+pub(crate) fn forbidden(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::FORBIDDEN, msg.into())
 }
-fn internal(msg: impl Into<String>) -> ApiError {
+pub(crate) fn internal(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg.into())
 }
+pub(crate) fn conflict(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::CONFLICT, msg.into())
+}
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 // ---- auth --------------------------------------------------------------------
 
@@ -287,7 +303,7 @@ struct HQ {
 }
 
 impl App {
-    fn harness(&self, name: Option<&str>) -> ApiResult<Harness> {
+    pub(crate) fn harness(&self, name: Option<&str>) -> ApiResult<Harness> {
         let s = self.settings();
         match name.filter(|n| !n.is_empty()) {
             Some(n) => s
@@ -355,7 +371,9 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         })).collect::<Vec<_>>(),
         "presets": s.presets,
         "profiles": s.profiles,
+        "teams": s.teams,
         "approvals": app.procs.list().iter().map(|p| p.pending.len()).sum::<usize>(),
+        "learnings": app.learnings.proposed(),
         "procs": app.procs.list(),
         "nodes": std::iter::once(LOCAL.to_string()).chain(s.nodes.iter().map(|n| n.name.clone())).collect::<Vec<_>>(),
         "workflows": s.workflows.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
@@ -436,6 +454,100 @@ async fn def_put(State(app): State<Arc<App>>, Json(r): Json<SaveReq>) -> ApiResu
     Ok(Json(
         json!({ "saved": d.path, "hash": fingerprint(&r.content) }),
     ))
+}
+
+#[derive(Deserialize)]
+struct NewDef {
+    h: Option<String>,
+    /// agent | skill | prompt
+    kind: String,
+    name: String,
+    content: String,
+}
+
+/// Where a new definition of `kind` named `name` goes: the harness's first
+/// pattern for that kind with exactly one `*`, e.g. `agents/*.md` or
+/// `skills/*/SKILL.md`.
+fn new_def_path(h: &Harness, kind: &str, name: &str) -> ApiResult<std::path::PathBuf> {
+    let globs = match kind {
+        "agent" => &h.agents,
+        "skill" => &h.skills,
+        "prompt" => &h.prompts,
+        _ => return Err(bad("kind must be agent, skill or prompt")),
+    };
+    let pat = globs
+        .iter()
+        .find(|g| g.matches('*').count() == 1 && !g.contains('?') && !g.contains('['))
+        .ok_or_else(|| {
+            bad(format!(
+                "harness '{}' has no simple pattern for {}s (like {}/*.md) to put a new one in",
+                h.name, kind, kind
+            ))
+        })?;
+    Ok(config::expand(&h.root, &pat.replacen('*', name, 1)))
+}
+
+/// Create an agent, skill or prompt file (for example an imported one).
+async fn def_create(State(app): State<Arc<App>>, Json(r): Json<NewDef>) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let name = r.name.trim();
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || name.starts_with('.')
+    {
+        return Err(bad(
+            "name: letters, digits, '-', '_' and '.', up to 64, not starting with '.'",
+        ));
+    }
+    if r.content.trim().is_empty() || r.content.len() > 1_000_000 {
+        return Err(bad("content must be between 1 byte and 1 MB"));
+    }
+    let h = &app.harness(r.h.as_deref())?;
+    let path = new_def_path(h, &r.kind, name)?;
+    if path.exists() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("{} exists already; open it to edit", path.display()),
+        ));
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| internal(e.to_string()))?;
+    }
+    crate::mem::vault::write_atomic(&path, &r.content).map_err(internal)?;
+    let found = discover::discover(h).into_iter().find(|d| d.abs == path);
+    Ok(Json(json!({
+        "id": found.map(|d| d.id),
+        "path": path.display().to_string(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct DefQ2 {
+    h: Option<String>,
+    id: String,
+}
+
+/// Delete an agent, skill or prompt file. A skill's folder goes too when
+/// nothing else is left in it.
+async fn def_delete(State(app): State<Arc<App>>, Query(q): Query<DefQ2>) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let h = &app.harness(q.h.as_deref())?;
+    let d = def_by_id(h, &q.id)?;
+    std::fs::remove_file(&d.abs)
+        .map_err(|e| internal(format!("cannot delete {}: {}", d.abs.display(), e)))?;
+    if d.kind == discover::Kind::Skill {
+        if let Some(dir) = d.abs.parent() {
+            let _ = std::fs::remove_dir(dir); // only when empty
+        }
+    }
+    Ok(Json(json!({ "deleted": d.path })))
 }
 
 async fn graph(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
@@ -533,6 +645,10 @@ struct LaunchReq {
     /// Per-launch changes on top of the profile (model, permission mode, ...).
     #[serde(default)]
     opts: nodes::AgentOpts,
+    /// Give it the relevant memory notes (default: the profile's choice).
+    memory: Option<bool>,
+    /// Ask it for learnings before it finishes (default: the profile's choice).
+    reflect: Option<bool>,
 }
 
 /// A profile and per-launch overrides, resolved into a runner and options.
@@ -613,9 +729,21 @@ async fn proc_start(
     let target = targets.get(r.target).ok_or_else(|| bad("unknown target"))?;
     let settings = app.settings();
     let (runner_name, agent) = resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
+    let profile = r.profile.clone().filter(|p| !p.is_empty());
+    let (full_prompt, memory, reflect) = crate::deck::knowledge::prepare(
+        &settings,
+        &h.name,
+        prompt,
+        profile.as_deref(),
+        r.memory,
+        r.reflect,
+    );
+    let prompt = full_prompt.as_str();
     let start = StartOpts {
         agent,
-        profile: r.profile.clone().filter(|p| !p.is_empty()),
+        profile,
+        memory,
+        reflect,
         ..StartOpts::default()
     };
     let id = if node == LOCAL {
@@ -810,6 +938,10 @@ async fn proc_pivot(
         // The same model, mode and environment as the agent it continues.
         agent: p.opts().clone(),
         profile: p.profile().map(String::from),
+        // A continuation already has the memory it was given; it reflects
+        // at the end if the original would have.
+        memory: vec![],
+        reflect: view.reflect,
     };
     let harness = p.harness_name().to_string();
     let new = if p.node_name() == LOCAL {
@@ -1541,6 +1673,156 @@ async fn config_check(
     })))
 }
 
+// ---- plan and delegate -------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DelegateReq {
+    h: Option<String>,
+    node: Option<String>,
+    #[serde(default)]
+    target: usize,
+    prompt: String,
+    /// A [[team]] by name...
+    team: Option<String>,
+    /// ...or the roles spelled out.
+    roles: Option<crate::deck::delegate::Roles>,
+    /// Override the team's choice of waiting for approval.
+    auto_run: Option<bool>,
+}
+
+async fn delegate_start(
+    State(app): State<Arc<App>>,
+    Json(r): Json<DelegateReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let prompt = check_prompt(&r.prompt)?;
+    let h = app.harness(r.h.as_deref())?;
+    let node = r.node.clone().unwrap_or_else(|| LOCAL.to_string());
+    let targets = node_targets(&app, &h, &node)?;
+    let target = targets
+        .get(r.target)
+        .ok_or_else(|| bad("unknown target"))?
+        .clone();
+    let settings = app.settings();
+    let team = r.team.clone().filter(|t| !t.is_empty());
+    let mut roles = match (&team, r.roles) {
+        (Some(t), _) => settings
+            .team(t)
+            .map(crate::deck::delegate::Roles::from)
+            .ok_or_else(|| bad(format!("no team named '{}'", t)))?,
+        (None, Some(roles)) => roles,
+        (None, None) => return Err(bad("pick a team, or a planner and a worker profile")),
+    };
+    if let Some(a) = r.auto_run {
+        roles.auto_run = a;
+    }
+    let id = app
+        .delegations
+        .start(&app, prompt, &h.name, &node, &target, team, roles)
+        .map_err(bad)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// A delegation with its agents and what each role cost.
+fn delegation_json(app: &App, d: &crate::deck::delegate::Delegation) -> Value {
+    let planner = d
+        .planner_proc
+        .and_then(|p| app.procs.get(p))
+        .map(|p| p.view());
+    let run = d.workflow.and_then(|w| app.engine.get(w));
+    let mut cost: BTreeMap<&str, f64> = BTreeMap::new();
+    if let Some(c) = planner.as_ref().and_then(|v| v.cost_usd) {
+        *cost.entry("planner").or_default() += c;
+    }
+    let mut steps: Vec<Value> = Vec::new();
+    if let Some(run) = &run {
+        for t in &run.tasks {
+            let role = if t.id == "review" {
+                "reviewer"
+            } else if d
+                .plan
+                .as_ref()
+                .and_then(|p| p.steps.iter().find(|s| s.id == t.id))
+                .map(|s| s.size == "light")
+                .unwrap_or(false)
+                && d.roles.light_worker.is_some()
+            {
+                "light_worker"
+            } else {
+                "worker"
+            };
+            let spent: f64 = t
+                .procs
+                .iter()
+                .filter_map(|p| app.procs.get(*p))
+                .filter_map(|p| p.view().cost_usd)
+                .sum();
+            *cost.entry(role).or_default() += spent;
+            steps.push(
+                json!({ "id": t.id, "role": role, "profile": t.profile, "state": t.state,
+                               "proc": t.proc_id, "cost_usd": spent, "error": t.error }),
+            );
+        }
+    }
+    let total: f64 = cost.values().sum();
+    json!({
+        "delegation": d,
+        "planner": planner,
+        "steps": steps,
+        "cost": cost, "total_cost_usd": total,
+    })
+}
+
+async fn delegations_list(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(json!(app
+        .delegations
+        .list()
+        .iter()
+        .map(|d| delegation_json(&app, d))
+        .collect::<Vec<_>>()))
+}
+
+async fn delegation_get(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    let d = app
+        .delegations
+        .get(id)
+        .ok_or_else(|| not_found("no such plan"))?;
+    Ok(Json(delegation_json(&app, &d)))
+}
+
+#[derive(Deserialize)]
+struct ApproveReq {
+    plan: Option<crate::deck::delegate::Plan>,
+}
+
+async fn delegation_approve(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<ApproveReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let run = app.delegations.approve(&app, id, r.plan).map_err(bad)?;
+    Ok(Json(json!({ "workflow": run })))
+}
+
+async fn delegation_cancel(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    app.delegations.cancel(&app, id).map_err(bad)?;
+    Ok(Json(json!({ "cancelled": true })))
+}
+
 // ---- terminal -------------------------------------------------------------------
 
 impl App {
@@ -1768,6 +2050,76 @@ pub fn router(app: Arc<App>) -> Router {
             "/vendor/LICENSE-xterm",
             get(|| async { asset("text/plain; charset=utf-8", XTERM_LICENSE) }),
         )
+        .route("/api/knowledge", get(crate::deck::knowledge::vaults))
+        .route(
+            "/api/knowledge/init",
+            post(crate::deck::knowledge::vault_init),
+        )
+        .route(
+            "/api/knowledge/notes",
+            get(crate::deck::knowledge::notes).post(crate::deck::knowledge::note_create),
+        )
+        .route(
+            "/api/knowledge/note",
+            get(crate::deck::knowledge::note_get)
+                .put(crate::deck::knowledge::note_put)
+                .delete(crate::deck::knowledge::note_delete),
+        )
+        .route(
+            "/api/knowledge/link",
+            post(crate::deck::knowledge::note_link),
+        )
+        .route(
+            "/api/knowledge/recall",
+            get(crate::deck::knowledge::recall_preview),
+        )
+        .route("/api/knowledge/health", get(crate::deck::knowledge::health))
+        .route("/api/knowledge/export", get(crate::deck::knowledge::export))
+        .route(
+            "/api/knowledge/import",
+            post(crate::deck::knowledge::import)
+                .layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
+        .route(
+            "/api/learnings/import",
+            post(crate::deck::knowledge::learnings_import)
+                .layer(axum::extract::DefaultBodyLimit::max(16 << 20)),
+        )
+        .route(
+            "/api/learnings",
+            get(crate::deck::knowledge::learnings_list)
+                .post(crate::deck::knowledge::learning_create),
+        )
+        .route(
+            "/api/learnings/{id}",
+            axum::routing::patch(crate::deck::knowledge::learning_update)
+                .delete(crate::deck::knowledge::learning_delete),
+        )
+        .route(
+            "/api/learnings/{id}/accept",
+            post(crate::deck::knowledge::learning_accept),
+        )
+        .route("/api/market", get(crate::deck::market::list))
+        .route("/api/market/refresh", post(crate::deck::market::refresh))
+        .route("/api/market/plugins", get(crate::deck::market::plugins))
+        .route("/api/market/inspect", post(crate::deck::market::inspect))
+        .route("/api/market/install", post(crate::deck::market::install))
+        .route("/api/market/native", post(crate::deck::market::native))
+        .route(
+            "/api/market/installed/{id}",
+            axum::routing::delete(crate::deck::market::uninstall),
+        )
+        .route(
+            "/api/market/installed/{id}/update",
+            post(crate::deck::market::update),
+        )
+        .route(
+            "/api/delegations",
+            get(delegations_list).post(delegate_start),
+        )
+        .route("/api/delegations/{id}", get(delegation_get))
+        .route("/api/delegations/{id}/approve", post(delegation_approve))
+        .route("/api/delegations/{id}/cancel", post(delegation_cancel))
         .route("/api/term", get(term_ws))
         .route("/api/term/check", get(term_check))
         .route("/api/overview", get(overview))
@@ -1787,7 +2139,13 @@ pub fn router(app: Arc<App>) -> Router {
             axum::routing::put(secret_put).delete(secret_delete),
         )
         .route("/api/defs", get(defs))
-        .route("/api/def", get(def_get).put(def_put))
+        .route(
+            "/api/def",
+            get(def_get)
+                .put(def_put)
+                .post(def_create)
+                .delete(def_delete),
+        )
         .route("/api/graph", get(graph))
         .route("/api/memory", get(memory))
         .route("/api/memory/graph", get(memory_graph))
@@ -1894,6 +2252,8 @@ mod tests {
             ice_servers: vec![],
             nodes: vec![],
             workflows: vec![],
+            teams: vec![],
+            marketplaces: vec![],
         };
         let app = App::new(settings, TOKEN.into(), true);
         (app, dir)
@@ -3543,6 +3903,630 @@ while True:
         assert!(seen.contains("ended"), "got: {}", seen);
         let log = std::fs::read_to_string(dir.join("data/logs/terminal.log")).unwrap();
         assert!(log.contains("\"what\":\"shell in "));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The fixture, with a memory vault (`vault/` under its root) on its harness.
+    fn fixture_with_memory(name: &str, read_only: bool) -> (Arc<App>, PathBuf) {
+        let (base, dir) = fixture(name, read_only);
+        let mut settings = (*base.settings()).clone();
+        settings.harnesses[0].memory = vec!["vault".into()];
+        (App::new(settings, TOKEN.into(), true), dir)
+    }
+
+    #[tokio::test]
+    async fn knowledge_is_managed_from_the_console() {
+        let (app, dir) = fixture_with_memory("knowledge", false);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let get = |uri: String| {
+            let app = app.clone();
+            async move {
+                let (s, _, b) = call(&app, "GET", &uri, &[AUTH], None).await;
+                (s, serde_json::from_str::<Value>(&b).unwrap_or(Value::Null))
+            }
+        };
+        let send = |method: &'static str, uri: &'static str, body: Value| {
+            let app = app.clone();
+            async move {
+                let (s, _, b) = call(&app, method, uri, &[AUTH, origin], Some(body)).await;
+                (s, serde_json::from_str::<Value>(&b).unwrap_or(Value::Null))
+            }
+        };
+        let (_, k) = get("/api/knowledge".into()).await;
+        assert_eq!(k["vaults"][0]["exists"], false);
+        assert_eq!(
+            send("POST", "/api/knowledge/init", json!({})).await.0,
+            StatusCode::OK
+        );
+        let (s, a) = send(
+            "POST",
+            "/api/knowledge/notes",
+            json!({ "title": "Session fixation", "body": "Login kept the old session id.", "type": "finding", "tags": ["auth"] }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", a);
+        let a = a["id"].as_str().unwrap().to_string();
+        let (_, b) = send(
+            "POST",
+            "/api/knowledge/notes",
+            json!({ "title": "Rotate the session", "body": "Rotate after login.", "links": ["Session fixation"] }),
+        )
+        .await;
+        let b = b["id"].as_str().unwrap().to_string();
+        send(
+            "POST",
+            "/api/knowledge/notes",
+            json!({ "title": "Lonely", "body": "x" }),
+        )
+        .await;
+        // A duplicate title is refused rather than overwritten.
+        assert_eq!(
+            send("POST", "/api/knowledge/notes", json!({ "title": "Lonely" }))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, found) = get("/api/knowledge/notes?q=fixation".into()).await;
+        assert_eq!(found["notes"][0]["id"], a.as_str());
+        assert_eq!(found["total"], 3);
+        // Edit with optimistic concurrency.
+        let (_, n) = get(format!("/api/knowledge/note?id={}", a)).await;
+        let text = n["text"]
+            .as_str()
+            .unwrap()
+            .replace("old session id", "old session id (fixed)");
+        let stale = json!({ "id": a, "text": text, "hash": "0000" });
+        assert_eq!(
+            send("PUT", "/api/knowledge/note", stale).await.0,
+            StatusCode::CONFLICT
+        );
+        let ok = json!({ "id": a, "text": text, "hash": n["hash"] });
+        assert_eq!(
+            send("PUT", "/api/knowledge/note", ok).await.0,
+            StatusCode::OK
+        );
+        let (_, n) = get(format!("/api/knowledge/note?id={}", a)).await;
+        assert!(n["body"].as_str().unwrap().contains("(fixed)"));
+        assert_eq!(n["relations"][0]["dir"], "in");
+        // Links: once, then a no-op.
+        let link = json!({ "from": b, "to": "Session fixation", "rel": "mitigates" });
+        assert_eq!(
+            send("POST", "/api/knowledge/link", link.clone()).await.1["changed"],
+            true
+        );
+        assert_eq!(
+            send("POST", "/api/knowledge/link", link).await.1["changed"],
+            false
+        );
+        let (_, h) = get("/api/knowledge/health".into()).await;
+        assert_eq!(h["orphans"][0]["title"], "Lonely");
+        // What an agent would be given for a prompt.
+        let (_, r) = get("/api/knowledge/recall?q=fix%20the%20session%20fixation".into()).await;
+        assert_eq!(r["notes"][0]["id"], a.as_str());
+        assert!(r["text"].as_str().unwrap().contains("Relevant memory"));
+        let (s, _, _) = call(
+            &app,
+            "DELETE",
+            "/api/knowledge/note?id=lonely",
+            &[AUTH, origin],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        // Learnings: proposed, edited, accepted into memory once.
+        let (_, l) = send(
+            "POST",
+            "/api/learnings",
+            json!({ "title": "Tests need Postgres", "body": "Run make db.", "tags": ["#Tests"] }),
+        )
+        .await;
+        let lid = l["id"].as_u64().unwrap();
+        let (_, ov) = get("/api/overview".into()).await;
+        assert_eq!(ov["learnings"], 1);
+        let (s, _, _) = call(
+            &app,
+            "PATCH",
+            &format!("/api/learnings/{}", lid),
+            &[AUTH, origin],
+            Some(json!({ "body": "Run make db first." })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let accept = format!("/api/learnings/{}/accept", lid);
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &accept,
+            &[AUTH, origin],
+            Some(json!({ "links": ["Rotate the session"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let (s, _, _) = call(&app, "POST", &accept, &[AUTH, origin], Some(json!({}))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (_, n) = get("/api/knowledge/note?id=tests-need-postgres".into()).await;
+        assert_eq!(n["type"], "learning");
+        assert_eq!(n["tags"][0], "tests");
+        assert!(n["body"].as_str().unwrap().contains("Run make db first."));
+        assert_eq!(n["source"], "indra console");
+        let (_, ls) = get("/api/learnings".into()).await;
+        assert_eq!(ls[0]["status"], "accepted");
+        // Read-only: nothing changes.
+        let (ro, dir2) = fixture_with_memory("knowledge-ro", true);
+        let (s, _, _) = call(
+            &ro,
+            "POST",
+            "/api/knowledge/init",
+            &[AUTH, origin],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, _, _) = call(
+            &ro,
+            "POST",
+            "/api/learnings",
+            &[AUTH, origin],
+            Some(json!({ "title": "x" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[cfg(unix)]
+    const REFLECTOR: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ["FAKE_REFLECT_LOG"], "a")
+def out(o):
+    print(json.dumps(o), flush=True)
+def recv():
+    l = sys.stdin.readline()
+    if not l:
+        sys.exit(0)
+    log.write("IN " + l); log.flush()
+    return json.loads(l)
+m = recv()
+out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {}}})
+while True:
+    m = recv()
+    if m["type"] != "user":
+        continue
+    c = m["message"]["content"]
+    if "Before you finish" in c:
+        ans = '[{"title": "Use make db", "body": "The tests need Postgres.", "tags": ["tests"]}]'
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": ans}], "usage": {"input_tokens": 10, "cache_read_input_tokens": 3000, "output_tokens": 40}}})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": ans, "modelUsage": {"m": {"contextWindow": 123456}}})
+    else:
+        out({"type": "system", "subtype": "init", "model": "m", "session_id": "s-9"})
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}], "usage": {"input_tokens": 1000, "cache_read_input_tokens": 2000, "output_tokens": 50}}, "session_id": "s-9"})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": "done", "session_id": "s-9"})
+"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agents_start_with_memory_and_propose_learnings() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, dir) = fixture_with_memory("reflect", false);
+        let vault = dir.join("vault");
+        crate::mem::vault::init(&vault).unwrap();
+        crate::mem::cli::add_note(
+            &vault,
+            &crate::mem::cli::NewNote {
+                title: "Session handling lives in auth".into(),
+                body: "Sessions are created in src/auth/session.rs.".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let script = dir.join("reflector.py");
+        let log = dir.join("reflect.log");
+        std::fs::write(&script, REFLECTOR).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("FAKE_REFLECT_LOG", &log);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "reflector".into(),
+            command: script.display().to_string(),
+            args: vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+            format: "claude-stream-json".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: Some(script.clone()),
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "reflector", "prompt": "fix the session handling", "target": 0, "memory": true, "reflect": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let mut v = json!(null);
+        for _ in 0..400 {
+            v = json!(app.procs.get(id).unwrap().view());
+            if v["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(v["status"], "exited", "{}", v);
+        assert_eq!(v["reflection"], "received");
+        assert_eq!(v["memory"][0]["title"], "Session handling lives in auth");
+        assert_eq!(v["context_tokens"], 3050);
+        assert_eq!(v["context_window"], 123456);
+        let sent = std::fs::read_to_string(&log).unwrap();
+        // The prompt comes first, then the memory; the last turn asks for learnings.
+        let p = sent.find("fix the session handling").unwrap();
+        let m = sent.find("Relevant memory").unwrap();
+        assert!(
+            p < m && sent.contains("src/auth/session.rs") && sent.contains("Before you finish")
+        );
+        crate::deck::knowledge::harvest(&app);
+        crate::deck::knowledge::harvest(&app); // once only
+        let l = app.learnings.list();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].title, "Use make db");
+        assert_eq!(l[0].origin.proc, Some(id));
+        assert_eq!(l[0].origin.session.as_deref(), Some("s-9"));
+        assert_eq!(l[0].origin.by, "agent");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn vaults_learnings_and_definitions_move_in_and_out() {
+        let (app, dir) = fixture_with_memory("transfer", false);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let send = |method: &'static str, uri: String, body: Option<Value>| {
+            let app = app.clone();
+            async move {
+                let (s, h, b) = call(&app, method, &uri, &[AUTH, origin], body).await;
+                (s, h, b)
+            }
+        };
+        // Import a small Markdown folder, previewing first.
+        let files = json!([
+            { "path": "kb/Auth.md", "text": "# Auth\n\nSee [Sessions](Sessions.md).\n" },
+            { "path": "kb/Sessions.md", "text": "# Sessions\n\nRotate on login.\n" },
+            { "path": "../escape.md", "text": "x" }
+        ]);
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files, "dry_run": true })),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "a path outside the upload is refused: {}",
+            b
+        );
+        let files = json!([
+            { "path": "kb/Auth.md", "text": "# Auth\n\nSee [Sessions](Sessions.md).\n" },
+            { "path": "kb/Sessions.md", "text": "# Sessions\n\nRotate on login.\n" }
+        ]);
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files.clone(), "dry_run": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let r: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(r["imported"].as_array().unwrap().len(), 2);
+        assert!(
+            !dir.join("vault").join(".indra").exists()
+                || std::fs::read_dir(dir.join("vault")).unwrap().count() <= 1
+        );
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files.clone(), "tags": ["kb"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        assert_eq!(
+            serde_json::from_str::<Value>(&b).unwrap()["links_converted"],
+            1
+        );
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&b).unwrap()["skipped_existing"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // Export as a bundle, then import that bundle's notes into another vault.
+        let (s, h, b) = send("GET", "/api/knowledge/export?format=bundle".into(), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(h["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("attachment"));
+        let bundle: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(bundle["format"], crate::deck::knowledge::BUNDLE);
+        assert_eq!(bundle["notes"].as_array().unwrap().len(), 2);
+        for f in ["html", "json", "mermaid", "dot"] {
+            assert_eq!(
+                send("GET", format!("/api/knowledge/export?format={}", f), None)
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        let (other, dir2) = fixture_with_memory("transfer-2", false);
+        let (s, _, b) = call(
+            &other,
+            "POST",
+            "/api/knowledge/import",
+            &[AUTH, origin],
+            Some(json!({ "files": bundle["notes"], "from": "obsidian" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let (_, _, b) = call(&other, "GET", "/api/knowledge/notes", &[AUTH], None).await;
+        assert_eq!(serde_json::from_str::<Value>(&b).unwrap()["total"], 2);
+        // Learnings in bulk.
+        let (s, _, b) = send(
+            "POST",
+            "/api/learnings/import".into(),
+            Some(json!({ "items": [{ "title": "One", "body": "a" }, { "title": "", "body": "skipped" }, { "title": "Two", "tags": ["x"] }] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(serde_json::from_str::<Value>(&b).unwrap()["added"], 2);
+        assert_eq!(app.learnings.list()[0].origin.by, "import");
+        // Agents: create, refuse a duplicate or a bad name, delete.
+        let new = json!({ "kind": "agent", "name": "gamma", "content": "---\nname: gamma\ndescription: New one\n---\nHi\n" });
+        let (s, _, b) = send("POST", "/api/def".into(), Some(new.clone())).await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(dir.join("agents/gamma.md").is_file());
+        assert_eq!(
+            send("POST", "/api/def".into(), Some(new)).await.0,
+            StatusCode::CONFLICT
+        );
+        let bad_name = json!({ "kind": "agent", "name": "../x", "content": "x" });
+        assert_eq!(
+            send("POST", "/api/def".into(), Some(bad_name)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let skill = json!({ "kind": "skill", "name": "kb-two", "content": "---\nname: kb-two\ndescription: d\n---\nbody\n" });
+        assert_eq!(
+            send("POST", "/api/def".into(), Some(skill)).await.0,
+            StatusCode::OK
+        );
+        assert!(dir.join("skills/kb-two/SKILL.md").is_file());
+        let (s, _, _) = send("DELETE", format!("/api/def?id={}", id), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(!dir.join("agents/gamma.md").exists());
+        let (s, _, _) = send("DELETE", "/api/def?id=skill:kb-two".into(), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(!dir.join("skills/kb-two").exists());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[cfg(unix)]
+    const PLANNER_AND_WORKER: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ["FAKE_DELEGATE_LOG"], "a")
+def out(o):
+    print(json.dumps(o), flush=True)
+def recv():
+    l = sys.stdin.readline()
+    if not l:
+        sys.exit(0)
+    return json.loads(l)
+m = recv()
+out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {}}})
+while True:
+    m = recv()
+    if m["type"] != "user":
+        continue
+    c = m["message"]["content"]
+    log.write(json.dumps({"model": sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else None, "prompt": c}) + "\n"); log.flush()
+    if "You are the planner" in c:
+        t = 'Plan:\n{"summary": "Two steps", "steps": [{"id": "one", "title": "First", "prompt": "do one"}, {"id": "two", "title": "Second", "prompt": "do two", "size": "light"}]}'
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": t, "total_cost_usd": 0.04})
+    else:
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": "done", "total_cost_usd": 0.001})
+"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_strong_model_plans_and_cheaper_ones_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, dir) = fixture("delegate", false);
+        let script = dir.join("agent.py");
+        let log = dir.join("delegate.log");
+        std::fs::write(&script, PLANNER_AND_WORKER).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("FAKE_DELEGATE_LOG", &log);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "fake".into(),
+            command: script.display().to_string(),
+            args: vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+            format: "claude-stream-json".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: Some(script.clone()),
+        });
+        for (name, model) in [
+            ("planner", "opus"),
+            ("builder", "haiku"),
+            ("local", "qwen3-coder"),
+        ] {
+            settings.profiles.push(config::ProfileCfg {
+                name: name.into(),
+                runner: Some("fake".into()),
+                model: Some(model.into()),
+                ..Default::default()
+            });
+        }
+        settings.teams.push(config::TeamCfg {
+            name: "t".into(),
+            planner: "planner".into(),
+            worker: "builder".into(),
+            light_worker: Some("local".into()),
+            reviewer: Some("planner".into()),
+            ..Default::default()
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/delegations",
+            &[AUTH, origin],
+            Some(json!({ "prompt": "add a flag", "team": "nope" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", b);
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/delegations",
+            &[AUTH, origin],
+            Some(json!({ "prompt": "add a flag", "team": "t", "target": 0 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let get = || {
+            let app = app.clone();
+            async move {
+                let (_, _, b) = call(
+                    &app,
+                    "GET",
+                    &format!("/api/delegations/{}", id),
+                    &[AUTH],
+                    None,
+                )
+                .await;
+                serde_json::from_str::<Value>(&b).unwrap()
+            }
+        };
+        let mut v = json!(null);
+        for _ in 0..400 {
+            crate::deck::delegate::tick(&app);
+            v = get().await;
+            if v["delegation"]["status"] != "planning" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(v["delegation"]["status"], "review", "{}", v);
+        assert_eq!(
+            v["delegation"]["plan"]["steps"].as_array().unwrap().len(),
+            2
+        );
+        // Edit before running: a person rewrites the first step.
+        let mut plan = v["delegation"]["plan"].clone();
+        plan["steps"][0]["prompt"] = json!("do one, carefully");
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            &format!("/api/delegations/{}/approve", id),
+            &[AUTH, origin],
+            Some(json!({ "plan": plan })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        for _ in 0..800 {
+            crate::deck::delegate::tick(&app);
+            v = get().await;
+            if v["delegation"]["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(v["delegation"]["status"], "done", "{}", v);
+        let roles: Vec<(String, String)> = v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["id"].as_str().unwrap().to_string(),
+                    s["role"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                ("one".into(), "worker".into()),
+                ("two".into(), "light_worker".into()),
+                ("review".into(), "reviewer".into())
+            ]
+        );
+        assert!(
+            (v["total_cost_usd"].as_f64().unwrap() - 0.043).abs() < 1e-9,
+            "{}",
+            v
+        );
+        // Who ran what: the planner on opus, the steps on cheaper models.
+        let calls: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let model_for = |needle: &str| {
+            calls
+                .iter()
+                .find(|c| c["prompt"].as_str().unwrap().contains(needle))
+                .map(|c| c["model"].as_str().unwrap_or("").to_string())
+                .unwrap()
+        };
+        assert_eq!(model_for("You are the planner"), "opus");
+        assert_eq!(model_for("do one, carefully"), "haiku");
+        assert_eq!(model_for("Your step (two)"), "qwen3-coder");
+        assert_eq!(model_for("Review their work"), "opus");
+        // Steps run in order by default.
+        let order: Vec<usize> = ["Your step (one)", "Your step (two)", "Review their work"]
+            .iter()
+            .map(|n| {
+                calls
+                    .iter()
+                    .position(|c| c["prompt"].as_str().unwrap().contains(n))
+                    .unwrap()
+            })
+            .collect();
+        assert!(order[0] < order[1] && order[1] < order[2]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

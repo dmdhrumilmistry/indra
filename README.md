@@ -263,6 +263,16 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
   (manual, acceptEdits, auto, plan, ...) and models while it runs, interrupt it, or send it a
   follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
   plan and the model you pick (or a local one through Ollama) does the work.
+- **Marketplace:** browse Claude Code plugin marketplaces (Anthropic's skills and official
+  directory built in, add any other) and install their skills, agents and commands for Claude
+  Code, Codex or a harness, or as native Claude Code plugins; update and remove them later.
+- **Plan and delegate:** a strong model (Opus, Fable, a big Codex model) plans; you review the
+  steps; cheaper or self-hosted models (Haiku, Ollama) carry each one out; a reviewer checks the
+  result. Each role is a profile, so any runner fits any role, and the cost per role is shown.
+- **Knowledge:** agents can start with the memory notes relevant to their task and finish by
+  proposing what they learned; you review proposals in an inbox and accept them into memory.
+  Vaults are searched, edited and linked in the console, and each agent shows how full its
+  context window is.
 - **Terminals:** `indra attach` follows and steers an agent from your own terminal, and
   `indra serve --shell` adds a real terminal in the browser: a shell or Claude Code in a target,
   or an agent's own session.

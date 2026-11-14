@@ -168,6 +168,39 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 - The graph is stored as ordinary `[[workflow]]` TOML (with positions), so `indra run` and the
   text editor keep working.
 
+## Plan and delegate (built)
+
+Delegation is orchestration from the outside, so roles can mix runners and providers:
+
+1. The hub starts the **planner** (a profile) with the task and a fixed request for a JSON plan:
+   a summary and steps, each with self-contained instructions, dependencies and a size
+   (`standard` or `light`).
+2. When the planner exits, the hub extracts the plan from its result (any runner: the last JSON
+   object with `steps`), normalises ids and dependencies, caps the step count, and holds it for
+   review unless the team runs it straight away.
+3. The approved plan becomes an ad-hoc workflow on the existing engine: one task per step on the
+   worker (or light worker) profile, chained in plan order unless the team allows parallel steps,
+   then a review task on the reviewer profile. Capacity, cancel, skips after a failure and
+   per-step process pages come from the engine.
+4. The delegation reports each step's state and the cost per role from the agents' results.
+
+## Knowledge and context (built)
+
+Agents share what they learn through the same memory vaults reviews use (`indra mem`):
+
+- **In:** a launch with `memory` (per launch, or from its profile, so workflow tasks and board
+  items inherit it) recalls the notes most relevant to the prompt from the harness's vaults on
+  the hub and appends them to the prompt, so local and remote agents get the same context. The
+  process records which notes it was given.
+- **Out:** with `reflect`, when an interactive agent's last turn ends, the hub sends one more
+  user message asking for learnings as JSON before it closes the agent's input. The answer is
+  parsed into proposals in an inbox (`learnings.json`), with the process, session, profile and
+  directory they came from. A person accepts a proposal into a vault (a `learning` note, merged
+  into a note of the same title) or discards it; nothing an agent says becomes memory unreviewed.
+- **Context size:** the hub tracks the tokens of the agent's last top-level turn and the model's
+  context window from Claude Code's stream, and shows them on the process page and in
+  `indra attach`.
+
 ## Terminals (built)
 
 Two terminal surfaces sit on the same API as the console, so they add views, not powers:

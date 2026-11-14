@@ -282,14 +282,16 @@ open the browser for you, `--read-only` to turn off launching and editing.
 
 | Page | What it shows |
 |---|---|
-| **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read or edit it, and see what it uses and is used by. A save is refused if the file changed since you loaded it. |
+| **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read, edit, download or delete it, and see what it uses and is used by; create a new one from a template or import `.md` files (they go where the harness's first simple pattern points, like `agents/*.md`). A save is refused if the file changed since you loaded it. |
 | **Graph map** | Pipeline stages run agents, agents spawn agents and invoke skills (a family reference such as `sh-kb-*` loads every member), and everything reads its prompts. |
-| **Memory** | The `indra mem` vaults the harness reads and writes, as graphs. |
+| **Knowledge** | The `indra mem` vaults the harness reads and writes: search, read, edit, link and delete notes, the graph, and its health (dangling links, orphans). Also the **learnings inbox**: what agents proposed they learned, to accept into memory or discard. See [Context, memory and learnings](../../docs/guides/context-and-learnings.md). |
 | **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
-| **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, and the final cost. Stop ends the whole process tree. |
-| **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. See [the board guide](../../docs/guides/board.md). |
+| **Marketplace** | Plugins, skills and agents from Claude Code plugin marketplaces (Anthropic's built in, add your own) and skill repositories: look inside, install for Claude Code, Codex or a harness, or as a Claude Code plugin; update and remove. See [Marketplace](../../docs/guides/marketplace.md). |
+| **Plan and delegate** | Under Launch: a planner profile writes a plan, you review and edit it, worker profiles (cheaper or local models) carry out each step, a reviewer checks the result; cost per role. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). |
+| **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
+| **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. Items can be edited and removed, and the board exported to or imported from JSON. See [the board guide](../../docs/guides/board.md). |
 | **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |
-| **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. See [Settings](#settings). |
+| **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. Each section exports to and imports from JSON (same names are replaced after you confirm); the File tab downloads `indra.toml` or loads one to check and save. Secret values never leave. See [Settings](#settings). |
 
 The same picture without a browser:
 
@@ -478,6 +480,18 @@ name   = "local"                     # Claude Code on a local model, through Oll
 runner = "claude"
 model  = "qwen3-coder"
 env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+
+[[profile]]
+name           = "lead"
+runner         = "claude"
+model          = "opus"
+subagent_model = "haiku"             # Claude Code's own subagents run on Haiku (CLAUDE_CODE_SUBAGENT_MODEL)
+
+[[profile]]
+name    = "learner"
+runner  = "claude"
+memory  = true                       # start with the memory notes relevant to the prompt
+reflect = true                       # propose learnings for review before finishing
 ```
 
 For runners other than Claude Code, set `model_args` (e.g. `["--model", "{model}"]`) to let a
@@ -533,6 +547,39 @@ target and runner, and the two processes link to each other. API:
 A custom runner can continue sessions with `resume_args = ["--resume", "{session}"]` (and
 `fork_args`). See [Pivoting agents](../../docs/guides/pivoting.md).
 
+### Plan and delegate
+
+A strong model plans, cheaper ones build. Pick a **team** (`[[team]]`: planner, worker,
+optional light worker and reviewer, each a profile) under **Launch > Plan and delegate**. The
+planner reads the code and answers with a plan of small, self-contained steps; you can edit,
+reorder, drop or add steps, then each runs as its own agent on the worker's model (the light
+worker's for mechanical steps), in order, and the reviewer checks the result. Any runner can
+fill any role, so Claude can plan while a local Ollama model builds. Settings has templates for
+the profiles and teams. See [Plan and delegate](../../docs/guides/plan-and-delegate.md).
+
+### Knowledge: context, memory and learnings
+
+Agents can start with what earlier agents learned, and finish by proposing what they learned:
+
+- **Memory at launch.** Tick **Give it relevant memory** on Launch (or set `memory = true` on a
+  profile): the notes from the harness's vaults that best match the prompt (graph-aware
+  `indra mem recall`, six notes, about 4,000 characters) are appended after the prompt. The
+  process page lists them.
+- **Learnings.** Tick **Ask for learnings at the end** (or `reflect = true`): before a Claude Code
+  agent's input closes, it is asked what a future agent should know. Its answer, and learnings
+  people add from a process page or `indra attach`, wait in **Knowledge > Learnings** with their
+  source (process, session, profile, directory) until you accept one into a vault, as a
+  `learning` note, or discard it.
+- **Context meter.** Each process page shows the tokens in the agent's context against its
+  model's window, so you can pivot before it fills up.
+- **Manage memory** on **Knowledge**: search, read, edit, link, create, download and delete
+  notes, see the graph, and fix dangling links and orphans. **Import** Markdown files or a whole
+  folder (an Obsidian vault, an unzipped Notion export, a cloned GitHub wiki, or an indra bundle),
+  previewing first; **export** a vault as a re-importable bundle, an offline HTML graph, JSON,
+  Mermaid or DOT. Learnings export and import as JSON.
+
+See [Context, memory and learnings](../../docs/guides/context-and-learnings.md).
+
 ### Terminals
 
 Two ways to work with agents from a terminal instead of the console's pages.
@@ -561,7 +608,9 @@ process 7 running  claude on local  in ~/code/my-api  session 5f0c...
 streams the agent's events and takes commands: plain text is a message to the agent; `/allow`,
 `/always` and `/deny [reason]` answer tool requests; `/mode`, `/model` and `/interrupt` steer it;
 `/pivot [--fresh] [--keep] <text>` redirects it and follows the new process; `/switch <id>`,
-`/agents`, `/status`, `/stop`, `/quit`. It works for agents on every node, like the console.
+`/agents`, `/status`, `/stop`, `/learn <text>` (a learning for the inbox), `/quit`. Its header
+shows the agent's context size and the memory it was given. It works for agents on every node,
+like the console.
 
 **A terminal in the browser.** Start the console with `indra serve --shell` and the
 **Terminal** page opens a real PTY in a new tab: your shell (`$SHELL`) or Claude Code's

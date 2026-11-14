@@ -66,6 +66,10 @@ indra agents               # running agents (add --all for finished ones, --json
 indra attach 7             # follow process 7; type /help for the commands
 ```
 
+A process page also shows the agent's **context**: how full its context window is, the memory
+notes it started with, and whether it will propose learnings before it finishes. See
+[Context, memory and learnings](context-and-learnings.md).
+
 In `indra attach`, plain text is a follow-up message; `/allow`, `/always` and `/deny [reason]`
 answer the oldest waiting tool request (or `/allow 2` for another); `/mode plan`, `/model opus`
 and `/interrupt` steer it; `/pivot [--fresh] [--keep] <text>` redirects it; `/stop` stops it.

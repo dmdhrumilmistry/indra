@@ -28,6 +28,10 @@ indra mem --vault "$V" export -o graph.html        # an interactive graph, offli
 Reviews read memory before hunting and record what they found afterwards (the `sh-memory`
 skill); pass `memory:off` to skip that for one review.
 
+Any agent the console starts can also be given the relevant notes up front, and propose what it
+learned for you to accept into a vault; the console's **Knowledge** page edits vaults in place.
+See [Context, memory and learnings](context-and-learnings.md).
+
 ## Import
 
 `indra mem import <folder>` copies notes into a vault and rewrites their links as wikilinks. It

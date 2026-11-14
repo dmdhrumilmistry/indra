@@ -89,6 +89,15 @@ pub struct ProcView {
     pub model: Option<String>,
     /// Tool requests waiting for an answer.
     pub pending: Vec<Approval>,
+    /// Memory notes recalled into its prompt.
+    pub memory: Vec<crate::deck::knowledge::MemRef>,
+    /// It is asked for learnings before it finishes.
+    pub reflect: bool,
+    /// none | asked | received
+    pub reflection: &'static str,
+    /// Tokens in its context at the last turn, and its model's window.
+    pub context_tokens: Option<u64>,
+    pub context_window: Option<u64>,
 }
 
 /// A tool request the agent is waiting on.
@@ -129,6 +138,12 @@ struct State {
     model: Option<String>,
     pending: Vec<Approval>,
     next_request: u64,
+    /// 0: not asked for learnings, 1: asked, 2: answered.
+    reflect_state: u8,
+    last_result: String,
+    reflection: Option<String>,
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
 }
 
 impl State {
@@ -152,6 +167,11 @@ impl State {
             model: agent.model.clone(),
             pending: Vec::new(),
             next_request: 0,
+            reflect_state: 0,
+            last_result: String::new(),
+            reflection: None,
+            context_tokens: None,
+            context_window: None,
         }
     }
 }
@@ -178,6 +198,10 @@ pub struct Proc {
     redact: Vec<(String, String)>,
     /// Lines for an interactive agent's stdin (local) or the node (remote).
     ctl: Mutex<Option<mpsc::UnboundedSender<Ctl>>>,
+    /// Memory recalled into its prompt.
+    memory: Vec<crate::deck::knowledge::MemRef>,
+    /// Ask it for learnings before closing its input.
+    reflect: bool,
 }
 
 fn now() -> u64 {
@@ -233,7 +257,8 @@ impl Proc {
             node: self.node.clone(),
             runner: self.runner.clone(),
             harness: self.harness.clone(),
-            prompt: self.prompt.clone(),
+            // What was asked; the memory recalled into it is listed apart.
+            prompt: crate::deck::knowledge::without_memory(&self.prompt).to_string(),
             cwd: self.cwd.clone(),
             command: self.command.clone(),
             host: st.host.clone(),
@@ -262,7 +287,21 @@ impl Proc {
             mode: st.mode.clone(),
             model: st.model.clone(),
             pending: st.pending.clone(),
+            memory: self.memory.clone(),
+            reflect: self.reflect,
+            reflection: match st.reflect_state {
+                0 => "none",
+                1 => "asked",
+                _ => "received",
+            },
+            context_tokens: st.context_tokens,
+            context_window: st.context_window,
         }
+    }
+
+    /// What it answered when asked for learnings; given out once.
+    pub fn take_reflection(&self) -> Option<String> {
+        self.state.lock().unwrap().reflection.take()
     }
 
     pub fn opts(&self) -> &AgentOpts {
@@ -384,18 +423,51 @@ impl Proc {
     /// A turn ended: close the agent's input once nothing more is queued,
     /// so it finishes and exits as a one-shot agent would.
     fn turn_done(&self) {
-        let close = {
+        enum Next {
+            Wait,
+            Reflect,
+            Close,
+        }
+        let next = {
             let mut st = self.state.lock().unwrap();
             st.turns = st.turns.saturating_sub(1);
-            let close = st.interactive && st.open && st.turns == 0;
-            if close {
+            if st.reflect_state == 1 && st.turns == 0 {
+                st.reflect_state = 2;
+                st.reflection = Some(std::mem::take(&mut st.last_result));
+            }
+            if !(st.interactive && st.open && st.turns == 0) {
+                Next::Wait
+            } else if self.reflect && st.reflect_state == 0 && st.status == "running" {
+                st.reflect_state = 1;
+                st.turns += 1;
+                Next::Reflect
+            } else {
                 st.open = false;
                 st.pending.clear();
+                Next::Close
             }
-            close
         };
-        if close {
-            let _ = self.send(Ctl::Close);
+        match next {
+            Next::Wait => {}
+            Next::Reflect => {
+                if self
+                    .send(Ctl::Line(crate::deck::nodes::user_message(
+                        crate::deck::knowledge::REFLECT_PROMPT,
+                    )))
+                    .is_ok()
+                {
+                    self.push(
+                        "system",
+                        "asked for learnings before finishing".into(),
+                        None,
+                    );
+                } else {
+                    self.state.lock().unwrap().reflect_state = 2;
+                }
+            }
+            Next::Close => {
+                let _ = self.send(Ctl::Close);
+            }
         }
     }
 
@@ -469,6 +541,11 @@ impl Proc {
             "exit" => {}
             _ => {}
         }
+    }
+
+    /// A note from indra in its event stream.
+    pub fn note_system(&self, text: String) {
+        self.push("system", text, None);
     }
 
     /// What the agent concluded: its final result, else its last messages.
@@ -568,6 +645,18 @@ impl Proc {
                 );
             }
             "assistant" => {
+                if parent.is_none() {
+                    if let Some(u) = v.pointer("/message/usage") {
+                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        let total = n("input_tokens")
+                            + n("cache_read_input_tokens")
+                            + n("cache_creation_input_tokens")
+                            + n("output_tokens");
+                        if total > 0 {
+                            self.state.lock().unwrap().context_tokens = Some(total);
+                        }
+                    }
+                }
                 let content = v
                     .pointer("/message/content")
                     .and_then(Value::as_array)
@@ -623,6 +712,22 @@ impl Proc {
                     text.push_str(&format!(", ${:.4}", c));
                 }
                 let r = s(&v, "result");
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.last_result = r.clone();
+                    // Claude Code reports each model's context window.
+                    if let Some(w) = v
+                        .get("modelUsage")
+                        .and_then(Value::as_object)
+                        .and_then(|m| {
+                            m.values()
+                                .filter_map(|x| x.get("contextWindow").and_then(Value::as_u64))
+                                .max()
+                        })
+                    {
+                        st.context_window = Some(w);
+                    }
+                }
                 if !r.is_empty() {
                     text.push_str("\n\n");
                     text.push_str(&r);
@@ -798,6 +903,10 @@ pub struct StartOpts {
     pub agent: AgentOpts,
     /// The profile it came from, for secret scopes.
     pub profile: Option<String>,
+    /// Memory notes recalled into its prompt (for its page).
+    pub memory: Vec<crate::deck::knowledge::MemRef>,
+    /// Ask it for learnings before it finishes (Claude Code runners).
+    pub reflect: bool,
 }
 
 /// Where and what to launch.
@@ -1153,6 +1262,8 @@ impl Procs {
                 profile: opts.profile.clone(),
                 redact: redact.clone(),
                 ctl: Mutex::new(Some(ctl_tx)),
+                memory: opts.memory.clone(),
+                reflect: opts.reflect,
             });
             let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
             self.vault
@@ -1220,6 +1331,8 @@ impl Procs {
             profile: opts.profile.clone(),
             redact: redact.clone(),
             ctl: Mutex::new((plan.job.is_some() || interactive).then(|| ctl_tx.clone())),
+            memory: opts.memory.clone(),
+            reflect: opts.reflect,
         });
         let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
         self.vault
@@ -1625,6 +1738,11 @@ mod tests {
                 model: None,
                 pending: Vec::new(),
                 next_request: 0,
+                reflect_state: 0,
+                last_result: String::new(),
+                reflection: None,
+                context_tokens: None,
+                context_window: None,
             }),
             tx,
             stop: Mutex::new(None),
@@ -1632,6 +1750,8 @@ mod tests {
             profile: None,
             redact: Vec::new(),
             ctl: Mutex::new(None),
+            memory: vec![],
+            reflect: false,
         };
         for l in [
             r#"{"type":"system","subtype":"init","model":"m1","tools":[],"session_id":"4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"}"#,
