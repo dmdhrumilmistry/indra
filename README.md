@@ -270,7 +270,8 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
   follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
   plan and the model you pick (or a local one through Ollama) does the work. A profile can also
   keep Claude on Anthropic and hand just its subagents to a local model, through indra's model
-  router, which keeps your credentials off the model server.
+  router, which keeps your credentials off the model server. `indra claude -m qwen3-coder` runs
+  Claude Code itself on a local model, in your terminal or the console's.
 - **Marketplace:** browse Claude Code plugin marketplaces (Anthropic's skills and official
   directory built in, add any other) and install their skills, agents and commands for Claude
   Code, Codex or a harness, or as native Claude Code plugins; update and remove them later.
@@ -335,7 +336,8 @@ the board, graph workflows). **Guides:** [handling agent processes](docs/guides/
 capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md),
 [local models with Ollama](docs/guides/local-models.md),
 [reviewing pull requests from the console](docs/guides/review-loop.md), and
-[knowledge base and integrations](docs/guides/knowledge-base.md).
+[knowledge base and integrations](docs/guides/knowledge-base.md). What is still being finished is
+tracked in [the checklist](docs/checklist.md).
 
 <p align="center"><img src="assets/screenshots/pivot.png" alt="Pivoting an agent: continue its session with a new instruction" width="720"></p>
 

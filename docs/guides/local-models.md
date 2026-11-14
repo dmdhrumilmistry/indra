@@ -12,6 +12,37 @@ Claude Code works with all three (Ollama 0.14 and later serves the Anthropic Mes
 speaks). Codex works with the first (`--oss`). Other runners can be pointed at Ollama with
 their own options in a profile's `env`.
 
+## Quick start: Claude Code on a local model
+
+```bash
+OLLAMA_CONTEXT_LENGTH=65536 ollama serve     # Claude Code needs a big context window
+indra claude -m qwen3-coder --pull           # pull it if needed, check it, start Claude Code
+```
+
+`indra claude` is Claude Code itself, interactive, in your terminal, with every model call
+going to Ollama. Before it starts, it checks that:
+
+- the server answers and is Ollama 0.14 or later;
+- the model is pulled (`--pull` pulls it, with progress);
+- the model supports tool calling (Claude Code works through tools);
+- its context window is big enough: at least 32k, ideally 64k.
+
+What else it takes:
+
+| Flag | |
+|---|---|
+| `-m MODEL` | the Ollama model to run |
+| `--ollama URL` | another machine's server (default `http://localhost:11434`) |
+| `--subagents MODEL` | keep Claude on Anthropic, run only its subagents on this local model |
+| `--profile NAME` | start from a profile in `indra.toml` (model, provider, mode, tools, env and secrets) |
+| `--context TOKENS` | the window to tell Claude Code (default: what the server runs the model with) |
+| `--pull`, `--no-check`, `--dry-run` | pull first; skip the checks; print what would run |
+| `-- ARGS` | Claude Code's own flags, e.g. `-- --resume` or `-- -p "fix the tests"` |
+
+The same Claude Code, started with an Ollama profile, is also on the console's **Terminal** page
+(`indra serve --shell`): pick the profile, then **Claude Code**. And an agent that ran on Ollama
+reopens there on Ollama, not on Anthropic.
+
 ## The whole agent on Ollama
 
 ```toml
@@ -59,10 +90,26 @@ show how many requests went each way.
 
 ## Picking a model
 
-Model fields in the console suggest the models your Ollama server has (from its
-`/api/tags`), next to Claude's aliases. On **Launch**, **Runs on** overrides the profile for one
-launch: the whole agent on Ollama, or Anthropic with its subagents on Ollama (and the subagents'
-model).
+**Tools > Local models (Ollama)** lists the server's models with their size, tool calling and
+context window, marks which ones can run Claude Code, and pulls new ones with progress. Model
+fields everywhere suggest the server's models next to Claude's aliases.
+
+On **Launch**, **Runs on** overrides the profile for one launch: the whole agent on Ollama, or
+Anthropic with its subagents on Ollama (and the subagents' model). Before you launch, Launch
+checks the model and warns if it is not pulled, cannot call tools, or has too small a window.
+
+## The context window
+
+Claude Code's system prompt and tool definitions alone take about 20k tokens. Two settings
+matter:
+
+- **Ollama's window** for the model: the server's default is small. Start it with
+  `OLLAMA_CONTEXT_LENGTH=65536` (or set the context length in the Ollama app). The checks warn
+  when a loaded model runs with less than 32k.
+- **What Claude Code thinks the window is.** It does not know local models, assumes a very large
+  window and would never compact the conversation. indra sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+  for it: the window the server runs the model with when it can see it, else 65536. Set it in a
+  profile's `env` (or `indra claude --context`) to match your server.
 
 ## In workflows and teams
 
@@ -87,3 +134,5 @@ each step as well.
   or Sonnet. Hand it narrow, well-specified steps (the worker role) and keep the planner and
   reviewer on a strong model.
 - Nodes need an indra built from the same version as the hub to understand these fields.
+- `GET /api/ollama` (models and pulls), `GET /api/ollama/check?model=` and
+  `POST /api/ollama/pull {model}` are the console's API for this.

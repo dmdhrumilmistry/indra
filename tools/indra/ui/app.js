@@ -44,7 +44,7 @@
     var d = new Date(ts * 1000);
     return d.toTimeString().slice(0, 8);
   }
-  function bytes(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
+  function bytes(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(1) + " GB"; }
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
   function toast(msg, bad) {
     Array.prototype.forEach.call(document.querySelectorAll(".toast"), function (x) { x.remove(); });
@@ -982,12 +982,55 @@
     return box;
   }
 
+  // Local models: the Ollama server, its models (can each run Claude Code?), pulls.
+  function ollamaCard() {
+    var ro = S.ov.read_only;
+    var url = h("input", { type: "text", placeholder: "http://localhost:11434", "aria-label": "Ollama server" });
+    var out = h("div"), timer = null;
+    var model = h("input", { type: "text", placeholder: "a model to pull, e.g. qwen3-coder", "aria-label": "Model to pull" });
+    function load() {
+      clearTimeout(timer);
+      api("/api/ollama" + hq(url.value.trim() ? { url: url.value.trim() } : {})).then(function (o) {
+        out.textContent = "";
+        if (!url.value) url.placeholder = o.url;
+        out.appendChild(o.reachable ? h("p", { class: "muted small" }, "Ollama at ", h("code", { text: o.url }), ": " + o.models.length + " model(s). Claude Code needs tool calling and a window of " + Math.round(o.min_context / 1024) + "k or more; run the server with OLLAMA_CONTEXT_LENGTH=65536.")
+          : h("div", { class: "note warn", text: "Ollama is not answering at " + o.url + ": " + (o.error || "") + ". Start it with `ollama serve`." }));
+        if (o.models.length) out.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["Model", "Size", "Parameters", "Tool calling", "Max context", "Claude Code"].map(function (x) { return h("th", { text: x }); }))),
+          h("tbody", null, o.models.map(function (x) {
+            var fit = x.tools && (!x.max_context || x.max_context >= o.min_context);
+            return h("tr", null, h("td", null, h("code", { text: x.name })), h("td", { class: "muted", text: x.size ? bytes(x.size) : "" }), h("td", { text: x.parameters || "" }),
+              h("td", { text: x.tools == null ? "?" : x.tools ? "yes" : "no" }), h("td", { text: x.max_context ? Math.round(x.max_context / 1024) + "k" : "?" }),
+              h("td", null, h("span", { class: "pill" + (fit ? "" : " warn"), text: fit ? "suitable" : x.tools === false ? "no tools" : "small window" })));
+          })))));
+        var pulls = o.pulls || {}, running = false;
+        Object.keys(pulls).forEach(function (k) {
+          var p = pulls[k]; if (!p.done) running = true;
+          var pct = p.total ? " " + Math.round(100 * (p.completed || 0) / p.total) + "%" : "";
+          out.appendChild(h("div", { class: "note" + (p.status === "failed" ? " warn" : p.done ? " ok" : "") }, h("b", { text: k }), ": " + (p.error || p.status) + pct));
+        });
+        if (running) timer = setTimeout(load, 1000);
+      }).catch(function (e) { out.textContent = ""; out.appendChild(empty(e.message)); });
+    }
+    S.cleanup.push(function () { clearTimeout(timer); });
+    load();
+    return h("div", { class: "card ollama" }, h("h3", { text: "Local models (Ollama)" }),
+      h("p", { class: "muted small" }, "Run Claude Code on one: a profile with Runs on: Ollama, Launch's Runs on, or ", h("code", { text: "indra claude -m MODEL" }), " in your own terminal."),
+      h("div", { class: "row" }, url, h("button", { type: "button", onclick: load }, "Refresh")),
+      out,
+      ro ? null : h("form", { class: "row", onsubmit: function (e) {
+        e.preventDefault(); if (!model.value.trim()) return;
+        api("/api/ollama/pull", { method: "POST", body: { model: model.value.trim(), url: url.value.trim() || null } }).then(function () { toast("Pulling " + model.value.trim()); load(); }).catch(function (err) { toast(err.message, true); });
+      } }, model, h("button", { type: "submit" }, "Pull")));
+  }
+
   // ---- tools --------------------------------------------------------------------------
   // The review tooling and repository chores, the same as their CLI commands.
   function pageTools(m) {
     var ro = S.ov.read_only;
     m.appendChild(header("Tools", "The review cache, local metrics, the skills and the site: the same operations as indra review, indra skills and indra dev, from here."));
-    var body = h("div", { class: "stack toolspage" }); m.appendChild(body);
+    var body = h("div", { class: "stack toolspage" });
+    m.appendChild(ollamaCard()); m.appendChild(body);
     function load() {
       body.textContent = "";
       api("/api/tools").then(function (t) {
@@ -1192,6 +1235,27 @@
         note.textContent = why; note.hidden = !why;
         subLabel.hidden = where.value !== "subagents";
         go.disabled = !prompt.value.trim() || !runner.value || !n.targets.length;
+        preflight();
+      }
+      // Before launching on Ollama: is the model there, and will it work?
+      var pfNote = h("div", { class: "note warn", hidden: true }), pfKey = "", pfTimer = null;
+      function preflight() {
+        if (!pfNote) return;
+        var pr = prof() || {};
+        var on = where.value || (pr.provider === "ollama" ? "ollama" : pr.subagent_provider === "ollama" ? "subagents" : "");
+        var m = on === "ollama" ? (model.value.trim() || pr.model) : on === "subagents" ? (subModel.value.trim() || pr.subagent_model) : "";
+        var key = on && m ? m + "@" + (pr.ollama_url || "") : "";
+        if (key === pfKey) return;
+        pfKey = key; clearTimeout(pfTimer);
+        if (!key || cur().kind !== "local") { pfNote.hidden = true; return; }
+        pfTimer = setTimeout(function () {
+          api("/api/ollama/check" + hq(Object.assign({ model: m }, pr.ollama_url ? { url: pr.ollama_url } : {}))).then(function (c) {
+            if (key !== pfKey) return;
+            var msgs = (c.ok ? [] : [c.error]).concat(c.warnings || []);
+            pfNote.textContent = msgs.join(" ");
+            pfNote.hidden = !msgs.length;
+          }).catch(function () { pfNote.hidden = true; });
+        }, 400);
       }
       var note = h("div", { class: "note warn", hidden: true });
       preset.addEventListener("change", function () {
@@ -1218,6 +1282,7 @@
         h("div", { class: "fields" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", { class: "wide" }, "Target", target)),
         h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
         h("div", { class: "fields" }, h("label", null, "Runs on", where), subLabel),
+        pfNote,
         modelList(),
         h("div", { class: "card knowctl" },
           h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
@@ -1850,14 +1915,23 @@
     var hs = harness();
     var targets = hs ? (hs.targets.length ? hs.targets : [hs.root]) : [];
     var hasClaude = (S.ov.runners || []).some(function (r) { return r.format === "claude-stream-json" && r.available; });
+    var claudeProfiles = (S.ov.profiles || []).filter(function (p) { return !p.runner || p.runner === "claude"; });
+    var prof = h("select", { "aria-label": "Claude Code profile" }, h("option", { value: "", text: "no profile (your own Claude Code setup)" }),
+      claudeProfiles.map(function (p) { return h("option", { value: p.name, text: p.name + (p.provider === "ollama" ? "  (on Ollama: " + (p.model || "?") + ")" : p.subagent_provider === "ollama" ? "  (subagents on Ollama)" : "") }); }));
+    var claudeLinks = [];
+    function claudeHref(at) { return termUrl(Object.assign({ what: "claude" }, at, prof.value ? { profile: prof.value } : {})); }
+    prof.addEventListener("change", function () { claudeLinks.forEach(function (x) { x.a.href = claudeHref(x.at); }); });
     m.appendChild(h("div", { class: "card" },
       h("h3", { text: "Start a terminal" }),
       h("p", { class: "muted", text: "Opens in a new tab, in the directory you pick. It ends when you close the tab." }),
+      hasClaude && claudeProfiles.length ? h("div", { class: "row termprof" }, h("span", { class: "muted small", text: "Claude Code with" }), prof,
+        h("span", { class: "muted small", text: "A profile on Ollama runs Claude Code on that local model; see the local models guide." })) : null,
       targets.length ? h("div", { class: "rowlist" }, targets.map(function (t, i) {
         var at = hs.targets.length ? { h: hs.name, target: i } : { h: hs.name };
+        var ca = hasClaude ? h("a", { class: "btn", href: claudeHref(at), target: "_blank", rel: "noopener" }, "Claude Code") : null;
+        if (ca) claudeLinks.push({ a: ca, at: at });
         return h("div", { class: "rowitem" }, h("code", { class: "grow", text: t }), h("span", { class: "row" },
-          h("a", { class: "btn", href: termUrl(Object.assign({ what: "shell" }, at)), target: "_blank", rel: "noopener" }, "Shell"),
-          hasClaude ? h("a", { class: "btn", href: termUrl(Object.assign({ what: "claude" }, at)), target: "_blank", rel: "noopener" }, "Claude Code") : null));
+          h("a", { class: "btn", href: termUrl(Object.assign({ what: "shell" }, at)), target: "_blank", rel: "noopener" }, "Shell"), ca));
       })) : empty("No harness, so no directory to start in.")));
     var sessions = h("div");
     m.appendChild(h("div", { class: "card" },

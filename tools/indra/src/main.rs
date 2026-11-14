@@ -66,6 +66,8 @@ enum Cmd {
     Agents(deck::cli::AgentsArgs),
     /// Follow an agent of a running console and steer it from this terminal
     Attach(deck::cli::AttachArgs),
+    /// Claude Code in this terminal on a model served by Ollama (or only its subagents there)
+    Claude(deck::claude::ClaudeArgs),
     /// Publish plans for Jira, Confluence, GitHub Issues or Notion from a review run
     Publish(publish::PublishArgs),
     /// PR review support: the review cache, local metrics, posting to GitHub
@@ -108,6 +110,7 @@ fn main() -> ExitCode {
         Cmd::Secret(a) => deck::cli::run_secret(a),
         Cmd::Agents(a) => deck::cli::run_agents(a),
         Cmd::Attach(a) => deck::cli::run_attach(a),
+        Cmd::Claude(a) => deck::claude::run(a),
         Cmd::Publish(a) => publish::run(a),
         Cmd::Review(a) => review::run(a),
         Cmd::Skills(a) => skills::run(a),

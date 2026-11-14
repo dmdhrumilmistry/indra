@@ -29,6 +29,8 @@ pub struct Spec {
     pub cwd: PathBuf,
     /// For the log and the tab title.
     pub label: String,
+    /// Extra environment (a profile's, or what puts Claude Code on Ollama).
+    pub env: Vec<(String, String)>,
 }
 
 /// The user's shell.
@@ -89,6 +91,9 @@ pub async fn bridge(spec: Spec, socket: axum::extract::ws::WebSocket) {
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;

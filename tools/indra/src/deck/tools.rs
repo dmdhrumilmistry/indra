@@ -396,17 +396,12 @@ pub async fn dashes(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
 #[derive(Deserialize)]
 pub struct OllamaQ {
     url: Option<String>,
+    model: Option<String>,
 }
 
-/// The models an Ollama server has (for the model pickers), and what the
-/// model router has sent where. The server is the one asked for, else the
-/// first profile's, else this machine's.
-pub async fn ollama(
-    State(app): State<Arc<App>>,
-    Query(q): Query<OllamaQ>,
-) -> ApiResult<Json<Value>> {
-    let url = q
-        .url
+/// The Ollama server asked for, else the first profile's, else this machine's.
+fn ollama_url(app: &App, asked: Option<String>) -> ApiResult<String> {
+    let url = asked
         .filter(|u| !u.trim().is_empty())
         .or_else(|| {
             app.settings()
@@ -416,14 +411,74 @@ pub async fn ollama(
         })
         .unwrap_or_else(|| crate::deck::nodes::OLLAMA_URL.to_string());
     crate::deck::router::check_url(&url).map_err(bad)?;
-    let (models, error) = match crate::deck::router::ollama_models(&url).await {
+    Ok(url.trim_end_matches('/').to_string())
+}
+
+/// The Ollama server: its models (with tool support and context size, for
+/// the model pickers and the Tools page), pulls in progress, and what the
+/// model router has sent where.
+pub async fn ollama(
+    State(app): State<Arc<App>>,
+    Query(q): Query<OllamaQ>,
+) -> ApiResult<Json<Value>> {
+    let url = ollama_url(&app, q.url)?;
+    let (mut models, error) = match crate::deck::router::ollama_models(&url).await {
         Ok(m) => (m, None),
         Err(e) => (vec![], Some(e)),
     };
+    // Each model's capabilities and window, a few at a time.
+    let details = futures_util::future::join_all(models.iter().take(40).map(|m| {
+        let name = m["name"].as_str().unwrap_or("").to_string();
+        let url = url.clone();
+        async move { crate::deck::ollama::details(&url, &name).await }
+    }))
+    .await;
+    for (m, d) in models.iter_mut().zip(details) {
+        if let (Some(o), Ok((caps, ctx))) = (m.as_object_mut(), d) {
+            o.insert("tools".into(), json!(caps.iter().any(|c| c == "tools")));
+            o.insert("capabilities".into(), json!(caps));
+            o.insert("max_context".into(), json!(ctx));
+        }
+    }
     Ok(Json(json!({
         "url": url, "reachable": error.is_none(), "error": error, "models": models,
+        "pulls": crate::deck::ollama::pull_status(),
         "router": crate::deck::router::stats(),
+        "min_context": crate::deck::ollama::MIN_CONTEXT,
     })))
+}
+
+/// Whether a model will work for Claude Code (Launch asks before starting).
+pub async fn ollama_check(
+    State(app): State<Arc<App>>,
+    Query(q): Query<OllamaQ>,
+) -> ApiResult<Json<Value>> {
+    let url = ollama_url(&app, q.url)?;
+    let model = q
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .ok_or_else(|| bad("which model?"))?;
+    if !crate::deck::ollama::valid_model(&model) {
+        return Err(bad("not a model name"));
+    }
+    Ok(Json(crate::deck::ollama::check(&url, &model).await))
+}
+
+#[derive(Deserialize)]
+pub struct PullReq {
+    url: Option<String>,
+    model: String,
+}
+
+/// Pull a model onto the server; progress shows in GET /api/ollama.
+pub async fn ollama_pull(
+    State(app): State<Arc<App>>,
+    Json(r): Json<PullReq>,
+) -> ApiResult<Json<Value>> {
+    writable(&app)?;
+    let url = ollama_url(&app, r.url)?;
+    crate::deck::ollama::start_pull(url, r.model.trim().to_string()).map_err(bad)?;
+    Ok(Json(json!({ "started": true })))
 }
 
 // ---- triage and comparison ----------------------------------------------------------

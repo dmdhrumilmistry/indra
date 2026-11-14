@@ -1855,6 +1855,62 @@ struct TermQ {
     h: Option<String>,
     target: Option<usize>,
     proc: Option<u64>,
+    /// For `claude`: a profile to start it with (an Ollama one included).
+    profile: Option<String>,
+}
+
+/// Claude Code's arguments, its environment, and where it runs (for the label).
+type TermClaude = (Vec<String>, Vec<(String, String)>, Option<String>);
+
+/// Claude Code's flags and environment for a profile's options in a
+/// terminal: the same provider setup and secrets an agent launch gets.
+/// `flags` adds the model, mode and tool rules (a new session; a resumed one
+/// keeps its own).
+fn claude_term_env(
+    app: &App,
+    r: &config::Runner,
+    o: &nodes::AgentOpts,
+    profile: Option<&str>,
+    flags: bool,
+) -> ApiResult<TermClaude> {
+    o.validate().map_err(bad)?;
+    let mut args: Vec<String> = Vec::new();
+    if flags {
+        let mut flag = |f: &str, v: &Option<String>| {
+            if let Some(v) = v {
+                args.push(f.into());
+                args.push(v.clone());
+            }
+        };
+        flag("--model", &o.model);
+        flag("--permission-mode", &o.permission_mode);
+        flag("--effort", &o.effort);
+        if !o.allowed_tools.is_empty() {
+            args.push("--allowed-tools".into());
+            args.push(o.allowed_tools.join(","));
+        }
+        if !o.disallowed_tools.is_empty() {
+            args.push("--disallowed-tools".into());
+            args.push(o.disallowed_tools.join(","));
+        }
+    }
+    let env = nodes::provider_env(r, true, o, &mut args).map_err(bad)?;
+    let (env, _) = app
+        .procs
+        .vault()
+        .resolve(&env, profile, LOCAL)
+        .map_err(bad)?;
+    let on = if o.provider.as_deref() == Some("ollama") {
+        Some(format!(
+            "on {} (Ollama)",
+            o.model.clone().unwrap_or_default()
+        ))
+    } else if o.subagent_provider.as_deref() == Some("ollama") {
+        Some("with its subagents on Ollama".to_string())
+    } else {
+        None
+    };
+    Ok((args, env.into_iter().collect(), on))
 }
 
 /// Browsers send cookies with a WebSocket from any page and do not apply
@@ -1907,16 +1963,33 @@ fn term_spec(app: &App, q: &TermQ) -> ApiResult<crate::deck::term::Spec> {
                 args: vec![],
                 label: format!("shell in {}", cwd.display()),
                 cwd,
+                env: vec![],
             })
         }
         "claude" => {
             let cwd = dir()?;
-            let r = claude(None)?;
+            let profile = q.profile.as_deref().filter(|p| !p.is_empty());
+            let (r, opts) = match profile {
+                Some(name) => {
+                    let p = s
+                        .profile(name)
+                        .ok_or_else(|| bad(format!("no profile named '{}'", name)))?;
+                    (claude(p.runner.as_deref())?, p.opts())
+                }
+                None => (claude(None)?, nodes::AgentOpts::default()),
+            };
+            let (args, env, on) = claude_term_env(app, r, &opts, profile, true)?;
             Ok(Spec {
                 program: r.program.clone().unwrap(),
-                args: vec![],
-                label: format!("Claude Code in {}", cwd.display()),
+                args,
+                label: format!(
+                    "Claude Code{}{} in {}",
+                    profile.map(|p| format!(" ({})", p)).unwrap_or_default(),
+                    on.map(|o| format!(" {}", o)).unwrap_or_default(),
+                    cwd.display()
+                ),
                 cwd,
+                env,
             })
         }
         "agent" => {
@@ -1950,8 +2023,13 @@ fn term_spec(app: &App, q: &TermQ) -> ApiResult<crate::deck::term::Spec> {
             if running {
                 args.extend(r.fork_args.iter().cloned());
             }
+            // Back where it ran: an agent on Ollama resumes on Ollama, with
+            // its profile's environment and secrets.
+            let (extra, env, _) = claude_term_env(app, r, p.opts(), p.profile(), false)?;
+            args.extend(extra);
             Ok(Spec {
                 program: r.program.clone().unwrap(),
+                env,
                 args,
                 label: format!(
                     "session of process {}{}",
@@ -1977,6 +2055,8 @@ async fn term_check(State(app): State<Arc<App>>, Query(q): Query<TermQ>) -> ApiR
     Ok(Json(json!({
         "label": spec.label, "cwd": spec.cwd.display().to_string(),
         "program": spec.program.display().to_string(), "args": spec.args,
+        // Names only: values may be secrets.
+        "env": spec.env.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
     })))
 }
 
@@ -2108,6 +2188,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/run/compare", get(crate::deck::tools::compare))
         .route("/api/pr-review", post(crate::deck::tools::pr_review))
         .route("/api/ollama", get(crate::deck::tools::ollama))
+        .route("/api/ollama/check", get(crate::deck::tools::ollama_check))
+        .route("/api/ollama/pull", post(crate::deck::tools::ollama_pull))
         .route("/api/tools", get(crate::deck::tools::overview))
         .route("/api/tools/cache", post(crate::deck::tools::cache))
         .route(
@@ -4962,6 +5044,91 @@ while True:
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_terminal_runs_claude_code_with_a_profile_on_ollama() {
+        let (app, dir) = fixture("term-ollama", false);
+        let mut s = (*app.settings()).clone();
+        s.runners.push(Runner {
+            name: "claude".into(),
+            command: "claude".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            format: "claude-stream-json".into(),
+            resume_args: vec!["--resume".into(), "{session}".into()],
+            fork_args: vec![],
+            model_args: vec![],
+            program: crate::deck::config::which("sleep"),
+        });
+        s.profiles.push(
+            serde_json::from_value(json!({
+                "name": "local", "runner": "claude", "model": "qwen3-coder", "provider": "ollama",
+                "ollama_url": "http://gpu:11434", "permission_mode": "acceptEdits",
+                "env": { "FOO": "secret:missing" }
+            }))
+            .unwrap(),
+        );
+        s.profiles.push(
+            serde_json::from_value(json!({ "name": "plain", "runner": "claude", "model": "opus" }))
+                .unwrap(),
+        );
+        app.settings.set(s);
+        app.shell.store(true, std::sync::atomic::Ordering::SeqCst);
+        let check = |q: &str| format!("/api/term/check?what=claude&target=0&{}", q);
+        // A profile's secret that is not set is refused, not dropped.
+        let (st, _, b) = call(&app, "GET", &check("profile=local"), &[AUTH], None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{}", b);
+        assert!(b.contains("missing"), "{}", b);
+        let mut s = (*app.settings()).clone();
+        s.profiles[0].env.clear();
+        app.settings.set(s);
+        let (st, _, b) = call(&app, "GET", &check("profile=local"), &[AUTH], None).await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let v: Value = serde_json::from_str(&b).unwrap();
+        let args: Vec<String> = serde_json::from_value(v["args"].clone()).unwrap();
+        assert!(
+            args.windows(2).any(|w| w == ["--model", "qwen3-coder"]),
+            "{:?}",
+            args
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
+        let env = v["env"].to_string();
+        for k in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_MODEL",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            assert!(env.contains(k), "{} in {}", k, env);
+        }
+        assert!(v["label"]
+            .as_str()
+            .unwrap()
+            .contains("qwen3-coder (Ollama)"));
+        // The spec carries the values; the router fronts the server.
+        let q: TermQ =
+            serde_json::from_value(json!({ "what": "claude", "target": 0, "profile": "local" }))
+                .unwrap();
+        let Ok(spec) = term_spec(&app, &q) else {
+            panic!("term_spec failed")
+        };
+        let base = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_BASE_URL")
+            .unwrap()
+            .1
+            .clone();
+        assert!(base.starts_with("http://127.0.0.1:"), "{}", base);
+        // Without Ollama nothing is added; an unknown profile is refused.
+        let (_, _, b) = call(&app, "GET", &check("profile=plain"), &[AUTH], None).await;
+        let v: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(v["env"], json!([]));
+        let (st, _, _) = call(&app, "GET", &check("profile=nobody"), &[AUTH], None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
