@@ -45,6 +45,13 @@ curl -s -H "Authorization: Bearer $INDRA_TOKEN" -H 'Content-Type: application/js
 
 `mode` is `continue` or `fresh`; `keep_running` defaults to `false`.
 
+From a terminal, `indra attach <id>` does the same with `/pivot <text>` (`--fresh` for a fresh
+start, `--keep` to leave the original running) and then follows the new process.
+
+To steer by hand rather than with one instruction, start the console with `indra serve --shell`
+and press **Open in terminal** (or **Fork in terminal** while the agent runs) on its page: the
+agent's own Claude Code session opens interactively in a browser tab, in its directory.
+
 ## Where it runs
 
 A pivot runs on the **same node, target and runner** as the original, so a Continue finds the

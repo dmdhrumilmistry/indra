@@ -253,3 +253,13 @@ pre.view.small { font-size: 12px; max-height: 220px; }
 .inspector h3 { margin-top: 0; }
 @media (max-width: 1100px) { .wfedit { grid-template-columns: 160px minmax(0, 1fr); height: auto; } .inspector { grid-column: 1 / -1; } .canvas-scroll { height: 60vh; } }
 @media (max-width: 760px) { .wfedit { grid-template-columns: minmax(0, 1fr); } .palette { grid-auto-flow: column; grid-auto-columns: 160px; overflow-x: auto; } }
+
+/* terminal page */
+body.termpage { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.termbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; }
+.termbar .brand { display: inline-flex; align-items: center; gap: 7px; color: var(--fg); text-decoration: none; font-weight: 600; }
+.termbar .termwhat { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.termbox { flex: 1; min-height: 0; padding: 8px 10px; background: var(--panel); }
+.termbox .xterm { height: 100%; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.cmd.lines { white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; }

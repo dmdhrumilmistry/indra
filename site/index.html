@@ -105,7 +105,7 @@
     </div>
     <div class="secure">
       <h3>Locked down like a remote shell</h3>
-      <p>Loopback only by default, a token on every call, DNS-rebinding and CSRF checks, no shell (the prompt is one argument), file access confined to the harness, and a strict Content-Security-Policy.</p>
+      <p>Loopback only by default, a token on every call, DNS-rebinding and CSRF checks, no shell (the prompt is one argument) unless you start it with <code>--shell</code>, file access confined to the harness, and a strict Content-Security-Policy.</p>
     </div>
     <div class="split tight cfgband">
       <div>
@@ -114,6 +114,23 @@
         <a class="btn-link" href="docs/console.html#settings">How settings work &rarr;</a>
       </div>
       <figure class="shot"><img src="assets/screenshots/settings.png" alt="The Settings page of the indra console, editing a workflow and its tasks" loading="lazy" width="1280" height="780"></figure>
+    </div>
+    <div class="split tight cfgband">
+      <div>
+        <h3>Steer agents from a terminal</h3>
+        <p class="sub"><code>indra attach</code> follows an agent live in your own terminal: approve its tool requests, switch its mode or model, send it a message, or pivot it. With <code>indra serve --shell</code> the console also opens a real terminal in the browser, with your shell, Claude Code, or an agent's own session.</p>
+        <a class="btn-link" href="docs/console.html#terminals">How terminals work &rarr;</a>
+      </div>
+      <div class="term" role="group" aria-label="indra attach">
+        <div class="term-bar"><i></i><i></i><i></i><span>Terminal</span></div>
+        <pre><code>$ indra attach
+process 7 running  claude on local  in ~/code/my-api
+? asks to use Bash: npm test
+  [1] Bash: {"command":"npm test"}
+/always
+? allowed Bash (always, for this session)
+/pivot focus on the session fixation in auth/</code></pre>
+      </div>
     </div>
   </section>
 

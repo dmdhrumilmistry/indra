@@ -52,6 +52,8 @@ pub struct App {
     pub config: Option<ConfigAccess>,
     /// Work items, run by agents and synced with trackers.
     pub board: Arc<crate::deck::board::Board>,
+    /// The browser terminal (`indra serve --shell`): a shell on this machine.
+    pub shell: std::sync::atomic::AtomicBool,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -94,6 +96,7 @@ impl App {
             node_cache: Mutex::new(HashMap::new()),
             config,
             board,
+            shell: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -109,6 +112,16 @@ const INDEX: &str = include_str!("../../ui/index.html");
 const APP_JS: &str = include_str!("../../ui/app.js");
 const STYLE: &str = include_str!("../../ui/style.css");
 const FAVICON: &str = include_str!("../../ui/favicon.svg");
+const TERM_HTML: &str = include_str!("../../ui/term.html");
+const TERM_JS: &str = include_str!("../../ui/term.js");
+const XTERM_JS: &str = include_str!("../../ui/vendor/xterm.js");
+const XTERM_CSS: &str = include_str!("../../ui/vendor/xterm.css");
+const XTERM_FIT_JS: &str = include_str!("../../ui/vendor/addon-fit.js");
+const XTERM_LICENSE: &str = include_str!("../../ui/vendor/LICENSE-xterm");
+/// The terminal page only: xterm.js sets styles with a `<style>` element, so
+/// it needs inline styles. Scripts stay `'self'`.
+const TERM_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+                        connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                    connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
@@ -219,7 +232,9 @@ async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Respons
     }
     let mut res = next.run(req).await;
     let hd = res.headers_mut();
-    hd.insert("content-security-policy", HeaderValue::from_static(CSP));
+    if !hd.contains_key("content-security-policy") {
+        hd.insert("content-security-policy", HeaderValue::from_static(CSP));
+    }
     hd.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
@@ -329,6 +344,7 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "read_only": s.read_only,
+        "shell": app.shell_on(),
         "config": s.config_path.as_ref().map(|p| p.display().to_string()),
         "data_dir": s.data_dir.display().to_string(),
         "harnesses": s.harnesses.iter().map(harness_json).collect::<Vec<_>>(),
@@ -1525,6 +1541,197 @@ async fn config_check(
     })))
 }
 
+// ---- terminal -------------------------------------------------------------------
+
+impl App {
+    /// Whether the browser terminal is offered right now.
+    pub fn shell_on(&self) -> bool {
+        self.shell.load(std::sync::atomic::Ordering::SeqCst)
+            && self.loopback
+            && !self.settings().read_only
+    }
+}
+
+async fn term_page() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                header::HeaderName::from_static("content-security-policy"),
+                TERM_CSP,
+            ),
+        ],
+        TERM_HTML,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct TermQ {
+    /// shell | claude | agent
+    what: String,
+    h: Option<String>,
+    target: Option<usize>,
+    proc: Option<u64>,
+}
+
+/// Browsers send cookies with a WebSocket from any page and do not apply
+/// CORS to it, so the terminal insists on the console's own origin.
+fn same_origin(h: &HeaderMap) -> bool {
+    let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = h.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    match (host, origin) {
+        (Some(host), Some(origin)) => {
+            origin == format!("http://{}", host) || origin == format!("https://{}", host)
+        }
+        _ => false,
+    }
+}
+
+/// What a terminal request starts, checked against the config.
+fn term_spec(app: &App, q: &TermQ) -> ApiResult<crate::deck::term::Spec> {
+    use crate::deck::term::{self, Spec};
+    let s = app.settings();
+    let claude = |name: Option<&str>| -> ApiResult<&config::Runner> {
+        let r = match name {
+            Some(n) => s.runners.iter().find(|r| r.name == n),
+            None => s
+                .runners
+                .iter()
+                .find(|r| r.format == "claude-stream-json" && r.program.is_some()),
+        };
+        let r = r.ok_or_else(|| bad("no Claude Code runner is configured"))?;
+        if r.program.is_none() {
+            return Err(bad(format!("runner '{}' is not installed", r.name)));
+        }
+        Ok(r)
+    };
+    let dir = || -> ApiResult<std::path::PathBuf> {
+        let h = app.harness(q.h.as_deref())?;
+        match q.target {
+            Some(i) => h
+                .targets
+                .get(i)
+                .cloned()
+                .ok_or_else(|| bad("unknown target")),
+            None => Ok(h.targets.first().cloned().unwrap_or_else(|| h.root.clone())),
+        }
+    };
+    match q.what.as_str() {
+        "shell" => {
+            let cwd = dir()?;
+            Ok(Spec {
+                program: term::shell(),
+                args: vec![],
+                label: format!("shell in {}", cwd.display()),
+                cwd,
+            })
+        }
+        "claude" => {
+            let cwd = dir()?;
+            let r = claude(None)?;
+            Ok(Spec {
+                program: r.program.clone().unwrap(),
+                args: vec![],
+                label: format!("Claude Code in {}", cwd.display()),
+                cwd,
+            })
+        }
+        "agent" => {
+            let id = q.proc.ok_or_else(|| bad("which process?"))?;
+            let p = app
+                .procs
+                .get(id)
+                .ok_or_else(|| not_found("no such process"))?;
+            if p.node_name() != LOCAL {
+                return Err(bad(format!(
+                    "process {} runs on node '{}'; the terminal opens sessions on this machine only",
+                    id,
+                    p.node_name()
+                )));
+            }
+            let session = p.view().session.ok_or_else(|| {
+                bad("this agent has not reported a session (only Claude Code does)")
+            })?;
+            let r = claude(Some(p.runner_name()))?;
+            if r.resume_args.is_empty() {
+                return Err(bad(format!("runner '{}' has no resume_args", r.name)));
+            }
+            let mut args: Vec<String> = r
+                .resume_args
+                .iter()
+                .map(|a| a.replace("{session}", &session))
+                .collect();
+            // While the agent still runs, branch its session rather than
+            // writing into the same one from two places.
+            let running = p.is_running();
+            if running {
+                args.extend(r.fork_args.iter().cloned());
+            }
+            Ok(Spec {
+                program: r.program.clone().unwrap(),
+                args,
+                label: format!(
+                    "session of process {}{}",
+                    id,
+                    if running { " (forked)" } else { "" }
+                ),
+                cwd: std::path::PathBuf::from(p.target()),
+            })
+        }
+        _ => Err(bad("what must be shell, claude or agent")),
+    }
+}
+
+/// What a terminal request would start, or why it cannot: the page asks
+/// first, because a refused WebSocket tells the browser nothing.
+async fn term_check(State(app): State<Arc<App>>, Query(q): Query<TermQ>) -> ApiResult<Json<Value>> {
+    if !app.shell_on() {
+        return Err(forbidden(
+            "the terminal is off: start `indra serve --shell` (loopback only, not read-only)",
+        ));
+    }
+    let spec = term_spec(&app, &q)?;
+    Ok(Json(json!({
+        "label": spec.label, "cwd": spec.cwd.display().to_string(),
+        "program": spec.program.display().to_string(), "args": spec.args,
+    })))
+}
+
+async fn term_ws(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<TermQ>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    use std::sync::atomic::Ordering;
+    if !app.shell_on() {
+        return forbidden(
+            "the terminal is off: start `indra serve --shell` (loopback only, not read-only)",
+        )
+        .into_response();
+    }
+    if !same_origin(&headers) {
+        return forbidden("cross-origin terminal refused").into_response();
+    }
+    let spec = match term_spec(&app, &q) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    if !spec.cwd.is_dir() {
+        return bad(format!("{} is not a directory", spec.cwd.display())).into_response();
+    }
+    if crate::deck::term::OPEN.load(Ordering::SeqCst) >= crate::deck::term::MAX_OPEN {
+        return ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many terminals open".into(),
+        )
+        .into_response();
+    }
+    crate::deck::term::audit(&app.settings().data_dir.join("logs"), &spec);
+    ws.on_upgrade(move |socket| crate::deck::term::bridge(spec, socket))
+}
+
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(index))
@@ -1540,6 +1747,29 @@ pub fn router(app: Arc<App>) -> Router {
             "/favicon.svg",
             get(|| async { asset("image/svg+xml", FAVICON) }),
         )
+        .route("/term", get(term_page))
+        .route(
+            "/term.js",
+            get(|| async { asset("text/javascript; charset=utf-8", TERM_JS) }),
+        )
+        .route(
+            "/vendor/xterm.js",
+            get(|| async { asset("text/javascript; charset=utf-8", XTERM_JS) }),
+        )
+        .route(
+            "/vendor/xterm.css",
+            get(|| async { asset("text/css; charset=utf-8", XTERM_CSS) }),
+        )
+        .route(
+            "/vendor/addon-fit.js",
+            get(|| async { asset("text/javascript; charset=utf-8", XTERM_FIT_JS) }),
+        )
+        .route(
+            "/vendor/LICENSE-xterm",
+            get(|| async { asset("text/plain; charset=utf-8", XTERM_LICENSE) }),
+        )
+        .route("/api/term", get(term_ws))
+        .route("/api/term/check", get(term_check))
         .route("/api/overview", get(overview))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/check", post(config_check))
@@ -3169,6 +3399,150 @@ while True:
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(app.procs.get(id).unwrap().view().status, "stopped");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_terminal_is_off_unless_enabled_and_checks_what_it_starts() {
+        let (app, dir) = fixture("term", false);
+        let check = |q: &str| format!("/api/term/check?{}", q);
+        // Off by default.
+        let (st, _, body) = call(&app, "GET", &check("what=shell"), &[AUTH], None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{}", body);
+        assert!(body.contains("--shell"));
+        let (_, _, ov) = call(&app, "GET", "/api/overview", &[AUTH], None).await;
+        assert_eq!(serde_json::from_str::<Value>(&ov).unwrap()["shell"], false);
+        app.shell.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, _, ov) = call(&app, "GET", "/api/overview", &[AUTH], None).await;
+        assert_eq!(serde_json::from_str::<Value>(&ov).unwrap()["shell"], true);
+        // A token is still needed.
+        assert_eq!(
+            call(&app, "GET", &check("what=shell"), &[], None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (st, _, body) = call(&app, "GET", &check("what=shell&target=0"), &[AUTH], None).await;
+        assert_eq!(st, StatusCode::OK, "{}", body);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert!(v["cwd"].as_str().unwrap().ends_with("target"));
+        assert_eq!(
+            call(&app, "GET", &check("what=shell&target=7"), &[AUTH], None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&app, "GET", &check("what=rm"), &[AUTH], None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        // No Claude Code runner in this fixture.
+        let (st, _, body) = call(&app, "GET", &check("what=claude"), &[AUTH], None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{}", body);
+        assert_eq!(
+            call(&app, "GET", &check("what=agent&proc=99"), &[AUTH], None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        // The page gets its own CSP; the console keeps the strict one.
+        let (_, h, _) = call(&app, "GET", "/term", &[], None).await;
+        let csp = h["content-security-policy"].to_str().unwrap();
+        assert!(
+            csp.contains("style-src 'self' 'unsafe-inline'") && csp.contains("script-src 'self';")
+        );
+        let (_, h, _) = call(&app, "GET", "/", &[], None).await;
+        assert!(!h["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("unsafe-inline"));
+        // Never beyond loopback, never read-only.
+        let (ro, dir2) = fixture("term-ro", true);
+        ro.shell.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!ro.shell_on());
+        let wide = App::new((*app.settings()).clone(), TOKEN.into(), false);
+        wide.shell.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!wide.shell_on());
+        // WebSockets skip CORS, so the terminal wants its own origin.
+        let hm = |o: Option<&str>| {
+            let mut m = HeaderMap::new();
+            m.insert(header::HOST, "127.0.0.1:7878".parse().unwrap());
+            if let Some(o) = o {
+                m.insert(header::ORIGIN, o.parse().unwrap());
+            }
+            m
+        };
+        assert!(same_origin(&hm(Some("http://127.0.0.1:7878"))));
+        assert!(!same_origin(&hm(Some("http://evil.example"))));
+        assert!(!same_origin(&hm(Some("http://127.0.0.1:7879"))));
+        assert!(!same_origin(&hm(None)));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_browser_terminal_runs_a_real_shell() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as WsMsg};
+        let (app, dir) = fixture("pty", false);
+        app.shell.store(true, std::sync::atomic::Ordering::SeqCst);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = router(app.clone());
+        tokio::spawn(async move { axum::serve(listener, served).await });
+        let open = |origin: &str| {
+            let mut r = format!("ws://{}/api/term?what=shell&target=0", addr)
+                .into_client_request()
+                .unwrap();
+            let h = r.headers_mut();
+            h.insert("origin", origin.parse().unwrap());
+            h.insert("authorization", AUTH.1.parse().unwrap());
+            r
+        };
+        // Another site's page is refused.
+        assert!(
+            tokio_tungstenite::connect_async(open("http://evil.example"))
+                .await
+                .is_err()
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(open(&format!("http://{}", addr)))
+            .await
+            .unwrap();
+        ws.send(WsMsg::Text(r#"{"t":"resize","cols":91,"rows":27}"#.into()))
+            .await
+            .unwrap();
+        ws.send(WsMsg::Binary(
+            b"echo indra-$((40+2)); stty size; pwd\n".to_vec().into(),
+        ))
+        .await
+        .unwrap();
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !(seen.contains("indra-42") && seen.contains("27 91") && seen.contains("/target")) {
+            assert!(std::time::Instant::now() < deadline, "got: {}", seen);
+            match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(WsMsg::Binary(b)))) => seen.push_str(&String::from_utf8_lossy(&b)),
+                Ok(Some(Ok(_))) => {}
+                other => panic!(
+                    "terminal closed early: {:?}; got: {}",
+                    other.map(|x| x.map(|y| y.is_ok())),
+                    seen
+                ),
+            }
+        }
+        ws.send(WsMsg::Binary(b"exit\n".to_vec().into()))
+            .await
+            .unwrap();
+        while !seen.contains("ended") {
+            assert!(std::time::Instant::now() < deadline, "got: {}", seen);
+            match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(WsMsg::Binary(b)))) => seen.push_str(&String::from_utf8_lossy(&b)),
+                Ok(Some(Ok(_))) => {}
+                _ => break,
+            }
+        }
+        assert!(seen.contains("ended"), "got: {}", seen);
+        let log = std::fs::read_to_string(dir.join("data/logs/terminal.log")).unwrap();
+        assert!(log.contains("\"what\":\"shell in "));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

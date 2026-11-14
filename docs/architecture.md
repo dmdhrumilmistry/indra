@@ -168,6 +168,21 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 - The graph is stored as ordinary `[[workflow]]` TOML (with positions), so `indra run` and the
   text editor keep working.
 
+## Terminals (built)
+
+Two terminal surfaces sit on the same API as the console, so they add views, not powers:
+
+- **`indra attach` / `indra agents`** run in the user's own terminal. They call the console's API
+  with its token (found through an owner-only `console.json` in the data directory on the same
+  machine, or `--url` / `--token`) and follow an agent over the same Server-Sent Events stream as
+  the process page. Commands map one to one onto the permission, control, message, pivot and
+  stop endpoints, so remote agents work exactly like local ones.
+- **The browser terminal** (`indra serve --shell`) is a PTY on the hub bridged over a WebSocket
+  (`/api/term`): keystrokes and output as binary frames, resizes as small JSON frames. It starts
+  the user's shell or Claude Code in a target, or resumes an agent's session (forked while the
+  agent runs). Because it is a shell, it is opt-in, loopback-only, never read-only, same-origin
+  checked, capped, and logged; it runs on the hub only, as remote sessions live on their nodes.
+
 ## Order of work
 
 1. Agent control and profiles (including Ollama), and this document. Done.

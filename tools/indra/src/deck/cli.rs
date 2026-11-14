@@ -44,6 +44,61 @@ pub struct ServeArgs {
     /// machine (editing runners is equivalent to running any command)
     #[arg(long)]
     allow_remote_config: bool,
+    /// Offer a terminal in the console: your shell or Claude Code in a target,
+    /// or an agent's own session. Loopback only; it is a shell on this machine.
+    #[arg(long)]
+    shell: bool,
+}
+
+#[derive(Args)]
+pub struct ConsoleArgs {
+    /// The console's address (default: the one `indra serve` runs on this machine)
+    #[arg(long, env = "INDRA_URL")]
+    url: Option<String>,
+    /// Its access token (default: read from the running console's console.json)
+    #[arg(long, env = "INDRA_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AgentsArgs {
+    #[command(flatten)]
+    console: ConsoleArgs,
+    /// Include agents that have finished
+    #[arg(long, short)]
+    all: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+pub struct AttachArgs {
+    /// Process id (default: one waiting for an answer, else the newest running)
+    id: Option<u64>,
+    #[command(flatten)]
+    console: ConsoleArgs,
+}
+
+fn client_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+pub fn run_agents(a: AgentsArgs) -> Result<ExitCode, String> {
+    let c = crate::deck::attach::find(a.console.url, a.console.token)?;
+    client_runtime()?.block_on(crate::deck::attach::list(&c, a.all, a.json))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn run_attach(a: AttachArgs) -> Result<ExitCode, String> {
+    let c = crate::deck::attach::find(a.console.url, a.console.token)?;
+    let rt = client_runtime()?;
+    rt.block_on(crate::deck::attach::attach(c, a.id))?;
+    // Do not wait for the blocking stdin reader.
+    rt.shutdown_background();
+    Ok(ExitCode::SUCCESS)
 }
 
 #[derive(Args)]
@@ -95,6 +150,7 @@ struct Editing {
     opts: config::LoadOptions,
     lock: bool,
     allow_remote: bool,
+    shell: bool,
 }
 
 pub fn init(a: InitArgs) -> Result<ExitCode, String> {
@@ -128,6 +184,7 @@ pub fn run_serve(a: ServeArgs) -> Result<ExitCode, String> {
         opts,
         lock: a.lock_config,
         allow_remote: a.allow_remote_config,
+        shell: a.shell,
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -212,6 +269,20 @@ async fn serve(
             Some(_) => "locked",
         }
     );
+    if editing.shell {
+        if !loopback {
+            return Err(
+                "--shell is offered on a loopback address only (it is a shell on this machine)"
+                    .into(),
+            );
+        }
+        if s.read_only {
+            return Err("--shell cannot be used with --read-only".into());
+        }
+        println!(
+            "  terminal on (shell, Claude Code and agent sessions; logged to logs/terminal.log)"
+        );
+    }
     if !loopback {
         eprintln!("indra: WARNING listening on {} - anyone who can reach it and has the token can run agents on this machine", addr);
     }
@@ -233,6 +304,14 @@ async fn serve(
             locked,
             saving: std::sync::Mutex::new(()),
         }),
+    );
+    app.shell
+        .store(editing.shell, std::sync::atomic::Ordering::SeqCst);
+    // Let `indra agents` / `indra attach` on this machine find the console.
+    let discovery = crate::deck::attach::advertise(
+        &app.settings().data_dir,
+        &format!("http://{}", host),
+        &app.token,
     );
     let (procs, engine) = (app.procs.clone(), app.engine.clone());
     // Keep the board moving: finished agents, scheduled imports, auto runs.
@@ -256,6 +335,9 @@ async fn serve(
                 eprintln!("indra: stopping {} running agent(s)...", n);
             }
             procs.stop_all().await;
+            if let Some(p) = discovery {
+                crate::deck::attach::withdraw(&p);
+            }
             Ok(())
         }
     }

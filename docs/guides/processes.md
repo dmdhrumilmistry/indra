@@ -56,6 +56,26 @@ See [agent control](../../tools/indra/README.md#agent-control) and
 indefinitely; workflows that run unattended should use a profile whose permission mode and tool
 rules let it work without asking (`acceptEdits` with `allowed_tools`, or `dontAsk`).
 
+## From your terminal
+
+Everything above works without a browser too. `indra agents` lists what runs and what waits for
+an answer; `indra attach <id>` follows one agent live and steers it with the same controls:
+
+```bash
+indra agents               # running agents (add --all for finished ones, --json for scripts)
+indra attach 7             # follow process 7; type /help for the commands
+```
+
+In `indra attach`, plain text is a follow-up message; `/allow`, `/always` and `/deny [reason]`
+answer the oldest waiting tool request (or `/allow 2` for another); `/mode plan`, `/model opus`
+and `/interrupt` steer it; `/pivot [--fresh] [--keep] <text>` redirects it; `/stop` stops it.
+On the console's machine it finds the console by itself; from elsewhere pass `--url` and
+`--token`. See [Terminals](../../tools/indra/README.md#terminals).
+
+To take over an agent's session by hand instead, start the console with `indra serve --shell`
+and press **Open in terminal** on its page: Claude Code's own interactive session opens in a
+browser tab (a fork of it while the agent still runs).
+
 ## Stop it
 
 Press **Stop** on the process page, or `POST /api/procs/{id}/stop`.

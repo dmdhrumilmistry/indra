@@ -57,6 +57,10 @@ enum Cmd {
     Node(deck::cli::NodeArgs),
     /// Secrets for agents' profiles: set (value from stdin), list, rm
     Secret(deck::cli::SecretArgs),
+    /// List the agents a running console knows about (`indra attach` steers one)
+    Agents(deck::cli::AgentsArgs),
+    /// Follow an agent of a running console and steer it from this terminal
+    Attach(deck::cli::AttachArgs),
 }
 
 fn main() -> ExitCode {
@@ -71,6 +75,8 @@ fn main() -> ExitCode {
         Cmd::Run(a) => deck::cli::run_workflow(a),
         Cmd::Node(a) => deck::cli::run_node(a),
         Cmd::Secret(a) => deck::cli::run_secret(a),
+        Cmd::Agents(a) => deck::cli::run_agents(a),
+        Cmd::Attach(a) => deck::cli::run_attach(a),
     };
     match res {
         Ok(code) => code,
