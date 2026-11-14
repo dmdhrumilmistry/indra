@@ -31,6 +31,37 @@ pub struct ConfigFile {
     pub node: Vec<NodeCfg>,
     /// Multi-step, multi-node agent workflows.
     pub workflow: Vec<WorkflowCfg>,
+    /// Plan with one profile, do the steps with cheaper ones.
+    pub team: Vec<TeamCfg>,
+}
+
+/// A planner, workers and an optional reviewer: plan with a strong model,
+/// carry the plan out with cheaper ones (see `deck::delegate`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamCfg {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Profile that reads the code and writes the plan (changes nothing).
+    pub planner: String,
+    /// Profile that carries out each step.
+    pub worker: String,
+    /// Profile for steps the planner marks light (mechanical edits); default: `worker`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_worker: Option<String>,
+    /// Profile that checks the result at the end; none: no review step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
+    /// Run the plan as soon as it is written, without waiting for approval.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_run: bool,
+    /// Let independent steps run at the same time (they share the directory).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parallel: bool,
+    /// Most steps a plan may have (default 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -391,6 +422,10 @@ pub struct ProfileCfg {
     /// Before finishing, propose learnings for the inbox (Claude Code runners).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reflect: bool,
+    /// Model for Claude Code's own subagents (CLAUDE_CODE_SUBAGENT_MODEL),
+    /// e.g. "haiku" under an Opus main agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
 }
 
 impl ProfileCfg {
@@ -401,7 +436,18 @@ impl ProfileCfg {
             effort: self.effort.clone(),
             allowed_tools: self.allowed_tools.clone(),
             disallowed_tools: self.disallowed_tools.clone(),
-            env: self.env.clone(),
+            env: {
+                let mut env = self.env.clone();
+                if let Some(m) = self
+                    .subagent_model
+                    .as_ref()
+                    .filter(|m| !m.trim().is_empty())
+                {
+                    env.entry("CLAUDE_CODE_SUBAGENT_MODEL".into())
+                        .or_insert_with(|| m.trim().to_string());
+                }
+                env
+            },
         }
     }
 }
@@ -525,6 +571,7 @@ pub struct Settings {
     pub ice_servers: Vec<String>,
     pub nodes: Vec<crate::deck::nodes::Node>,
     pub workflows: Vec<WorkflowCfg>,
+    pub teams: Vec<TeamCfg>,
 }
 
 /// Settings that the console can replace while it runs (after a config
@@ -553,6 +600,10 @@ impl Settings {
 
     pub fn profile(&self, name: &str) -> Option<&ProfileCfg> {
         self.profiles.iter().find(|p| p.name == name)
+    }
+
+    pub fn team(&self, name: &str) -> Option<&TeamCfg> {
+        self.teams.iter().find(|t| t.name == name)
     }
 
     pub fn node(&self, name: &str) -> Option<&crate::deck::nodes::Node> {
@@ -1066,6 +1117,27 @@ pub fn build_settings(
     for p in &file.preset {
         known(&p.profile, &format!("preset '{}'", p.name))?;
     }
+    unique("team", file.team.iter().map(|t| t.name.as_str()))?;
+    for t in &file.team {
+        let what = format!("team '{}'", t.name);
+        crate::deck::nodes::validate_name(&t.name).map_err(|e| format!("{}: {}", what, e))?;
+        for p in [
+            Some(&t.planner),
+            Some(&t.worker),
+            t.light_worker.as_ref(),
+            t.reviewer.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            known(&Some(p.clone()), &what)?;
+        }
+        if let Some(n) = t.max_steps {
+            if !(1..=30).contains(&n) {
+                return Err(format!("{}: max_steps must be 1 to 30", what));
+            }
+        }
+    }
     unique("connector", file.connector.iter().map(|c| c.name.as_str()))?;
     for c in &file.connector {
         let at = |m: String| format!("connector '{}': {}", c.name, m);
@@ -1199,6 +1271,7 @@ pub fn build_settings(
         read_only: opts.read_only || file.server.read_only.unwrap_or(false),
         config_path: path.map(abs),
         data_dir: data_dir(),
+        teams: file.team.clone(),
     })
 }
 
@@ -1417,5 +1490,42 @@ needs = ["sub"]
         assert_eq!(m[0], PathBuf::from("/a/.security-harness/memory"));
         assert_eq!(m[1], PathBuf::from("/b/.security-harness/memory"));
         assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn teams_name_real_profiles_and_subagents_get_their_model() {
+        let opts = LoadOptions {
+            config: None,
+            targets: vec![],
+            bind: None,
+            read_only: false,
+            cwd: std::env::temp_dir(),
+        };
+        let base = "builtins = false\n[[profile]]\nname = \"planner\"\nmodel = \"opus\"\nsubagent_model = \"haiku\"\n\
+[[profile]]\nname = \"builder\"\nmodel = \"haiku\"\n";
+        let ok: ConfigFile = toml::from_str(&format!(
+            "{}[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\nreviewer = \"planner\"\n",
+            base
+        ))
+        .unwrap();
+        let s = build_settings(&opts, None, &ok).unwrap();
+        assert_eq!(s.team("t").unwrap().worker, "builder");
+        assert_eq!(
+            s.profile("planner")
+                .unwrap()
+                .opts()
+                .env
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
+                .map(String::as_str),
+            Some("haiku")
+        );
+        for bad in [
+            "[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"nobody\"\n",
+            "[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\nmax_steps = 99\n",
+            "[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\n[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\n",
+        ] {
+            let f: ConfigFile = toml::from_str(&format!("{}{}", base, bad)).unwrap();
+            assert!(build_settings(&opts, None, &f).is_err(), "{}", bad);
+        }
     }
 }

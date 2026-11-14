@@ -112,9 +112,14 @@ pub fn brief(h: &Harness, prompt: &str) -> (String, Vec<MemRef>) {
 /// Where the recalled memory starts in a prompt.
 const MEMORY_MARK: &str = "\n\n---\nRelevant memory (";
 
-/// A prompt without the memory [`brief`] appended to it.
+/// A prompt without what indra appended to it: the memory [`brief`], or
+/// the planner's instructions (`deck::delegate`). For showing what was asked.
 pub fn without_memory(prompt: &str) -> &str {
-    match prompt.find(MEMORY_MARK) {
+    let cut = [MEMORY_MARK, crate::deck::delegate::PLAN_MARK]
+        .iter()
+        .filter_map(|m| prompt.find(m))
+        .min();
+    match cut {
         Some(i) => &prompt[..i],
         None => prompt,
     }
@@ -1095,6 +1100,13 @@ mod tests {
         let p = format!("/review it{}2 notes ...):\n\n## A", MEMORY_MARK);
         assert_eq!(without_memory(&p), "/review it");
         assert_eq!(without_memory("plain"), "plain");
+        assert_eq!(
+            without_memory(&format!(
+                "add a flag{} Do not change files",
+                crate::deck::delegate::PLAN_MARK
+            )),
+            "add a flag"
+        );
     }
 
     #[test]

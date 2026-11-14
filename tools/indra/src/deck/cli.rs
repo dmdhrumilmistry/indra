@@ -320,6 +320,7 @@ async fn serve(
         loop {
             crate::deck::board::tick(&ticker).await;
             crate::deck::knowledge::harvest(&ticker);
+            crate::deck::delegate::tick(&ticker);
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     });

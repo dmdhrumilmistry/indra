@@ -317,3 +317,11 @@ details.menu .menubox a:hover { background: var(--sunk); text-decoration: none; 
 @media (max-width: 560px) { .form .fields .wide { grid-column: auto; } }
 .form .fields select, .form .fields input { width: 100%; }
 .learning .fields select { text-overflow: ellipsis; }
+
+/* plan and delegate */
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.roles .stat { display: grid; gap: 2px; }
+.roles .stat span:first-child { text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.step .row code { font-size: 12px; }
+.step textarea { min-height: 110px; }
+.grow { flex: 1 1 auto; min-width: 0; }

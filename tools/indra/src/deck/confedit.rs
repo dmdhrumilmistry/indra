@@ -19,7 +19,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
 /// The top-level keys of `indra.toml`, in the order a new file gets them.
-pub const SECTIONS: [&str; 11] = [
+pub const SECTIONS: [&str; 12] = [
     "builtins",
     "server",
     "local",
@@ -31,6 +31,7 @@ pub const SECTIONS: [&str; 11] = [
     "component",
     "workflow",
     "connector",
+    "team",
 ];
 
 /// The first lines of a config file the console creates.

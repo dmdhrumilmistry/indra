@@ -168,6 +168,22 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 - The graph is stored as ordinary `[[workflow]]` TOML (with positions), so `indra run` and the
   text editor keep working.
 
+## Plan and delegate (built)
+
+Delegation is orchestration from the outside, so roles can mix runners and providers:
+
+1. The hub starts the **planner** (a profile) with the task and a fixed request for a JSON plan:
+   a summary and steps, each with self-contained instructions, dependencies and a size
+   (`standard` or `light`).
+2. When the planner exits, the hub extracts the plan from its result (any runner: the last JSON
+   object with `steps`), normalises ids and dependencies, caps the step count, and holds it for
+   review unless the team runs it straight away.
+3. The approved plan becomes an ad-hoc workflow on the existing engine: one task per step on the
+   worker (or light worker) profile, chained in plan order unless the team allows parallel steps,
+   then a review task on the reviewer profile. Capacity, cancel, skips after a failure and
+   per-step process pages come from the engine.
+4. The delegation reports each step's state and the cost per role from the agents' results.
+
 ## Knowledge and context (built)
 
 Agents share what they learn through the same memory vaults reviews use (`indra mem`):

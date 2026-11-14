@@ -31,7 +31,7 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -56,6 +56,8 @@ pub struct App {
     pub shell: std::sync::atomic::AtomicBool,
     /// Learnings agents and people proposed, waiting for review.
     pub learnings: Arc<crate::deck::knowledge::Learnings>,
+    /// Plan-and-delegate runs: a planner's plan carried out by workers.
+    pub delegations: crate::deck::delegate::Delegations,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -103,6 +105,7 @@ impl App {
             board,
             shell: std::sync::atomic::AtomicBool::new(false),
             learnings,
+            delegations: Default::default(),
         })
     }
 
@@ -364,6 +367,7 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         })).collect::<Vec<_>>(),
         "presets": s.presets,
         "profiles": s.profiles,
+        "teams": s.teams,
         "approvals": app.procs.list().iter().map(|p| p.pending.len()).sum::<usize>(),
         "learnings": app.learnings.proposed(),
         "procs": app.procs.list(),
@@ -1665,6 +1669,156 @@ async fn config_check(
     })))
 }
 
+// ---- plan and delegate -------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DelegateReq {
+    h: Option<String>,
+    node: Option<String>,
+    #[serde(default)]
+    target: usize,
+    prompt: String,
+    /// A [[team]] by name...
+    team: Option<String>,
+    /// ...or the roles spelled out.
+    roles: Option<crate::deck::delegate::Roles>,
+    /// Override the team's choice of waiting for approval.
+    auto_run: Option<bool>,
+}
+
+async fn delegate_start(
+    State(app): State<Arc<App>>,
+    Json(r): Json<DelegateReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let prompt = check_prompt(&r.prompt)?;
+    let h = app.harness(r.h.as_deref())?;
+    let node = r.node.clone().unwrap_or_else(|| LOCAL.to_string());
+    let targets = node_targets(&app, &h, &node)?;
+    let target = targets
+        .get(r.target)
+        .ok_or_else(|| bad("unknown target"))?
+        .clone();
+    let settings = app.settings();
+    let team = r.team.clone().filter(|t| !t.is_empty());
+    let mut roles = match (&team, r.roles) {
+        (Some(t), _) => settings
+            .team(t)
+            .map(crate::deck::delegate::Roles::from)
+            .ok_or_else(|| bad(format!("no team named '{}'", t)))?,
+        (None, Some(roles)) => roles,
+        (None, None) => return Err(bad("pick a team, or a planner and a worker profile")),
+    };
+    if let Some(a) = r.auto_run {
+        roles.auto_run = a;
+    }
+    let id = app
+        .delegations
+        .start(&app, prompt, &h.name, &node, &target, team, roles)
+        .map_err(bad)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// A delegation with its agents and what each role cost.
+fn delegation_json(app: &App, d: &crate::deck::delegate::Delegation) -> Value {
+    let planner = d
+        .planner_proc
+        .and_then(|p| app.procs.get(p))
+        .map(|p| p.view());
+    let run = d.workflow.and_then(|w| app.engine.get(w));
+    let mut cost: BTreeMap<&str, f64> = BTreeMap::new();
+    if let Some(c) = planner.as_ref().and_then(|v| v.cost_usd) {
+        *cost.entry("planner").or_default() += c;
+    }
+    let mut steps: Vec<Value> = Vec::new();
+    if let Some(run) = &run {
+        for t in &run.tasks {
+            let role = if t.id == "review" {
+                "reviewer"
+            } else if d
+                .plan
+                .as_ref()
+                .and_then(|p| p.steps.iter().find(|s| s.id == t.id))
+                .map(|s| s.size == "light")
+                .unwrap_or(false)
+                && d.roles.light_worker.is_some()
+            {
+                "light_worker"
+            } else {
+                "worker"
+            };
+            let spent: f64 = t
+                .procs
+                .iter()
+                .filter_map(|p| app.procs.get(*p))
+                .filter_map(|p| p.view().cost_usd)
+                .sum();
+            *cost.entry(role).or_default() += spent;
+            steps.push(
+                json!({ "id": t.id, "role": role, "profile": t.profile, "state": t.state,
+                               "proc": t.proc_id, "cost_usd": spent, "error": t.error }),
+            );
+        }
+    }
+    let total: f64 = cost.values().sum();
+    json!({
+        "delegation": d,
+        "planner": planner,
+        "steps": steps,
+        "cost": cost, "total_cost_usd": total,
+    })
+}
+
+async fn delegations_list(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(json!(app
+        .delegations
+        .list()
+        .iter()
+        .map(|d| delegation_json(&app, d))
+        .collect::<Vec<_>>()))
+}
+
+async fn delegation_get(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    let d = app
+        .delegations
+        .get(id)
+        .ok_or_else(|| not_found("no such plan"))?;
+    Ok(Json(delegation_json(&app, &d)))
+}
+
+#[derive(Deserialize)]
+struct ApproveReq {
+    plan: Option<crate::deck::delegate::Plan>,
+}
+
+async fn delegation_approve(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<ApproveReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let run = app.delegations.approve(&app, id, r.plan).map_err(bad)?;
+    Ok(Json(json!({ "workflow": run })))
+}
+
+async fn delegation_cancel(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    app.delegations.cancel(&app, id).map_err(bad)?;
+    Ok(Json(json!({ "cancelled": true })))
+}
+
 // ---- terminal -------------------------------------------------------------------
 
 impl App {
@@ -1941,6 +2095,13 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/learnings/{id}/accept",
             post(crate::deck::knowledge::learning_accept),
         )
+        .route(
+            "/api/delegations",
+            get(delegations_list).post(delegate_start),
+        )
+        .route("/api/delegations/{id}", get(delegation_get))
+        .route("/api/delegations/{id}/approve", post(delegation_approve))
+        .route("/api/delegations/{id}/cancel", post(delegation_cancel))
         .route("/api/term", get(term_ws))
         .route("/api/term/check", get(term_check))
         .route("/api/overview", get(overview))
@@ -2073,6 +2234,7 @@ mod tests {
             ice_servers: vec![],
             nodes: vec![],
             workflows: vec![],
+            teams: vec![],
         };
         let app = App::new(settings, TOKEN.into(), true);
         (app, dir)
@@ -4148,5 +4310,204 @@ while True:
         assert!(!dir.join("skills/kb-two").exists());
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[cfg(unix)]
+    const PLANNER_AND_WORKER: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ["FAKE_DELEGATE_LOG"], "a")
+def out(o):
+    print(json.dumps(o), flush=True)
+def recv():
+    l = sys.stdin.readline()
+    if not l:
+        sys.exit(0)
+    return json.loads(l)
+m = recv()
+out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {}}})
+while True:
+    m = recv()
+    if m["type"] != "user":
+        continue
+    c = m["message"]["content"]
+    log.write(json.dumps({"model": sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else None, "prompt": c}) + "\n"); log.flush()
+    if "You are the planner" in c:
+        t = 'Plan:\n{"summary": "Two steps", "steps": [{"id": "one", "title": "First", "prompt": "do one"}, {"id": "two", "title": "Second", "prompt": "do two", "size": "light"}]}'
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": t, "total_cost_usd": 0.04})
+    else:
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": "done", "total_cost_usd": 0.001})
+"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_strong_model_plans_and_cheaper_ones_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, dir) = fixture("delegate", false);
+        let script = dir.join("agent.py");
+        let log = dir.join("delegate.log");
+        std::fs::write(&script, PLANNER_AND_WORKER).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("FAKE_DELEGATE_LOG", &log);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "fake".into(),
+            command: script.display().to_string(),
+            args: vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+            format: "claude-stream-json".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: Some(script.clone()),
+        });
+        for (name, model) in [
+            ("planner", "opus"),
+            ("builder", "haiku"),
+            ("local", "qwen3-coder"),
+        ] {
+            settings.profiles.push(config::ProfileCfg {
+                name: name.into(),
+                runner: Some("fake".into()),
+                model: Some(model.into()),
+                ..Default::default()
+            });
+        }
+        settings.teams.push(config::TeamCfg {
+            name: "t".into(),
+            planner: "planner".into(),
+            worker: "builder".into(),
+            light_worker: Some("local".into()),
+            reviewer: Some("planner".into()),
+            ..Default::default()
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/delegations",
+            &[AUTH, origin],
+            Some(json!({ "prompt": "add a flag", "team": "nope" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", b);
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/delegations",
+            &[AUTH, origin],
+            Some(json!({ "prompt": "add a flag", "team": "t", "target": 0 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let get = || {
+            let app = app.clone();
+            async move {
+                let (_, _, b) = call(
+                    &app,
+                    "GET",
+                    &format!("/api/delegations/{}", id),
+                    &[AUTH],
+                    None,
+                )
+                .await;
+                serde_json::from_str::<Value>(&b).unwrap()
+            }
+        };
+        let mut v = json!(null);
+        for _ in 0..400 {
+            crate::deck::delegate::tick(&app);
+            v = get().await;
+            if v["delegation"]["status"] != "planning" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(v["delegation"]["status"], "review", "{}", v);
+        assert_eq!(
+            v["delegation"]["plan"]["steps"].as_array().unwrap().len(),
+            2
+        );
+        // Edit before running: a person rewrites the first step.
+        let mut plan = v["delegation"]["plan"].clone();
+        plan["steps"][0]["prompt"] = json!("do one, carefully");
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            &format!("/api/delegations/{}/approve", id),
+            &[AUTH, origin],
+            Some(json!({ "plan": plan })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        for _ in 0..800 {
+            crate::deck::delegate::tick(&app);
+            v = get().await;
+            if v["delegation"]["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(v["delegation"]["status"], "done", "{}", v);
+        let roles: Vec<(String, String)> = v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["id"].as_str().unwrap().to_string(),
+                    s["role"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                ("one".into(), "worker".into()),
+                ("two".into(), "light_worker".into()),
+                ("review".into(), "reviewer".into())
+            ]
+        );
+        assert!(
+            (v["total_cost_usd"].as_f64().unwrap() - 0.043).abs() < 1e-9,
+            "{}",
+            v
+        );
+        // Who ran what: the planner on opus, the steps on cheaper models.
+        let calls: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let model_for = |needle: &str| {
+            calls
+                .iter()
+                .find(|c| c["prompt"].as_str().unwrap().contains(needle))
+                .map(|c| c["model"].as_str().unwrap_or("").to_string())
+                .unwrap()
+        };
+        assert_eq!(model_for("You are the planner"), "opus");
+        assert_eq!(model_for("do one, carefully"), "haiku");
+        assert_eq!(model_for("Your step (two)"), "qwen3-coder");
+        assert_eq!(model_for("Review their work"), "opus");
+        // Steps run in order by default.
+        let order: Vec<usize> = ["Your step (one)", "Your step (two)", "Review their work"]
+            .iter()
+            .map(|n| {
+                calls
+                    .iter()
+                    .position(|c| c["prompt"].as_str().unwrap().contains(n))
+                    .unwrap()
+            })
+            .collect();
+        assert!(order[0] < order[1] && order[1] < order[2]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -263,6 +263,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
   (manual, acceptEdits, auto, plan, ...) and models while it runs, interrupt it, or send it a
   follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
   plan and the model you pick (or a local one through Ollama) does the work.
+- **Plan and delegate:** a strong model (Opus, Fable, a big Codex model) plans; you review the
+  steps; cheaper or self-hosted models (Haiku, Ollama) carry each one out; a reviewer checks the
+  result. Each role is a profile, so any runner fits any role, and the cost per role is shown.
 - **Knowledge:** agents can start with the memory notes relevant to their task and finish by
   proposing what they learned; you review proposals in an inbox and accept them into memory.
   Vaults are searched, edited and linked in the console, and each agent shows how full its

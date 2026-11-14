@@ -868,6 +868,7 @@
   function pageLaunch(m) {
     var ov = S.ov, hs = harness();
     m.appendChild(header("Launch an agent", "Runs a runner on any node, in one of its target directories, and streams what it does."));
+    m.appendChild(launchTabs("one"));
     if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
     if (!hs) { m.appendChild(empty("No harness configured.")); return; }
     var holder = h("div", { class: "muted", text: "Checking nodes..." });
@@ -1206,10 +1207,186 @@
       }))));
   }
 
+  // ---- plan and delegate ------------------------------------------------------------
+  // A strong model plans; cheaper ones (Haiku, a local model) do the steps.
+  function launchTabs(on) {
+    return h("nav", { class: "tabs", "aria-label": "Launch modes" },
+      h("a", { href: "#/launch", class: on === "one" ? "on" : "", text: "One agent" }),
+      h("a", { href: "#/delegate", class: on === "plan" ? "on" : "", text: "Plan and delegate" }));
+  }
+  function profileLabel(name) {
+    var p = (S.ov.profiles || []).find(function (x) { return x.name === name; });
+    if (!p) return name;
+    return name + " (" + [p.runner || "claude", p.model || "default model"].join(", ") + ")";
+  }
+  function pageDelegate(m) {
+    var ov = S.ov, hs = harness();
+    m.appendChild(header("Plan and delegate", "A strong model reads the code and writes a plan; cheaper models carry out each step; an optional reviewer checks the result. Each role is a profile, so any runner works: Claude Code, Codex, Gemini CLI, or a local model through Ollama."));
+    m.appendChild(launchTabs("plan"));
+    if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
+    if (!hs) { m.appendChild(empty("No harness configured.")); return; }
+    var profiles = (ov.profiles || []).map(function (p) { return p.name; }), teams = ov.teams || [];
+    if (profiles.length < 1) {
+      m.appendChild(h("div", { class: "note warn" }, "Plan and delegate needs profiles for its roles. ", canEdit() ? h("a", { href: "#/settings/teams", text: "Set up a team in Settings > Teams" }) : "Add [[profile]] and [[team]] sections to indra.toml.", " (templates included)."));
+      return;
+    }
+    var holder = h("div", { class: "muted", text: "Checking nodes..." }); m.appendChild(holder);
+    loadNodes(false).then(function (nodes) {
+      holder.remove();
+      var sel = function (label, list, blank) { return h("select", { "aria-label": label }, blank ? h("option", { value: "", text: blank }) : null, list.map(function (x) { return h("option", { value: x, text: profileLabel(x) }); })); };
+      var team = h("select", { "aria-label": "Team" }, h("option", { value: "", text: "Pick the roles below" }), teams.map(function (t) { return h("option", { value: t.name, text: t.name + (t.description ? "  -  " + t.description : "") }); }));
+      var planner = sel("Planner", profiles), worker = sel("Worker", profiles), light = sel("Light steps", profiles, "the worker"), reviewer = sel("Reviewer", profiles, "no review step");
+      var review = h("input", { type: "checkbox", checked: true }), parallel = h("input", { type: "checkbox" });
+      var maxSteps = h("input", { type: "number", min: "1", max: "30", value: "8" });
+      var guess = function (re) { return profiles.find(function (p) { return re.test(p); }); };
+      planner.value = guess(/plan/i) || profiles[0]; worker.value = guess(/work|build|haiku|local/i) || profiles[0];
+      var roleBox = h("div", { class: "fields" }, h("label", null, "Planner", h("small", { text: "Reads and plans; changes nothing" }), planner),
+        h("label", null, "Worker", h("small", { text: "Does each step" }), worker),
+        h("label", null, "Light steps", h("small", { text: "Mechanical edits, cheapest model" }), light),
+        h("label", null, "Reviewer", h("small", { text: "Checks the result at the end" }), reviewer));
+      var opts2 = h("div", { class: "fields" }, h("label", null, "Most steps", maxSteps));
+      function fillTeam() {
+        var t = teams.find(function (x) { return x.name === team.value; });
+        roleBox.hidden = opts2.hidden = !!t;
+        if (t) { review.checked = !t.auto_run; parallel.checked = !!t.parallel; teamNote.textContent = "Planner " + profileLabel(t.planner) + "; worker " + profileLabel(t.worker) + (t.light_worker ? "; light steps " + profileLabel(t.light_worker) : "") + (t.reviewer ? "; reviewer " + profileLabel(t.reviewer) : "; no review step") + "."; }
+        else teamNote.textContent = "";
+      }
+      var teamNote = h("p", { class: "muted small" });
+      team.addEventListener("change", fillTeam);
+      var node = h("select", { "aria-label": "Node" }, nodes.map(function (n) { return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : "") }); }));
+      var target = h("select", { "aria-label": "Target" });
+      function fillNode() { var n = nodes.find(function (x) { return x.name === node.value; }) || nodes[0]; target.textContent = ""; n.targets.forEach(function (t, i) { target.appendChild(h("option", { value: String(i), text: t })); }); }
+      node.addEventListener("change", fillNode);
+      var prompt = h("textarea", { placeholder: "What should be built or changed? The planner turns it into steps.", "aria-label": "Task" });
+      var go = h("button", { class: "primary", type: "submit" }, "Plan it");
+      m.appendChild(h("form", { class: "form", onsubmit: function (e) {
+        e.preventDefault(); if (!prompt.value.trim()) { toast("Describe the task first", true); return; }
+        go.disabled = true;
+        var body = { h: hs.name, node: node.value, target: Number(target.value), prompt: prompt.value, auto_run: !review.checked };
+        if (team.value) body.team = team.value;
+        else body.roles = { planner: planner.value, worker: worker.value, light_worker: light.value || null, reviewer: reviewer.value || null, parallel: parallel.checked, auto_run: !review.checked, max_steps: Number(maxSteps.value) || 8 };
+        api("/api/delegations", { method: "POST", body: body }).then(function (r) { location.hash = "#/plan/" + r.id; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } },
+        h("label", null, "Task", prompt),
+        h("div", { class: "fields" }, h("label", null, "Node", node), h("label", { class: "wide" }, "Target", target)),
+        h("label", null, "Team", h("small", { text: "A saved set of roles (Settings > Teams), or pick them here." }), team), teamNote,
+        roleBox, opts2,
+        h("label", { class: "check" }, review, h("span", null, h("b", { text: "Let me review the plan before it runs" }), h("small", { text: " - edit, drop or add steps first" }))),
+        h("label", { class: "check" }, parallel, h("span", null, h("b", { text: "Independent steps may run at the same time" }), h("small", { text: " - they share the directory, so only when the plan keeps them apart" }))),
+        h("div", { class: "note", text: "Tokens: the planner reads and plans once; every step then runs on the worker's model with a short, self-contained brief, so the expensive model never does the typing. Costs per role show on the plan's page." }),
+        h("div", { class: "row" }, go, canEdit() ? h("a", { href: "#/settings/teams", text: "Save roles as a team" }) : null)));
+      fillNode(); fillTeam();
+    }).catch(function (e) { holder.textContent = e.message; });
+  }
+
+  var PLAN_STATE = { planning: "run live", review: "warn", running: "run live", done: "ok", failed: "bad", cancelled: "" };
+  function pagePlan(m, id) {
+    var top = h("div", { class: "stack" }), body = h("div", { class: "stack" });
+    m.appendChild(h("div", { class: "stack" }, top, body));
+    var editing = false;
+    function load() {
+      if (editing) return;
+      api("/api/delegations/" + id).then(function (r) { render(r); }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); });
+    }
+    function render(r) {
+      var d = r.delegation, ro = S.ov.read_only;
+      top.textContent = ""; body.textContent = "";
+      var cancel = ["planning", "review", "running"].indexOf(d.status) >= 0 && !ro ? h("button", { type: "button", class: "danger", onclick: function () {
+        if (!window.confirm("Cancel this plan?")) return;
+        api("/api/delegations/" + id + "/cancel", { method: "POST" }).then(load).catch(function (e) { toast(e.message, true); });
+      } }, "Cancel") : null;
+      top.appendChild(header("Plan #" + d.id + (d.team ? " - team " + d.team : ""), (d.node !== "local" ? d.node + ":" : "") + d.target,
+        [h("span", { class: "pill " + (PLAN_STATE[d.status] || ""), text: d.status }), r.total_cost_usd ? h("span", { class: "pill", text: "$" + r.total_cost_usd.toFixed(4) }) : null, cancel]));
+      top.appendChild(h("div", { class: "cmd lines", text: d.task }));
+      var roles = d.roles;
+      body.appendChild(h("div", { class: "card" }, h("h3", { text: "Roles" }), h("div", { class: "roles" },
+        [["planner", roles.planner], ["worker", roles.worker], ["light steps", roles.light_worker || roles.worker], ["reviewer", roles.reviewer || "none"]].map(function (x) {
+          var c = r.cost[x[0] === "light steps" ? "light_worker" : x[0]];
+          return h("div", { class: "stat" }, h("span", { text: x[0] }), h("b", { class: "small", text: x[1] === "none" ? "none" : profileLabel(x[1]) }), c ? h("span", { text: "$" + c.toFixed(4) }) : null);
+        }))));
+      if (d.error) body.appendChild(h("div", { class: "note bad", text: d.error }));
+      if (d.status === "planning") {
+        body.appendChild(h("div", { class: "card" }, h("p", null, "The planner is reading the code and writing the plan. "),
+          d.planner_proc ? h("a", { href: "#/proc/" + d.planner_proc, text: "Watch it (process #" + d.planner_proc + ")" }) : null));
+        return;
+      }
+      if (d.planner_proc) body.appendChild(h("p", { class: "muted small" }, "Planned by ", h("a", { href: "#/proc/" + d.planner_proc, text: "process #" + d.planner_proc }), r.planner && r.planner.cost_usd != null ? " ($" + r.planner.cost_usd.toFixed(4) + ")" : ""));
+      if (!d.plan) return;
+      if (d.status === "review" && !ro) return reviewForm(d);
+      if (d.plan.summary) body.appendChild(h("div", { class: "card" }, h("h3", { text: "Approach" }), h("p", { text: d.plan.summary })));
+      var byId = {}; r.steps.forEach(function (s) { byId[s.id] = s; });
+      var list = d.plan.steps.map(function (s, i) { return { n: i + 1, s: s, run: byId[s.id] }; });
+      if (byId.review) list.push({ n: "", s: { id: "review", title: "Review the result", size: "review", prompt: "" }, run: byId.review });
+      body.appendChild(h("div", { class: "card" }, h("h3", { text: "Steps" }), h("div", { class: "rowlist" }, list.map(function (x) {
+        var st = x.run ? x.run.state : "waiting";
+        return h("div", { class: "rowitem" }, h("b", { text: x.n ? x.n + "." : "" }), h("span", { class: "pill " + ({ succeeded: "ok", failed: "bad", running: "run live", cancelled: "", skipped: "warn" }[st] || ""), text: st }),
+          h("span", { class: "grow" }, h("b", { text: x.s.title }), h("span", { class: "muted small", text: "  " + (x.run ? profileLabel(x.run.profile || "") : x.s.size) })),
+          x.run && x.run.cost_usd ? h("span", { class: "muted small", text: "$" + x.run.cost_usd.toFixed(4) }) : null,
+          x.run && x.run.proc ? h("a", { href: "#/proc/" + x.run.proc, text: "process #" + x.run.proc }) : null);
+      })), d.workflow ? h("p", { class: "muted small" }, h("a", { href: "#/workflow/" + d.workflow, text: "Open it as workflow run #" + d.workflow })) : null));
+    }
+    function reviewForm(d) {
+      editing = true;
+      var plan = JSON.parse(JSON.stringify(d.plan));
+      var summary = h("textarea", { rows: "3", "aria-label": "Approach" }); summary.value = plan.summary || "";
+      var stepsBox = h("div", { class: "stack" });
+      function draw() {
+        stepsBox.textContent = "";
+        plan.steps.forEach(function (s, i) {
+          var title = h("input", { type: "text", value: s.title, "aria-label": "Title" });
+          var p = h("textarea", { rows: "5", "aria-label": "Instructions" }); p.value = s.prompt;
+          var size = h("select", { "aria-label": "Who does it" }, h("option", { value: "standard", text: "worker: " + profileLabel(d.roles.worker) }),
+            h("option", { value: "light", text: "light steps: " + profileLabel(d.roles.light_worker || d.roles.worker) })); size.value = s.size;
+          var needs = h("input", { type: "text", value: (s.needs || []).join(", "), placeholder: "ids of steps that come first", "aria-label": "After" });
+          [title, p, size, needs].forEach(function (el) { el.addEventListener("input", sync); el.addEventListener("change", sync); });
+          function sync() { s.title = title.value; s.prompt = p.value; s.size = size.value; s.needs = csv(needs.value); }
+          stepsBox.appendChild(h("div", { class: "card form step" },
+            h("div", { class: "row" }, h("b", { text: (i + 1) + "." }), h("code", { text: s.id }), h("span", { class: "grow" }),
+              h("button", { type: "button", class: "ghost", disabled: i === 0, onclick: function () { plan.steps.splice(i - 1, 0, plan.steps.splice(i, 1)[0]); draw(); } }, "Up"),
+              h("button", { type: "button", class: "ghost", disabled: i === plan.steps.length - 1, onclick: function () { plan.steps.splice(i + 1, 0, plan.steps.splice(i, 1)[0]); draw(); } }, "Down"),
+              h("button", { type: "button", class: "ghost danger", onclick: function () { plan.steps.splice(i, 1); draw(); } }, "Remove")),
+            h("label", null, "Step", title), h("label", null, "Instructions for the worker", p),
+            h("div", { class: "fields" }, h("label", null, "Who does it", size), h("label", null, "After", needs))));
+        });
+      }
+      draw();
+      body.appendChild(h("div", { class: "card form" }, h("h3", { text: "The planner's approach" }), summary));
+      body.appendChild(h("h2", { text: "Steps (" + plan.steps.length + ")" }));
+      body.appendChild(stepsBox);
+      body.appendChild(h("div", { class: "row" },
+        h("button", { type: "button", onclick: function () { plan.steps.push({ id: "step-" + (plan.steps.length + 1), title: "", prompt: "", needs: [], size: "standard" }); draw(); } }, "Add a step"),
+        h("button", { type: "button", class: "primary", onclick: function (e) {
+          plan.summary = summary.value; e.target.disabled = true;
+          api("/api/delegations/" + d.id + "/approve", { method: "POST", body: { plan: plan } })
+            .then(function () { editing = false; toast("Running the plan"); load(); })
+            .catch(function (err) { toast(err.message, true); e.target.disabled = false; });
+        } }, "Run the plan")));
+    }
+    load(); every(2500, load);
+  }
+
   function pageProcs(m) {
     m.appendChild(header("Processes", "Agents started from this console since it started. Logs stay on disk under " + S.ov.data_dir + "."));
+    var plans = h("div"); m.appendChild(plans);
     var holder = h("div"); m.appendChild(holder);
     function load() {
+      api("/api/delegations").then(function (list) {
+        plans.textContent = "";
+        if (!list.length) return;
+        plans.appendChild(h("h2", { text: "Plans" }));
+        plans.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["#", "Status", "Task", "Steps", "Roles", "Cost"].map(function (t) { return h("th", { text: t }); }))),
+          h("tbody", null, list.map(function (r) {
+            var d = r.delegation, go = function () { location.hash = "#/plan/" + d.id; };
+            return h("tr", { class: "click", tabindex: "0", onclick: go, onkeydown: function (e) { if (e.key === "Enter") go(); } },
+              h("td", { text: String(d.id) }), h("td", null, h("span", { class: "pill " + (PLAN_STATE[d.status] || ""), text: d.status })),
+              h("td", { class: "desc", text: d.task.slice(0, 120) }), h("td", { text: d.plan ? String(d.plan.steps.length) : "-" }),
+              h("td", { class: "muted", text: d.roles.planner + " > " + d.roles.worker }),
+              h("td", { text: r.total_cost_usd ? "$" + r.total_cost_usd.toFixed(4) : "-" }));
+          })))));
+        plans.appendChild(h("h2", { text: "Agents" }));
+      }).catch(function () { /* plans are optional */ });
       api("/api/procs").then(function (list) {
         holder.textContent = "";
         holder.appendChild(list.length ? procTable(list) : empty("Nothing launched yet."));
@@ -1865,7 +2042,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Components"],
-    ["presets", "Presets"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
+    ["presets", "Presets"], ["teams", "Teams"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -1878,11 +2055,21 @@
   function cfgProfileNames(c) { return (c.config.profile || []).map(function (p) { return p.name; }); }
   // Starting points for "Add profile".
   var PROFILE_TEMPLATES = [
-    { label: "Planner (Opus, plan mode)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "plan", effort: "high" } },
+    { label: "Planner (Opus, read-only)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "dontAsk", effort: "high",
+      allowed_tools: ["Read", "Grep", "Glob", "Bash(git log:*)", "Bash(git diff:*)", "Bash(ls:*)"] } },
+    { label: "Builder (Haiku)", v: { name: "builder", description: "Carries out small, well-specified steps cheaply", runner: "claude", model: "haiku", permission_mode: "acceptEdits",
+      allowed_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git diff:*)", "Bash(git status:*)"] } },
+    { label: "Opus with Haiku subagents", v: { name: "lead", description: "Opus leads; Claude Code's own subagents run on Haiku", runner: "claude", model: "opus", permission_mode: "acceptEdits", subagent_model: "haiku" } },
     { label: "Worker (Sonnet, accept edits)", v: { name: "worker", description: "Does the work the planner laid out", runner: "claude", model: "sonnet", permission_mode: "acceptEdits",
       allowed_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git diff:*)", "Bash(git status:*)"] } },
     { label: "Local model (Ollama)", v: { name: "local", description: "Claude Code against a local model served by Ollama", runner: "claude", model: "qwen3-coder",
       permission_mode: "manual", env: { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama", ANTHROPIC_API_KEY: "" } } }
+  ];
+
+  // Starting points for "Add team" (they name profiles from the templates above).
+  var TEAM_TEMPLATES = [
+    { label: "Opus plans, Haiku builds", v: { name: "opus-haiku", description: "Plan with Opus, build with Haiku, Opus reviews", planner: "planner", worker: "builder", reviewer: "planner" } },
+    { label: "Opus plans, local model builds", v: { name: "opus-local", description: "Plan with Opus, build on a self-hosted model through Ollama", planner: "planner", worker: "local", light_worker: "local", reviewer: "planner" } }
   ];
 
   var SCHEMA = {
@@ -1922,6 +2109,7 @@
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
       { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },
+      { k: "subagent_model", label: "Model for its subagents", list: "models", placeholder: "same as the agent", help: "Claude Code only (CLAUDE_CODE_SUBAGENT_MODEL): e.g. haiku, so an Opus agent hands its Task subagents to a cheaper model." },
       { k: "memory", label: "Start with the memory notes most relevant to the prompt", type: "bool" },
       { k: "reflect", label: "Before finishing, propose learnings for review (Claude Code)", type: "bool" }]; },
       summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : "") + (p.memory ? ", memory" : "") + (p.reflect ? ", reflects" : ""); } },
@@ -1945,6 +2133,17 @@
       { k: "args", label: "Extra arguments for the remote indra", type: "list", help: "One per line, e.g. --config and /etc/indra.toml." },
       { k: "ssh_command", label: "ssh client", placeholder: "ssh" }]; },
       summary: function (n) { return n.ssh + "  -  " + (n.targets || []).length + " targets, " + (n.max_parallel || 2) + " agents at once"; } },
+    team: { tab: "teams", noun: "team", fields: function (c) { var P = cfgProfileNames(c); return [
+      { k: "name", label: "Name", req: true, help: "Pick it under Launch > Plan and delegate." },
+      { k: "description", label: "Description" },
+      { k: "planner", label: "Planner", type: "select", req: true, options: opts(P), help: "Reads the code and writes the plan; give it a strong model and read-only tools (see the Planner profile template)." },
+      { k: "worker", label: "Worker", type: "select", req: true, options: opts(P), help: "Carries out each step: Haiku, a local model through Ollama, a small Codex model..." },
+      { k: "light_worker", label: "Light steps", type: "select", options: opts(P, "Same as the worker"), help: "For mechanical steps (renames, docs, boilerplate): the cheapest model." },
+      { k: "reviewer", label: "Reviewer", type: "select", options: opts(P, "No review step"), help: "Checks the result against the plan at the end and fixes small mistakes." },
+      { k: "max_steps", label: "Most steps", type: "number", placeholder: "8" },
+      { k: "auto_run", label: "Run the plan without waiting for my review", type: "bool" },
+      { k: "parallel", label: "Let independent steps run at the same time (they share the directory)", type: "bool" }]; },
+      summary: function (t) { return t.planner + " plans, " + t.worker + " builds" + (t.light_worker ? ", " + t.light_worker + " for light steps" : "") + (t.reviewer ? ", " + t.reviewer + " reviews" : "") + (t.auto_run ? "; runs without review" : ""); } },
     preset: { tab: "presets", noun: "preset", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
       { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} becomes the target path, {node} the node name." },
@@ -2102,7 +2301,7 @@
       }
       ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, secrets: secrets, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, teams: function () { list("team"); }, secrets: secrets, file: file })[tab]();
     }
 
     function general() {
@@ -2150,9 +2349,11 @@
           saveSection(section, next, "Imported " + got.length + " " + d.noun + "(s)").catch(function (e) { toast(e.message, true); });
         });
       } }, "Import");
-      body.appendChild(h("div", { class: "row cfgbar" }, add, section === "profile" ? PROFILE_TEMPLATES.map(function (t) {
-        return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New profile: " + t.label); } }, "+ " + t.label);
-      }) : null, exportBtn, importBtn));
+      var templates = section === "profile" ? PROFILE_TEMPLATES : section === "team" ? TEAM_TEMPLATES : [];
+      body.appendChild(h("div", { class: "row cfgbar" }, add, templates.map(function (t) {
+        return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New " + d.noun + ": " + t.label); } }, "+ " + t.label);
+      }), exportBtn, importBtn));
+      if (section === "team") body.appendChild(h("p", { class: "muted", text: "A team plans with one profile and builds with cheaper ones: Launch > Plan and delegate. The templates name the planner, builder and local profiles; add those under Profiles first (they have templates too). Any runner can fill any role, for example a Codex planner with a local Ollama builder." }));
       if (section === "profile") body.appendChild(h("p", { class: "muted", text: "A profile is how an agent runs: plan with a strong model, do the work with the one you choose, or try it on a local model. Launch, presets, workflow tasks and fan-outs can pick one; model and mode can still change while the agent runs." }));
       body.appendChild(modelList() || h("span"));
       var grid = h("div", { class: "grid" });
@@ -2302,7 +2503,7 @@
     S.cleanup = [];
     var parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
     var page = parts[0], arg = parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined;
-    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows", memory: "knowledge" }[page] || page;
+    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows", memory: "knowledge", delegate: "launch", plan: "procs" }[page] || page;
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -2336,7 +2537,9 @@
         settings: function () { pageSettings(m, arg); },
         board: function () { pageBoard(m); },
         wfedit: function () { pageWorkflowEditor(m, arg); },
-        terminal: function () { pageTerminal(m); }
+        terminal: function () { pageTerminal(m); },
+        delegate: function () { pageDelegate(m); },
+        plan: function () { pagePlan(m, arg); }
       };
       (pages[page] || pages.overview)();
     }).catch(function (e) { if (e.message !== "unauthorized") { m.appendChild(empty(e.message)); } });

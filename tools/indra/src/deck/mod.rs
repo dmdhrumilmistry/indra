@@ -6,6 +6,7 @@ pub mod board;
 pub mod cli;
 pub mod confedit;
 pub mod config;
+pub mod delegate;
 pub mod discover;
 pub mod knowledge;
 pub mod link;
