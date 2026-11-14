@@ -108,6 +108,14 @@ file = "docs/guides/plan-and-delegate.md"
 
 [[page]]
 group = "Guides"
+slug = "review-loop"
+title = "Reviewing pull requests from the console"
+description = "Start a PR review, triage its findings, compare it with the last review, remember, publish and post."
+[[page.source]]
+file = "docs/guides/review-loop.md"
+
+[[page]]
+group = "Guides"
 slug = "local-models"
 title = "Local models with Ollama"
 description = "Whole agents, or just Claude Code's subagents, on models you host; credentials never reach Ollama."

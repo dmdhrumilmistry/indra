@@ -781,9 +781,38 @@
 
   function segs(stages) { return h("div", { class: "segs", title: stages.map(function (s) { return s.name + ": " + s.state; }).join(", ") }, stages.map(function (s) { return h("i", { class: s.state }); })); }
 
+  // Start /sh-pr-review on a pull request, from the Runs page.
+  function prReviewForm(hs) {
+    if (S.ov.read_only || !hs || !hs.targets.length) return null;
+    var pr = h("input", { type: "text", placeholder: "https://github.com/owner/repo/pull/123, or 123", "aria-label": "Pull request" });
+    var target = h("select", { "aria-label": "Checkout" }, hs.targets.map(function (t, i) { return h("option", { value: String(i), text: t }); }));
+    var profile = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "None (runner defaults)" }),
+      (S.ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name + (p.description ? "  -  " + p.description : "") }); }));
+    var tier = h("select", { "aria-label": "Tier" }, [["", "from the diff"], ["0", "0: triage only"], ["1", "1: targeted"], ["2", "2: standard"], ["3", "3: full"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+    var failOn = h("select", { "aria-label": "Fail on" }, [["", "default"], ["critical", "critical"], ["high", "high"], ["medium", "medium"], ["low", "low"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+    var deep = h("input", { type: "checkbox" }), dry = h("input", { type: "checkbox", checked: true });
+    var go = h("button", { type: "submit", class: "primary" }, "Start the review");
+    var form = h("form", { class: "form", onsubmit: function (e) {
+      e.preventDefault(); go.disabled = true;
+      var body = { h: hs.name, pr: pr.value.trim(), target: Number(target.value), profile: profile.value || null, deep: deep.checked, dry_run: dry.checked };
+      if (tier.value) body.tier = Number(tier.value);
+      if (failOn.value) body.fail_on = failOn.value;
+      api("/api/pr-review", { method: "POST", body: body }).then(function (r) { toast("Started: " + r.prompt); location.hash = "#/proc/" + r.id; })
+        .catch(function (err) { toast(err.message, true); go.disabled = false; });
+    } },
+      h("div", { class: "fields" }, h("label", { class: "wide" }, "Pull request", pr), h("label", null, "Checkout", h("small", { text: "A clone of the PR's repository" }), target)),
+      h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Depth", tier), h("label", null, "Fail on", failOn)),
+      h("label", { class: "check" }, deep, h("span", { text: "Deep: every changed file, not just the risky ones" })),
+      h("label", { class: "check" }, dry, h("span", { text: "Dry run: post nothing; post from the run's page when you have read it" })),
+      h("div", { class: "row" }, go));
+    return h("details", { class: "card prreview" }, h("summary", { text: "Review a pull request" }),
+      h("p", { class: "muted small", text: "Runs /sh-pr-review in the checkout with the profile you pick (any runner and model, a local one included). The run appears below; triage its findings, compare it with an earlier review, then post it." }), form);
+  }
+
   function pageRuns(m) {
     var hs = harness();
     m.appendChild(header("Runs", hs && hs.has_runs ? "Run directories under " + hs.targets.join(", ") + ". Refreshes every 3 seconds." : "This harness does not define a runs directory."));
+    var prf = prReviewForm(hs); if (prf) m.appendChild(prf);
     var holder = h("div", { class: "tablewrap" });
     m.appendChild(holder);
     function load() {
@@ -815,6 +844,76 @@
       var fill = h("div", { class: "fill" }); fill.style.width = (100 * obj[k] / max) + "%";
       return h("div", { class: "bar" }, h("span", { text: k }), h("div", { class: "track" }, fill), h("b", { text: String(obj[k]) }));
     }));
+  }
+
+  // A run's findings: change a status (with the reason), and compare with another run.
+  var SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  function runFindings(key) {
+    var box = h("div");
+    api("/api/run/findings" + hq({ key: key })).then(function (r) {
+      var list = r.findings || [];
+      if (!list.length) return;
+      var ro = S.ov.read_only;
+      var card = h("div", { class: "card findings" });
+      var filter = h("select", { "aria-label": "Show" }, [["open", "open (not false positives)"], ["all", "all"], ["false-positive", "false positives"], ["needs-runtime", "needs runtime"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var tbody = h("tbody");
+      function rows() {
+        tbody.textContent = "";
+        list.slice().sort(function (a, b) { return (SEV_ORDER[a.severity] == null ? 9 : SEV_ORDER[a.severity]) - (SEV_ORDER[b.severity] == null ? 9 : SEV_ORDER[b.severity]); })
+          .filter(function (f) { return filter.value === "all" || (filter.value === "open" ? f.status !== "false-positive" : f.status === filter.value); })
+          .forEach(function (f) {
+            var st = h("select", { "aria-label": "Status of " + (f.id || f.title) }, ["verified", "needs-runtime", "false-positive"].concat(["verified", "needs-runtime", "false-positive"].indexOf(f.status) < 0 && f.status ? [f.status] : [])
+              .map(function (x) { return h("option", { value: x, text: x }); }));
+            st.value = f.status;
+            var why = h("input", { type: "text", placeholder: "why (required for a false positive)", "aria-label": "Reason" });
+            var save = h("button", { type: "button", disabled: true }, "Save");
+            function dirty() { save.disabled = st.value === f.status && !why.value.trim(); }
+            st.addEventListener("change", dirty); why.addEventListener("input", dirty);
+            save.addEventListener("click", function () {
+              save.disabled = true;
+              api("/api/run/triage", { method: "POST", body: { h: S.h, key: key, index: f.index, fingerprint: f.fingerprint, status: st.value, reason: why.value } }).then(function (n) {
+                list[list.indexOf(f)] = n; toast((n.id || "Finding") + ": " + n.status + (n.status === "false-positive" ? ". Record into memory to remember it." : "")); rows();
+              }).catch(function (e) { toast(e.message, true); dirty(); });
+            });
+            var t = f.triage;
+            tbody.appendChild(h("tr", null,
+              h("td", null, h("span", { class: "sev sev-" + (f.severity || "info"), text: f.severity || "?" })),
+              h("td", null, h("b", { text: (f.id ? f.id + ": " : "") + (f.title || "(untitled)") }),
+                h("div", { class: "muted small", text: [f.class, f.file ? f.file + (f.line != null ? ":" + f.line : "") : ""].filter(Boolean).join("  ") }),
+                t && t.to ? h("div", { class: "muted small", text: "triaged " + t.from + " -> " + t.to + (t.reason ? ": " + t.reason : "") }) : null),
+              h("td", null, ro ? h("span", { text: f.status }) : st),
+              ro ? null : h("td", { class: "grow" }, h("div", { class: "row" }, why, save))));
+          });
+        if (!tbody.childNodes.length) tbody.appendChild(h("tr", null, h("td", { colspan: "4", class: "muted", text: "None." })));
+      }
+      filter.addEventListener("change", rows);
+      card.appendChild(h("div", { class: "row" }, h("h3", { class: "grow", text: "Findings (" + list.length + ")" }), h("span", { class: "muted small", text: "Show" }), filter));
+      card.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["", "Finding", "Status", ro ? null : "Change"].filter(function (x) { return x !== null; }).map(function (x) { return h("th", { text: x }); }))), tbody)));
+      // Compare with another run of this harness.
+      var other = h("select", { "aria-label": "Compare with" }), out = h("div");
+      card.appendChild(h("div", { class: "row compare" }, h("b", { text: "Compare with" }), other,
+        h("button", { type: "button", onclick: function () {
+          if (!other.value) return;
+          api("/api/run/compare" + hq({ key: key, with: other.value })).then(function (c) {
+            out.textContent = "";
+            function group(title, items, cls, fmt) {
+              return h("div", { class: "cmpgroup " + cls }, h("h4", { text: title + " (" + items.length + ")" }),
+                items.length ? h("ul", { class: "links" }, items.slice(0, 200).map(function (x) { var f = x.finding || x; return h("li", null, h("span", { class: "rel", text: f.severity || "" }), (f.id ? f.id + ": " : "") + (f.title || f.file || f.fingerprint) + (fmt ? fmt(x) : "")); })) : h("p", { class: "muted small", text: "none" }));
+            }
+            out.appendChild(h("p", { class: "muted small", text: c.head + " against " + c.base + ", matched by fingerprint. False positives count as closed." }));
+            out.appendChild(h("div", { class: "cmp" }, group("New", c.new, "new"), group("Fixed", c.fixed, "fixed"), group("Still open", c.still_open, "open"),
+              group("Changed status", c.changed, "changed", function (x) { return "  (" + x.from + " -> " + x.to + ")"; })));
+          }).catch(function (e) { toast(e.message, true); });
+        } }, "Compare")));
+      card.appendChild(out);
+      api("/api/runs" + hq()).then(function (runs) {
+        runs.filter(function (x) { return x.key !== key && x.counts && x.counts.source === "verified.jsonl"; }).forEach(function (x) { other.appendChild(h("option", { value: x.key, text: x.name + "  (" + x.counts.total + " findings, " + ago(x.modified) + ")" })); });
+        if (!other.options.length) { other.appendChild(h("option", { value: "", text: "no other run with findings" })); other.disabled = true; }
+      });
+      rows();
+      box.appendChild(card);
+    }).catch(function () { /* no verified.jsonl: nothing to triage */ });
+    return box;
   }
 
   // What a finished review run can do next: remember it, publish it, post it.
@@ -967,7 +1066,7 @@
 
   function pageRun(m, key) {
     var top = h("div"), body = h("div"), viewer = h("div");
-    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(body);
+    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runFindings(key)); m.appendChild(body);
     var openRel = null, lastMod = 0;
     function showFile(rel) {
       openRel = rel;

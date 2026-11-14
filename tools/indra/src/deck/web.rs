@@ -630,7 +630,7 @@ async fn run_file(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResu
 }
 
 #[derive(Deserialize)]
-struct LaunchReq {
+pub(crate) struct LaunchReq {
     h: Option<String>,
     /// "local" (default) or a configured node.
     node: Option<String>,
@@ -715,7 +715,7 @@ fn check_prompt(p: &str) -> ApiResult<&str> {
     Ok(p)
 }
 
-async fn proc_start(
+pub(crate) async fn proc_start(
     State(app): State<Arc<App>>,
     Json(r): Json<LaunchReq>,
 ) -> ApiResult<Json<Value>> {
@@ -2103,6 +2103,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/run/record", post(crate::deck::tools::record))
         .route("/api/run/publish", post(crate::deck::tools::publish))
         .route("/api/run/post", post(crate::deck::tools::post))
+        .route("/api/run/findings", get(crate::deck::tools::findings))
+        .route("/api/run/triage", post(crate::deck::tools::triage))
+        .route("/api/run/compare", get(crate::deck::tools::compare))
+        .route("/api/pr-review", post(crate::deck::tools::pr_review))
         .route("/api/ollama", get(crate::deck::tools::ollama))
         .route("/api/tools", get(crate::deck::tools::overview))
         .route("/api/tools/cache", post(crate::deck::tools::cache))
@@ -4777,6 +4781,187 @@ while True:
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{}", b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn triage_compare_and_pr_reviews() {
+        let (app, dir) = fixture("triage", false);
+        let w = |run: &str, body: &str| {
+            let p = dir.join("target/runs").join(run);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("verified.jsonl"), body).unwrap();
+        };
+        let f = |id: &str, title: &str, file: &str, status: &str| {
+            json!({ "id": id, "title": title, "class": "sqli", "severity": "high", "status": status, "file": file, "line": 3 }).to_string() + "\n"
+        };
+        // Base: A (open), B (open), C (false positive). Head: A, C, D new; B gone.
+        w(
+            "run-1",
+            &(f("A", "SQLi in login", "a.py", "verified")
+                + &f("B", "SQLi in search", "b.py", "verified")
+                + &f("C", "Escaped", "c.py", "false-positive")),
+        );
+        w(
+            "run-2",
+            &(f("A", "SQLi in login", "a.py", "verified")
+                + "not json\n"
+                + &f("C", "Escaped", "c.py", "verified")
+                + &f("D", "SQLi in export", "d.py", "needs-runtime")),
+        );
+
+        let (st, _, b) = call(&app, "GET", "/api/run/findings?key=0:run-2", &[AUTH], None).await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let list: Value = serde_json::from_str(&b).unwrap();
+        let list = list["findings"].as_array().unwrap().clone();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[1]["index"], 2); // the bad line keeps its place
+
+        let (st, _, b) = call(
+            &app,
+            "GET",
+            "/api/run/compare?key=0:run-2&with=0:run-1",
+            &[AUTH],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let c: Value = serde_json::from_str(&b).unwrap();
+        fn ids2(c: &Value, k: &str) -> Vec<String> {
+            c[k].as_array()
+                .unwrap()
+                .iter()
+                .map(|x| {
+                    x.get("finding").unwrap_or(x)["id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        }
+        let ids = |k: &str| ids2(&c, k);
+        let mut new = ids("new");
+        new.sort();
+        assert_eq!(new, vec!["C", "D"]); // C was a false positive in run-1
+        assert_eq!(ids("fixed"), vec!["B"]);
+        assert_eq!(ids("still_open"), vec!["A"]);
+        assert_eq!(ids("changed"), vec!["C"]);
+
+        // Triage: a false positive needs a reason; the old status is kept;
+        // a stale fingerprint is refused; the unparsable line survives.
+        let c_fp = list.iter().find(|x| x["id"] == "C").unwrap()["fingerprint"].clone();
+        let body = |status: &str, reason: &str, fp: &Value| json!({ "key": "0:run-2", "index": 2, "fingerprint": fp, "status": status, "reason": reason });
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/run/triage",
+            &[AUTH],
+            Some(body("false-positive", "", &c_fp)),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/run/triage",
+            &[AUTH],
+            Some(body("fixed", "x", &c_fp)),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/run/triage",
+            &[AUTH],
+            Some(body("verified", "", &json!("0123456789ab"))),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/run/triage",
+            &[AUTH],
+            Some(body("false-positive", "escaped by the ORM", &c_fp)),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let text = std::fs::read_to_string(dir.join("target/runs/run-2/verified.jsonl")).unwrap();
+        assert!(text.contains("not json\n"));
+        let c_line: Value = serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
+        assert_eq!(c_line["status"], "false-positive");
+        assert_eq!(c_line["triage"]["from"], "verified");
+        assert_eq!(c_line["triage"]["reason"], "escaped by the ORM");
+        // Now C is closed in both runs, so it is neither new nor fixed.
+        let (_, _, b) = call(
+            &app,
+            "GET",
+            "/api/run/compare?key=0:run-2&with=0:run-1",
+            &[AUTH],
+            None,
+        )
+        .await;
+        let c: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(ids2(&c, "new"), vec!["D"]);
+        assert!(ids2(&c, "changed").is_empty());
+        // The memory recorder writes the person's reason into the learning.
+        let vault = dir.join("target/runs/memory");
+        crate::mem::record::record(&dir.join("target/runs/run-2"), &vault, false).unwrap();
+        let mut found = false;
+        for e in std::fs::read_dir(vault.join("learnings"))
+            .unwrap()
+            .flatten()
+        {
+            if std::fs::read_to_string(e.path())
+                .unwrap()
+                .contains("triaged: verified -> false-positive: escaped by the ORM")
+            {
+                found = true;
+            }
+        }
+        assert!(found);
+
+        // A PR review is a launch of /sh-pr-review with checked arguments.
+        for bad in [
+            json!({ "pr": "https://evil.example/owner/repo/pull/1", "target": 0 }),
+            json!({ "pr": "12; rm -rf /", "target": 0 }),
+            json!({ "pr": "https://github.com/../x/pull/1", "target": 0 }),
+            json!({ "pr": "7", "target": 0, "tier": 9 }),
+            json!({ "pr": "7", "target": 0, "fail_on": "everything" }),
+        ] {
+            let (st, _, b) = call(&app, "POST", "/api/pr-review", &[AUTH], Some(bad.clone())).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{} {}", bad, b);
+        }
+        let (st, _, b) = call(&app, "POST", "/api/pr-review", &[AUTH], Some(json!({ "pr": "https://github.com/acme/shop/pull/7", "target": 0, "runner": "echo", "tier": 2, "deep": true, "fail_on": "high" }))).await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let r: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(r["prompt"], "/sh-pr-review https://github.com/acme/shop/pull/7 --tier=2 --deep --fail-on=high --dry-run");
+        assert!(r["id"].as_u64().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (app, dir) = fixture("triage-ro", true);
+        let p = dir.join("target/runs/run-1");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("verified.jsonl"), f("A", "x", "a.py", "verified")).unwrap();
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/run/triage",
+            &[AUTH],
+            Some(json!({ "key": "0:run-1", "index": 0, "fingerprint": "x", "status": "verified" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/pr-review",
+            &[AUTH],
+            Some(json!({ "pr": "7", "target": 0 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
