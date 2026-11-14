@@ -73,6 +73,8 @@ fn quote(s: &str) -> String {
 struct Mem<'a> {
     vault: &'a Path,
     dry: bool,
+    /// With `dry`, the commands that would run.
+    cmds: std::cell::RefCell<Vec<String>>,
 }
 
 impl Mem<'_> {
@@ -83,10 +85,10 @@ impl Mem<'_> {
             self.vault.display().to_string(),
         ];
         all.extend(args.iter().cloned());
-        println!(
+        self.cmds.borrow_mut().push(format!(
             "indra {}",
             all.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
-        );
+        ));
     }
 
     fn exists(&self, name: &str) -> bool {
@@ -150,13 +152,31 @@ impl Mem<'_> {
     }
 }
 
-/// Record `run_dir` into `vault`. Returns the counts as JSON.
+/// Record `run_dir` into `vault`. Returns the counts as JSON; with `dry_run`
+/// it writes nothing and prints the `indra mem` commands it would run.
 pub fn record(run_dir: &Path, vault: &Path, dry_run: bool) -> Result<Value, String> {
+    let (counts, cmds) = go(run_dir, vault, dry_run)?;
+    for c in cmds {
+        println!("{}", c);
+    }
+    Ok(counts)
+}
+
+/// What recording would do, without writing: the commands and the counts.
+pub fn plan(run_dir: &Path, vault: &Path) -> Result<Value, String> {
+    let (mut counts, cmds) = go(run_dir, vault, true)?;
+    counts["commands"] = json!(cmds);
+    counts["dry_run"] = json!(true);
+    Ok(counts)
+}
+
+fn go(run_dir: &Path, vault: &Path, dry_run: bool) -> Result<(Value, Vec<String>), String> {
     let run = run_id(run_dir);
     let findings = load(run_dir)?;
     let m = Mem {
         vault,
         dry: dry_run,
+        cmds: Default::default(),
     };
     let mut made: HashSet<String> = HashSet::new();
     let mut by_id: HashMap<String, String> = HashMap::new();
@@ -302,8 +322,9 @@ pub fn record(run_dir: &Path, vault: &Path, dry_run: bool) -> Result<Value, Stri
             }
         }
     }
-    Ok(json!({
+    let counts = json!({
         "vault": vault.display().to_string(),
         "new": new, "seen-again": again, "false-positive": fps, "skipped": skipped,
-    }))
+    });
+    Ok((counts, m.cmds.into_inner()))
 }

@@ -53,6 +53,86 @@ enum SkillsCmd {
     },
 }
 
+/// The indra repository at or above `start`.
+pub fn find_repo(start: &Path) -> Option<PathBuf> {
+    let mut d = Some(start.to_path_buf());
+    while let Some(x) = d {
+        if x.join("plugins").join("indra").join("skills").is_dir() {
+            return Some(x);
+        }
+        d = x.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+/// What differs between the canonical skills and the mirror (empty: in step),
+/// and how many files the canonical copy has.
+pub fn check(repo: &Path) -> (usize, Vec<String>) {
+    let (source, mirror) = (
+        repo.join("plugins").join("indra").join("skills"),
+        repo.join("skills"),
+    );
+    let src = tree_files(&source);
+    let mut problems = Vec::new();
+    if !mirror.is_dir() {
+        problems.push(format!("mirror does not exist: {}", mirror.display()));
+    } else {
+        let dst = tree_files(&mirror);
+        for m in src.iter().filter(|f| !dst.contains(f)) {
+            problems.push(format!("missing from mirror: {}", m.display()));
+        }
+        for x in dst.iter().filter(|f| !src.contains(f)) {
+            problems.push(format!("stale in mirror: {}", x.display()));
+        }
+        for f in src.iter().filter(|f| dst.contains(f)) {
+            if !same(&source.join(f), &mirror.join(f)) {
+                problems.push(format!("differs: {}", f.display()));
+            }
+        }
+    }
+    (src.len(), problems)
+}
+
+/// Refresh the mirror; the number of files copied.
+pub fn sync(repo: &Path) -> Result<usize, String> {
+    copy_tree(
+        &repo.join("plugins").join("indra").join("skills"),
+        &repo.join("skills"),
+    )
+}
+
+/// Where `install` puts skills for `to` (agents, claude, opencode): under
+/// home, or under `workspace` when given.
+pub fn install_dir(to: &str, workspace: Option<&Path>) -> Result<PathBuf, String> {
+    let home = crate::paths::home().ok_or("no home folder")?;
+    Ok(match (to, workspace) {
+        ("agents", None) => home.join(".agents").join("skills"),
+        ("agents", Some(w)) => w.join(".agents").join("skills"),
+        ("claude", None) => home.join(".claude").join("skills"),
+        ("claude", Some(w)) => w.join(".claude").join("skills"),
+        ("opencode", None) => home.join(".config").join("opencode").join("skills"),
+        ("opencode", Some(w)) => w.join(".opencode").join("skills"),
+        _ => return Err("install to agents, claude or opencode".into()),
+    })
+}
+
+/// Copy every skill into `dest`; how many.
+pub fn install(repo: &Path, dest: &Path) -> Result<usize, String> {
+    let source = repo.join("plugins").join("indra").join("skills");
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut names: Vec<_> = std::fs::read_dir(&source)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name())
+        .collect();
+    names.sort();
+    for n in &names {
+        copy_tree(&source.join(n), &dest.join(n))?;
+    }
+    Ok(names.len())
+}
+
 fn repo_root(given: &Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(r) = given {
         return Ok(r.clone());
@@ -119,33 +199,15 @@ fn same(a: &Path, b: &Path) -> bool {
 pub fn run(a: SkillsArgs) -> Result<ExitCode, String> {
     let repo = repo_root(&a.repo)?;
     let source = repo.join("plugins").join("indra").join("skills");
-    let mirror = repo.join("skills");
     if !source.is_dir() {
         eprintln!("error: canonical skills not found at {}", source.display());
         return Ok(ExitCode::from(2));
     }
     match a.cmd {
         SkillsCmd::Sync { check: true } => {
-            let src = tree_files(&source);
-            let mut problems = Vec::new();
-            if !mirror.is_dir() {
-                problems.push(format!("mirror does not exist: {}", mirror.display()));
-            } else {
-                let dst = tree_files(&mirror);
-                for m in src.iter().filter(|f| !dst.contains(f)) {
-                    problems.push(format!("missing from mirror: {}", m.display()));
-                }
-                for x in dst.iter().filter(|f| !src.contains(f)) {
-                    problems.push(format!("stale in mirror: {}", x.display()));
-                }
-                for f in src.iter().filter(|f| dst.contains(f)) {
-                    if !same(&source.join(f), &mirror.join(f)) {
-                        problems.push(format!("differs: {}", f.display()));
-                    }
-                }
-            }
+            let (n, problems) = check(&repo);
             if problems.is_empty() {
-                println!("skills/ mirror is up to date ({} files).", src.len());
+                println!("skills/ mirror is up to date ({} files).", n);
                 return Ok(ExitCode::SUCCESS);
             }
             eprintln!("skills/ mirror is STALE. Run: indra skills sync");
@@ -155,47 +217,19 @@ pub fn run(a: SkillsArgs) -> Result<ExitCode, String> {
             Ok(ExitCode::from(1))
         }
         SkillsCmd::Sync { check: false } => {
-            let n = copy_tree(&source, &mirror)?;
-            println!("Synced {} files -> skills", n);
+            println!("Synced {} files -> skills", sync(&repo)?);
             Ok(ExitCode::SUCCESS)
         }
         SkillsCmd::Install { to, scope } => {
-            let home = crate::paths::home().ok_or("no home folder")?;
             let here = std::env::current_dir().map_err(|e| e.to_string())?;
-            let user = scope == Scope::User;
-            let dest = match to {
-                Agent::Agents => if user {
-                    home.join(".agents")
-                } else {
-                    here.join(".agents")
-                }
-                .join("skills"),
-                Agent::Claude => if user {
-                    home.join(".claude")
-                } else {
-                    here.join(".claude")
-                }
-                .join("skills"),
-                Agent::Opencode => {
-                    if user {
-                        home.join(".config").join("opencode").join("skills")
-                    } else {
-                        here.join(".opencode").join("skills")
-                    }
-                }
+            let name = match to {
+                Agent::Agents => "agents",
+                Agent::Claude => "claude",
+                Agent::Opencode => "opencode",
             };
-            std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-            let mut names: Vec<_> = std::fs::read_dir(&source)
-                .map_err(|e| e.to_string())?
-                .flatten()
-                .filter(|e| e.path().is_dir())
-                .map(|e| e.file_name())
-                .collect();
-            names.sort();
-            for n in &names {
-                copy_tree(&source.join(n), &dest.join(n))?;
-            }
-            println!("Installed {} skills -> {}", names.len(), dest.display());
+            let dest = install_dir(name, (scope == Scope::Workspace).then_some(here.as_path()))?;
+            let n = install(&repo, &dest)?;
+            println!("Installed {} skills -> {}", n, dest.display());
             Ok(ExitCode::SUCCESS)
         }
     }

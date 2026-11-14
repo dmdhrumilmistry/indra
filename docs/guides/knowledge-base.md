@@ -147,3 +147,6 @@ To preview a plan yourself:
 ```bash
 indra publish plan <target>/.security-harness/<run> --to jira --min-severity high
 ```
+
+or open the run in the console (`indra serve`, Runs, then the run) and use **Next steps**:
+**Publish** builds the same plan, and **Record into memory** does what `indra mem record-run` does.

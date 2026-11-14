@@ -309,7 +309,7 @@ automatically:
 
 | Profile | Found when | Agents | Skills | Prompts | Runs |
 |---|---|---|---|---|---|
-| `indra` | you run inside this repository, or the indra plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/run-*`, stages recon -> hunt -> chain -> verify -> report |
+| `indra` | you run inside this repository, or the indra plugin is installed under `~/.claude/plugins` | `agents/*.md` | `skills/*/SKILL.md` | `references/*` | `<target>/.security-harness/{run,pr}-*`, stages recon -> hunt -> chain -> verify -> report |
 | `claude-code` | the project or `~/.claude` has agents, skills or commands | `.claude/agents/*.md` | `.claude/skills/*/SKILL.md` | `CLAUDE.md`, `AGENTS.md`, commands | - |
 
 A custom harness is a few lines of TOML, in `indra.toml` (current directory), then
@@ -325,7 +325,7 @@ skills   = ["skills/*/SKILL.md"]
 prompts  = ["prompts/**/*.md"]
 memory   = ["{target}/.memory"]         # memory vaults; {target} expands per target
 targets  = ["../project-a"]
-runs     = ".runs/*"                    # one directory per run, under each target
+runs     = ".runs/*"                    # one directory per run, under each target ({a,b} for alternatives)
 findings = ["results.jsonl"]            # JSONL results inside a run
 group_by = "agent"                      # which field names the agent that produced a result
 stages   = [
@@ -811,6 +811,36 @@ skills need no interpreter on any platform:
 Maintainer commands: `indra dev site` builds the website (`site/` plus the docs pages listed in
 `site/pages.toml`, rendered from the Markdown, with a broken-link check), and `indra dev dashes
 [--fix]` finds em and en dashes.
+
+### The same, from the console
+
+Every one of these is also in `indra serve`, calling the same code, so the command line and the
+console always agree:
+
+- **A run's page** (Runs, then a run) has **Next steps** when the run has a `verified.jsonl` or a
+  PR review payload: **Record into memory** (with a preview of the commands), **Publish** (pick
+  the destination, lowest severity and whether to include needs-runtime findings; download or copy
+  the plan for the sh-publish skill), and **Post to GitHub** for a PR review (a dry run first; the
+  repository and PR number come from the run's `run.json` and can be changed).
+- **Tools** shows the review cache (with prune and clear, per repository or all), the local
+  metrics (totals, per model, per run; drop old records or delete them), the skills (whether the
+  `skills/` mirror is current, sync it, install the skills for an agent, for you or in a target),
+  and the maintainer chores (build the site into `_site`, look for dashes).
+
+Writes are refused when the console is read-only; previews and dry runs are not. Posting runs
+`gh` as you, on the machine running `indra serve`, after you confirm.
+
+| Call | Same as |
+|---|---|
+| `GET /api/run/actions?key=` | what the run supports, its repository and PR |
+| `POST /api/run/record` `{key, dry_run}` | `indra mem record-run` |
+| `POST /api/run/publish` `{key, to, min_severity, statuses, max}` | `indra publish plan` |
+| `POST /api/run/post` `{key, repo, pr, dry_run, no_status}` | `indra review post` |
+| `GET /api/tools` | `indra review cache stat`, `indra review metrics report`, `indra skills sync --check` |
+| `POST /api/tools/cache` `{action: prune\|clear, max_age_days, repo}` | `indra review cache prune\|clear` |
+| `POST /api/tools/metrics/purge` `{older_than_days}` | `indra review metrics purge` |
+| `POST /api/tools/skills/sync`, `POST /api/tools/skills/install` `{to, scope, target}` | `indra skills sync`, `indra skills install` |
+| `POST /api/tools/site`, `GET /api/tools/dashes` | `indra dev site`, `indra dev dashes` |
 
 ## Development
 

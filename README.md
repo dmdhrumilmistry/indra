@@ -255,8 +255,11 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Graph map:** stages run agents, agents spawn agents and load the `sh-kb-*` skills,
   everything reads its references.
 - **Memory:** the memory vaults drawn as graphs.
-- **Runs:** each `.security-harness/run-*` with stage progress, findings per class, severity and
-  status counts, and every file it wrote, live.
+- **Runs:** each `.security-harness/run-*` and `pr-*` with stage progress, findings per class,
+  severity and status counts, and every file it wrote, live. From a finished run, record it into
+  memory, build the publish plan for Jira, GitHub, Confluence or Notion, or post a PR review.
+- **Tools:** the PR review cache, local run metrics, the skills mirror and install, and the
+  site build: everything `indra review`, `indra skills` and `indra dev` do, from the browser.
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
   watch it work: every subagent it spawns, each one's tool calls, refused permissions, and the
   final cost. Stop stops the whole process tree.

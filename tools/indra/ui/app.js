@@ -817,9 +817,157 @@
     }));
   }
 
+  // What a finished review run can do next: remember it, publish it, post it.
+  function runActions(key) {
+    var box = h("div");
+    api("/api/run/actions" + hq({ key: key })).then(function (a) {
+      if (!a.findings && !a.review) return;
+      var ro = S.ov.read_only, out = h("div");
+      var card = h("div", { class: "card form runactions" }, h("h3", { text: "Next steps" }));
+      function show(title, node) { out.textContent = ""; out.appendChild(h("h4", { text: title })); out.appendChild(node); }
+      function pre(text) { return h("pre", { class: "view small", text: text }); }
+      if (a.findings) {
+        card.appendChild(h("div", { class: "row" },
+          h("b", { text: "Memory" }), h("span", { class: "muted small grow", text: "Record the findings and false positives into " + (a.vault || "the run's memory vault") }),
+          h("button", { type: "button", onclick: function () {
+            api("/api/run/record", { method: "POST", body: { h: S.h, key: key, dry_run: true } }).then(function (r) {
+              show("Would run " + r.commands.length + " command(s): " + r.new + " new, " + r["seen-again"] + " seen again, " + r["false-positive"] + " false positive(s)", pre(r.commands.join("\n")));
+            }).catch(function (e) { toast(e.message, true); });
+          } }, "Preview"),
+          ro ? null : h("button", { type: "button", class: "primary", onclick: function (e) {
+            e.target.disabled = true;
+            api("/api/run/record", { method: "POST", body: { h: S.h, key: key } }).then(function (r) {
+              toast("Recorded: " + r.new + " new, " + r["seen-again"] + " seen again, " + r["false-positive"] + " false positive(s)");
+              show("Recorded into " + r.vault, pre(JSON.stringify(r, null, 2)));
+            }).catch(function (err) { toast(err.message, true); }).then(function () { e.target.disabled = false; });
+          } }, "Record into memory")));
+        var to = h("select", { "aria-label": "Destination" }, ["jira", "github", "confluence", "notion"].map(function (x) { return h("option", { value: x, text: x }); }));
+        var sev = h("select", { "aria-label": "Lowest severity" }, ["info", "low", "medium", "high", "critical"].map(function (x) { return h("option", { value: x, text: x + " and up" }); })); sev.value = "medium";
+        var nr = h("input", { type: "checkbox" });
+        card.appendChild(h("div", { class: "row" },
+          h("b", { text: "Publish" }), to, sev, h("label", { class: "check" }, nr, h("span", { text: "include needs-runtime" })),
+          h("button", { type: "button", onclick: function () {
+            api("/api/run/publish", { method: "POST", body: { h: S.h, key: key, to: to.value, min_severity: sev.value, statuses: nr.checked ? ["verified", "needs-runtime"] : ["verified"] } }).then(function (p) {
+              var text = JSON.stringify(p, null, 2);
+              show(p.records.length + " record(s) for " + p.destination + (p.held_back_over_limit ? ", " + p.held_back_over_limit + " held back" : ""), h("div", null,
+                h("p", { class: "muted small", text: "Create these with the destination's MCP tools (the sh-publish skill does it): search each dedupe_query first, and comment instead of creating when it exists. Evidence and payloads never appear in a record." }),
+                h("div", { class: "row" }, h("button", { type: "button", onclick: function () { saveFile("publish-plan-" + p.destination + ".json", text, "application/json"); } }, "Download"),
+                  h("button", { type: "button", onclick: function () { navigator.clipboard.writeText(text).then(function () { toast("Copied"); }); } }, "Copy")),
+                p.records.length ? h("ul", { class: "links" }, p.records.map(function (r) { return h("li", null, h("span", { class: "rel", text: r.severity }), r.title); })) : null,
+                pre(text)));
+            }).catch(function (e) { toast(e.message, true); });
+          } }, "Build the plan")));
+      }
+      if (a.review) {
+        var repo = h("input", { type: "text", value: a.repo || "", placeholder: "owner/repo", "aria-label": "Repository" });
+        var pr = h("input", { type: "text", value: a.pr || "", placeholder: "PR number", "aria-label": "Pull request", size: "6" });
+        var nostatus = h("input", { type: "checkbox" });
+        function post(dry) {
+          return api("/api/run/post", { method: "POST", body: { h: S.h, key: key, repo: repo.value.trim(), pr: pr.value.trim(), dry_run: dry, no_status: nostatus.checked } }).then(function (r) {
+            show((dry ? "Dry run" : r.ok ? "Posted" : "Not posted (exit " + r.code + ")"), pre(r.output.join("\n")));
+            if (!dry) toast(r.ok ? "Posted the review" : "Posting failed; the status was set to error", !r.ok);
+          }).catch(function (e) { toast(e.message, true); });
+        }
+        card.appendChild(h("div", { class: "row" },
+          h("b", { text: "Pull request" }), repo, pr, h("label", { class: "check" }, nostatus, h("span", { text: "leave the commit status" })),
+          h("button", { type: "button", onclick: function () { post(true); } }, "Dry run"),
+          ro ? null : h("button", { type: "button", class: "primary", onclick: function () {
+            if (!window.confirm("Post this review to " + repo.value + "#" + pr.value + " (with gh, as you) and set its commit status?")) return;
+            post(false);
+          } }, "Post to GitHub")));
+        if (!a.verdict) card.appendChild(h("p", { class: "muted small", text: "No review/verdict.json: the commit status would be set to error." }));
+      }
+      card.appendChild(out);
+      box.appendChild(card);
+    }).catch(function () { /* runs of other harnesses have no actions */ });
+    return box;
+  }
+
+  // ---- tools --------------------------------------------------------------------------
+  // The review tooling and repository chores, the same as their CLI commands.
+  function pageTools(m) {
+    var ro = S.ov.read_only;
+    m.appendChild(header("Tools", "The review cache, local metrics, the skills and the site: the same operations as indra review, indra skills and indra dev, from here."));
+    var body = h("div", { class: "stack toolspage" }); m.appendChild(body);
+    function load() {
+      body.textContent = "";
+      api("/api/tools").then(function (t) {
+        // Review cache
+        var c = t.cache || {}, items = c.items || [];
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "PR review cache" }),
+          h("p", { class: "muted small" }, "Under ", h("code", { text: c.root || "?" }), ". Knowledge-base hash ", h("code", { text: c.current_kb_version || "?" }),
+            t.skills ? " (from " + t.skills + ")" : " (no knowledge bases found: every lookup misses)", "."),
+          items.length ? h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Repository", "PR", "Head", "Findings", "Cached", "Size", ""].map(function (x) { return h("th", { text: x }); }))),
+            h("tbody", null, items.map(function (i) {
+              return h("tr", null, h("td", { text: i.repo }), h("td", { text: String(i.pr == null ? "" : i.pr) }), h("td", null, h("code", { text: i.head_sha || "" })),
+                h("td", { text: String(i.findings == null ? "" : i.findings) }), h("td", { class: "muted", text: (i.created_at || "").slice(0, 16).replace("T", " ") + (i.stale_kb ? "  (knowledge bases changed)" : "") }),
+                h("td", { class: "muted", text: bytes(i.bytes || 0) }),
+                h("td", null, ro ? null : h("button", { type: "button", class: "ghost", onclick: function () { cacheOp({ action: "clear", repo: i.repo }); } }, "Clear repo")));
+            })))) : h("p", { class: "muted", text: "Nothing cached." }),
+          ro ? null : h("div", { class: "row" },
+            h("button", { type: "button", onclick: function () { cacheOp({ action: "prune", max_age_days: 7 }); } }, "Prune entries older than 7 days"),
+            h("button", { type: "button", class: "danger", onclick: function () { if (window.confirm("Clear the whole PR review cache?")) cacheOp({ action: "clear" }); } }, "Clear all"))));
+        // Metrics
+        var mt = t.metrics || {}, tot = mt.totals || {}, by = mt.by_model || {};
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "Local run metrics" }),
+          h("p", { class: "muted small" }, "Local only, in ", h("code", { text: (t.metrics_path || {}).dir || "?" }), ". Nothing is sent anywhere."),
+          h("div", { class: "stats" }, [["runs", tot.runs], ["incomplete", tot.incomplete], ["agents", tot.agents], ["cost", tot.cost_usd != null ? "$" + tot.cost_usd : "-"], ["time", tot.duration_ms ? Math.round(tot.duration_ms / 1000) + "s" : "-"]].map(function (x) {
+            return h("div", { class: "stat" }, h("b", { text: String(x[1] == null ? 0 : x[1]) }), h("span", { text: x[0] }));
+          })),
+          Object.keys(by).length ? h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Model", "Events", "Tokens in", "Tokens out", "Time"].map(function (x) { return h("th", { text: x }); }))),
+            h("tbody", null, Object.keys(by).map(function (k) { var b = by[k]; return h("tr", null, h("td", { text: k }), h("td", { text: String(b.events) }), h("td", { text: String(b.tokens_in) }), h("td", { text: String(b.tokens_out) }), h("td", { text: Math.round(b.ms / 1000) + "s" })); })))) : null,
+          (mt.runs || []).length ? h("details", null, h("summary", { text: "Runs (" + mt.runs.length + ")" }), h("div", { class: "tablewrap" }, h("table", null,
+            h("thead", null, h("tr", null, ["Run", "Repository", "PR", "Verdict", "Agents", "Reused", "Cost"].map(function (x) { return h("th", { text: x }); }))),
+            h("tbody", null, mt.runs.slice().reverse().map(function (r) {
+              return h("tr", null, h("td", null, h("code", { text: r.run_id })), h("td", { text: r.repo || "" }), h("td", { text: r.pr || "" }), h("td", { text: (r.verdict || (r.complete ? "" : "incomplete")) }),
+                h("td", { text: String(r.agents == null ? "" : r.agents) }), h("td", { text: String(r.reused_files == null ? "" : r.reused_files) }), h("td", { text: r.cost_usd != null ? "$" + r.cost_usd : "" }));
+            }))))) : h("p", { class: "muted", text: "No runs recorded yet." }),
+          ro ? null : h("div", { class: "row" },
+            h("button", { type: "button", onclick: function () { api("/api/tools/metrics/purge", { method: "POST", body: { older_than_days: 30 } }).then(function (r) { toast("Dropped " + r.dropped + " record(s)"); load(); }).catch(function (e) { toast(e.message, true); }); } }, "Drop records older than 30 days"),
+            h("button", { type: "button", class: "danger", onclick: function () { if (window.confirm("Delete all run metrics?")) api("/api/tools/metrics/purge", { method: "POST", body: {} }).then(function () { toast("Deleted"); load(); }).catch(function (e) { toast(e.message, true); }); } }, "Delete all"))));
+        // Skills
+        var hs = harness();
+        var to = h("select", { "aria-label": "Install for" }, [["agents", "Codex, opencode and agentskills.io agents (.agents/skills)"], ["claude", "Claude Code (.claude/skills)"], ["opencode", "opencode (.config/opencode/skills)"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+        var scope = h("select", { "aria-label": "Where" }, h("option", { value: "user", text: "for me (home folder)" }), (hs ? hs.targets : []).map(function (tg, i) { return h("option", { value: String(i), text: "in " + tg }); }));
+        var mirror = t.mirror;
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "Skills" }),
+          t.repo ? h("p", { class: "muted small" }, "Repository ", h("code", { text: t.repo }), ". ", mirror ? (mirror.problems.length ? h("b", { class: "warn", text: "The skills/ mirror is stale (" + mirror.problems.length + " difference(s))." }) : "The skills/ mirror is current (" + mirror.files + " files).") : "")
+            : h("p", { class: "muted", text: "This console does not see the indra repository, so it cannot sync or install its skills. The Marketplace page installs skills from any source." }),
+          mirror && mirror.problems.length ? h("pre", { class: "view small", text: mirror.problems.join("\n") }) : null,
+          t.repo && !ro ? h("div", { class: "row" },
+            h("button", { type: "button", onclick: function () { api("/api/tools/skills/sync", { method: "POST" }).then(function (r) { toast("Synced " + r.files + " files"); load(); }).catch(function (e) { toast(e.message, true); }); } }, "Sync the mirror"),
+            to, scope,
+            h("button", { type: "button", class: "primary", onclick: function () {
+              var body2 = { to: to.value, h: S.h }; if (scope.value !== "user") { body2.scope = "workspace"; body2.target = Number(scope.value); }
+              api("/api/tools/skills/install", { method: "POST", body: body2 }).then(function (r) { toast("Installed " + r.skills + " skills in " + r.dir); }).catch(function (e) { toast(e.message, true); });
+            } }, "Install the skills")) : null));
+        // Repository chores
+        if (t.repo) {
+          var res = h("div");
+          body.appendChild(h("div", { class: "card" }, h("h3", { text: "Repository" }),
+            h("p", { class: "muted small", text: "Maintainer chores: build the website (site/ plus the docs listed in site/pages.toml) into _site, and look for em and en dashes." }),
+            h("div", { class: "row" },
+              ro ? null : h("button", { type: "button", onclick: function (e) {
+                e.target.disabled = true;
+                api("/api/tools/site", { method: "POST" }).then(function (r) { res.textContent = ""; res.appendChild(h("div", { class: "note ok", text: "Built " + r.pages + " docs pages into " + r.out + "; every link checks out." })); })
+                  .catch(function (err) { res.textContent = ""; res.appendChild(h("pre", { class: "view small", text: err.message })); }).then(function () { e.target.disabled = false; });
+              } }, "Build the site"),
+              h("button", { type: "button", onclick: function () {
+                api("/api/tools/dashes").then(function (r) {
+                  res.textContent = "";
+                  res.appendChild(r.found.length ? h("pre", { class: "view small", text: r.found.map(function (d) { return d.file + ":" + d.line + ": " + d.text; }).join("\n") }) : h("div", { class: "note ok", text: "No em or en dashes." }));
+                }).catch(function (e) { toast(e.message, true); });
+              } }, "Check for dashes")), res));
+        }
+      }).catch(function (e) { body.appendChild(empty(e.message)); });
+    }
+    function cacheOp(b) { api("/api/tools/cache", { method: "POST", body: b }).then(function (r) { toast(r.removed != null ? "Removed " + r.removed + " entr(ies)" : "Cleared"); load(); }).catch(function (e) { toast(e.message, true); }); }
+    load();
+  }
+
   function pageRun(m, key) {
     var top = h("div"), body = h("div"), viewer = h("div");
-    m.appendChild(top); m.appendChild(body);
+    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(body);
     var openRel = null, lastMod = 0;
     function showFile(rel) {
       openRel = rel;
@@ -2720,6 +2868,7 @@
         terminal: function () { pageTerminal(m); },
         delegate: function () { pageDelegate(m); },
         market: function () { pageMarket(m, arg); },
+        tools: function () { pageTools(m); },
         plan: function () { pagePlan(m, arg); }
       };
       (pages[page] || pages.overview)();

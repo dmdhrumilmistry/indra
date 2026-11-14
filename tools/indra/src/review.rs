@@ -141,7 +141,7 @@ struct CacheArgs {
 }
 
 #[derive(Subcommand)]
-enum CacheCmd {
+pub(crate) enum CacheCmd {
     /// Hash of every sh-kb-* knowledge base
     KbVersion,
     /// The full key context, as JSON
@@ -220,6 +220,21 @@ fn cache_root() -> PathBuf {
 
 fn repo_slug(repo: &str) -> String {
     repo.replace(['/', '\\'], "__")
+}
+
+/// `owner/repo`, as GitHub spells them: two names of letters, digits, `-`,
+/// `_` and `.`, neither of them `.` or `..`. Anything else is refused before it
+/// becomes a cache folder or a `gh api` path.
+pub(crate) fn valid_repo(repo: &str) -> bool {
+    let parts: Vec<&str> = repo.split('/').collect();
+    parts.len() == 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && *p != "."
+                && *p != ".."
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
 }
 
 fn entry_path(repo: &str, pr: &str) -> PathBuf {
@@ -365,13 +380,12 @@ fn key_context(skills: &Option<PathBuf>, model: &Option<String>) -> Value {
     json!({ "schema": SCHEMA, "kb_version": kb_version(skills), "skill_version": skill_version(skills), "model": model })
 }
 
-fn miss(reason: &str, extra: Value) -> Result<ExitCode, String> {
+fn miss(reason: &str, extra: Value) -> Result<Value, String> {
     let mut d = json!({ "hit": false, "reason": reason });
     if let (Some(o), Value::Object(x)) = (d.as_object_mut(), extra) {
         o.extend(x);
     }
-    out(&d);
-    Ok(ExitCode::SUCCESS)
+    Ok(d)
 }
 
 fn read_json(p: &Path) -> Result<Value, String> {
@@ -403,11 +417,12 @@ fn entries() -> Vec<(String, PathBuf)> {
     v
 }
 
-fn cache(a: CacheArgs) -> Result<ExitCode, String> {
-    let sk = a.skills;
-    match a.cmd {
-        CacheCmd::KbVersion => println!("{}", kb_version(&sk)),
-        CacheCmd::Key { model } => out(&key_context(&sk, &model)),
+/// One cache command; its JSON answer.
+pub(crate) fn cache_value(sk: &Option<PathBuf>, cmd: CacheCmd) -> Result<Value, String> {
+    let last: Value;
+    match cmd {
+        CacheCmd::KbVersion => last = json!(kb_version(sk)),
+        CacheCmd::Key { model } => last = key_context(sk, &model),
         CacheCmd::Get {
             repo,
             pr,
@@ -422,7 +437,7 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
                 Ok(e) => e,
                 Err(_) => return miss("cache entry unreadable (ValueError)", json!({})),
             };
-            let want = key_context(&sk, &model);
+            let want = key_context(sk, &model);
             if entry.get("schema") != Some(&json!(SCHEMA)) {
                 return miss("cache schema changed", json!({}));
             }
@@ -461,7 +476,7 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
                 },
             }
             entry["hit"] = json!(true);
-            out(&entry);
+            last = entry;
         }
         CacheCmd::Put {
             repo,
@@ -471,10 +486,9 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
         } => {
             let mut entry = read_json(&file)?;
             let Some(o) = entry.as_object_mut() else {
-                eprintln!("error: entry must be a JSON object");
-                return Ok(ExitCode::from(1));
+                return Err("entry must be a JSON object".into());
             };
-            if let Value::Object(k) = key_context(&sk, &model) {
+            if let Value::Object(k) = key_context(sk, &model) {
                 o.extend(k);
             }
             o.insert("repo".into(), json!(repo));
@@ -490,10 +504,8 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
             )
             .map_err(|e| e.to_string())?;
             std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
-            out(
-                &json!({ "stored": p.display().to_string(), "kb_version": entry["kb_version"],
-                         "skill_version": entry["skill_version"], "model": entry["model"] }),
-            );
+            last = json!({ "stored": p.display().to_string(), "kb_version": entry["kb_version"],
+                         "skill_version": entry["skill_version"], "model": entry["model"] });
         }
         CacheCmd::Changed { repo, pr, file } => {
             // A path the cache has never seen is always changed; never assume an
@@ -503,10 +515,8 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
             let p = entry_path(&repo, &pr);
             if !p.is_file() {
                 let all: Vec<&String> = cur.keys().collect();
-                out(
-                    &json!({ "reusable": [], "changed": all, "reason": "no cached run; everything must be analysed" }),
-                );
-                return Ok(ExitCode::SUCCESS);
+                last = json!({ "reusable": [], "changed": all, "reason": "no cached run; everything must be analysed" });
+                return Ok(last);
             }
             let cached = read_json(&p)?
                 .get("files")
@@ -523,10 +533,10 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
             }
             // Gone paths matter: their findings must be dropped, not carried forward.
             let vanished: Vec<&String> = cached.keys().filter(|k| !cur.contains_key(*k)).collect();
-            out(&json!({ "reusable": reusable, "changed": changed, "vanished": vanished }));
+            last = json!({ "reusable": reusable, "changed": changed, "vanished": vanished });
         }
         CacheCmd::Stat { repo } => {
-            let kbv = kb_version(&sk);
+            let kbv = kb_version(sk);
             let (mut items, mut total) = (vec![], 0u64);
             for (slug, p) in entries() {
                 if let Some(r) = &repo {
@@ -548,10 +558,8 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
                     Err(_) => items.push(json!({ "repo": slug, "unreadable": p.file_name().map(|f| f.to_string_lossy().into_owned()), "bytes": size })),
                 }
             }
-            out(
-                &json!({ "root": cache_root().display().to_string(), "entries": items.len(), "bytes": total,
-                         "current_kb_version": kbv, "items": items }),
-            );
+            last = json!({ "root": cache_root().display().to_string(), "entries": items.len(), "bytes": total,
+                         "current_kb_version": kbv, "items": items });
         }
         CacheCmd::Prune { max_age_days } => {
             let mut removed = vec![];
@@ -574,23 +582,33 @@ fn cache(a: CacheArgs) -> Result<ExitCode, String> {
                     removed.push(p.display().to_string());
                 }
             }
-            out(&json!({ "removed": removed.len(), "paths": removed }));
+            last = json!({ "removed": removed.len(), "paths": removed });
         }
         CacheCmd::Clear { repo } => {
             let root = cache_root();
             let target = match &repo {
+                Some(r) if !valid_repo(r) => {
+                    return Err(format!("not an owner/repo: {:?}", r));
+                }
                 Some(r) => root.join(repo_slug(r)),
                 None => root,
             };
             if target.is_dir() {
                 std::fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
-                out(&json!({ "cleared": target.display().to_string() }));
+                last = json!({ "cleared": target.display().to_string() });
             } else {
-                out(
-                    &json!({ "cleared": null, "reason": format!("nothing at {}", target.display()) }),
-                );
+                last = json!({ "cleared": null, "reason": format!("nothing at {}", target.display()) });
             }
         }
+    }
+    Ok(last)
+}
+
+fn cache(a: CacheArgs) -> Result<ExitCode, String> {
+    match cache_value(&a.skills, a.cmd)? {
+        Value::String(s) => println!("{}", s),
+        Value::Null => {}
+        v => out(&v),
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -604,7 +622,7 @@ struct MetricsArgs {
 }
 
 #[derive(Subcommand)]
-enum MetricsCmd {
+pub(crate) enum MetricsCmd {
     /// Print the metrics directory
     Path,
     /// Open a run
@@ -790,14 +808,14 @@ fn obj(v: Value) -> Map<String, Value> {
     }
 }
 
-fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
-    match a.cmd {
+/// One metrics command; its JSON answer.
+pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
+    let res: Value;
+    match cmd {
         MetricsCmd::Path => {
             let d = metrics_dir();
-            out(
-                &json!({ "dir": d.display().to_string(), "runs": d.join("runs.jsonl").display().to_string(),
-                         "events": d.join("events.jsonl").display().to_string(), "exists": d.is_dir(), "local_only": true }),
-            );
+            res = json!({ "dir": d.display().to_string(), "runs": d.join("runs.jsonl").display().to_string(),
+                         "events": d.join("events.jsonl").display().to_string(), "exists": d.is_dir(), "local_only": true });
         }
         MetricsCmd::Start {
             run_id,
@@ -816,7 +834,7 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
                 "tier": tier, "arguments": arguments, "cache": cache, "skill_version": skill_version }),
                 ),
             )?;
-            out(&json!({ "recorded": "start", "run_id": run_id, "file": p.display().to_string() }));
+            res = json!({ "recorded": "start", "run_id": run_id, "file": p.display().to_string() });
         }
         MetricsCmd::Event {
             run_id,
@@ -839,9 +857,7 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
                 "reused": reused, "note": note }),
                 ),
             )?;
-            out(
-                &json!({ "recorded": "event", "run_id": run_id, "phase": phase, "file": p.display().to_string() }),
-            );
+            res = json!({ "recorded": "event", "run_id": run_id, "phase": phase, "file": p.display().to_string() });
         }
         MetricsCmd::Finish {
             run_id,
@@ -867,9 +883,8 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
                 "tokens_in": tokens_in, "tokens_out": tokens_out, "cost_usd": cost_usd, "agents_launched": agents_launched }),
                 ),
             )?;
-            out(
-                &json!({ "recorded": "finish", "run_id": run_id, "file": p.display().to_string() }),
-            );
+            res =
+                json!({ "recorded": "finish", "run_id": run_id, "file": p.display().to_string() });
         }
         MetricsCmd::Report { repo, last } => {
             let (runs, events) = (read_rows("runs.jsonl"), read_rows("events.jsonl"));
@@ -948,9 +963,7 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
                 "duration_ms": rows.iter().map(|r| num(r, "duration_ms") as i64).sum::<i64>(),
                 "agents": rows.iter().map(|r| num(r, "agents") as i64).sum::<i64>(),
             });
-            out(
-                &json!({ "dir": metrics_dir().display().to_string(), "totals": totals, "by_model": by_model, "runs": rows }),
-            );
+            res = json!({ "dir": metrics_dir().display().to_string(), "totals": totals, "by_model": by_model, "runs": rows });
         }
         MetricsCmd::Purge { older_than_days } => {
             let d = metrics_dir();
@@ -962,8 +975,8 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
                         removed.push(p.display().to_string());
                     }
                 }
-                out(&json!({ "purged": removed }));
-                return Ok(ExitCode::SUCCESS);
+                res = json!({ "purged": removed });
+                return Ok(res);
             };
             let cutoff = now_secs() - days * 86_400;
             let (mut kept_total, mut dropped_total) = (0, 0);
@@ -988,8 +1001,16 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
                     std::fs::write(&p, text).map_err(|e| e.to_string())?;
                 }
             }
-            out(&json!({ "kept": kept_total, "dropped": dropped_total }));
+            res = json!({ "kept": kept_total, "dropped": dropped_total });
         }
+    }
+    Ok(res)
+}
+
+fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
+    let v = metrics_value(a.cmd)?;
+    if !v.is_null() {
+        out(&v);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -997,29 +1018,29 @@ fn metrics(a: MetricsArgs) -> Result<ExitCode, String> {
 // ---- post ------------------------------------------------------------------------------
 
 #[derive(Args)]
-struct PostArgs {
+pub(crate) struct PostArgs {
     /// owner/repo
     #[arg(long)]
-    repo: String,
+    pub(crate) repo: String,
     #[arg(long)]
-    pr: String,
+    pub(crate) pr: String,
     /// review-payload.json
     #[arg(long)]
-    payload: PathBuf,
+    pub(crate) payload: PathBuf,
     /// verdict.json (state + description)
     #[arg(long)]
-    verdict: Option<PathBuf>,
+    pub(crate) verdict: Option<PathBuf>,
     #[arg(long, default_value = "security/pr-review")]
-    status_context: String,
+    pub(crate) status_context: String,
     #[arg(long)]
-    target_url: Option<String>,
+    pub(crate) target_url: Option<String>,
     /// Append receipts (JSONL) here
     #[arg(long)]
-    receipts: Option<PathBuf>,
+    pub(crate) receipts: Option<PathBuf>,
     #[arg(long)]
-    no_status: bool,
+    pub(crate) no_status: bool,
     #[arg(long)]
-    dry_run: bool,
+    pub(crate) dry_run: bool,
 }
 
 const MAX_DESCRIPTION: usize = 140;
@@ -1051,7 +1072,30 @@ fn gh(args: &[String], input: Option<&Path>) -> (bool, Value, String) {
     (true, v, String::new())
 }
 
+/// What posting says, for a terminal (printed as it goes) or a page (kept).
+pub(crate) struct Sink {
+    pub echo: bool,
+    pub lines: Vec<String>,
+}
+
+impl Sink {
+    fn out(&mut self, s: String) {
+        if self.echo {
+            println!("{}", s);
+        }
+        self.lines.push(s);
+    }
+    fn err(&mut self, s: String) {
+        if self.echo {
+            eprintln!("{}", s);
+        }
+        self.lines.push(s);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn set_status(
+    log: &mut Sink,
     repo: &str,
     sha: &str,
     state: &str,
@@ -1061,7 +1105,7 @@ fn set_status(
     dry: bool,
 ) -> bool {
     if !matches!(state, "success" | "failure" | "error" | "pending") {
-        eprintln!("error: invalid status state {:?}", state);
+        log.err(format!("error: invalid status state {:?}", state));
         return false;
     }
     // GitHub truncates hard at 140; truncating here keeps the visible text ours.
@@ -1077,7 +1121,7 @@ fn set_status(
         description.to_string()
     };
     if dry {
-        println!("  [dry-run] status -> {}: {}", state, description);
+        log.out(format!("  [dry-run] status -> {}: {}", state, description));
         return true;
     }
     let mut args: Vec<String> = vec![
@@ -1097,9 +1141,9 @@ fn set_status(
     }
     let (ok, _, err) = gh(&args, None);
     if ok {
-        println!("  status -> {}: {}", state, description);
+        log.out(format!("  status -> {}: {}", state, description));
     } else {
-        eprintln!("  FAILED to set status: {}", err);
+        log.err(format!("  FAILED to set status: {}", err));
     }
     ok
 }
@@ -1177,20 +1221,37 @@ fn write_receipts(path: &Option<PathBuf>, rows: &[Value]) {
 }
 
 fn post(a: PostArgs) -> Result<ExitCode, String> {
-    let load = |p: &Path, what: &str| -> Result<Value, ExitCode> {
-        read_json(p).map_err(|e| {
-            eprintln!("error: cannot read {} ({}): {}", what, p.display(), e);
-            ExitCode::from(2)
-        })
+    let mut log = Sink {
+        echo: true,
+        lines: vec![],
     };
-    let mut payload = match load(&a.payload, "payload") {
-        Ok(v) => v,
-        Err(c) => return Ok(c),
+    Ok(ExitCode::from(post_with(&a, &mut log)))
+}
+
+/// Post the review and set the status; the exit code (0 posted, 1 failed with
+/// the status still set, 2 bad input).
+pub(crate) fn post_with(a: &PostArgs, log: &mut Sink) -> u8 {
+    let mut load = |p: &Path, what: &str| -> Option<Value> {
+        match read_json(p) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log.err(format!(
+                    "error: cannot read {} ({}): {}",
+                    what,
+                    p.display(),
+                    e
+                ));
+                None
+            }
+        }
+    };
+    let Some(mut payload) = load(&a.payload, "payload") else {
+        return 2;
     };
     let verdict = match &a.verdict {
         Some(v) => match load(v, "verdict") {
-            Ok(v) => v,
-            Err(c) => return Ok(c),
+            Some(v) => v,
+            None => return 2,
         },
         None => json!({}),
     };
@@ -1201,8 +1262,8 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
         .find(|s| !s.is_empty())
         .map(str::to_string);
     let Some(sha) = sha else {
-        eprintln!("error: no commit_id in payload and no head_sha in verdict.\nThe review must be pinned to the SHA that was analysed.");
-        return Ok(ExitCode::from(2));
+        log.err("error: no commit_id in payload and no head_sha in verdict.\nThe review must be pinned to the SHA that was analysed.".to_string());
+        return 2;
     };
     // Never let a bot block or approve a merge: the commit status is the gate.
     let event = payload
@@ -1211,11 +1272,11 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
         .unwrap_or("COMMENT")
         .to_string();
     if event != "COMMENT" {
-        eprintln!(
+        log.err(format!(
             "error: review event is '{}'; only COMMENT is allowed.",
             event
-        );
-        return Ok(ExitCode::from(2));
+        ));
+        return 2;
     }
     let state = verdict
         .get("state")
@@ -1235,16 +1296,17 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
         .and_then(Value::as_array)
         .map(|c| c.len())
         .unwrap_or(0);
-    println!(
+    log.out(format!(
         "Posting review to {}#{} ({} inline + 1 summary), pinned to {}",
         a.repo,
         a.pr,
         n_inline,
         &sha[..sha.len().min(8)]
-    );
+    ));
     if a.dry_run {
-        println!("  [dry-run] nothing sent");
+        log.out("  [dry-run] nothing sent".to_string());
         set_status(
+            log,
             &a.repo,
             &sha,
             &state,
@@ -1253,7 +1315,7 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
             a.target_url.as_deref(),
             true,
         );
-        return Ok(ExitCode::SUCCESS);
+        return 0;
     }
     let endpoint = format!("repos/{}/pulls/{}/reviews", a.repo, a.pr);
     let send = |pl: &Value| -> (bool, Value, String) {
@@ -1281,7 +1343,7 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
     let (mut ok, mut res, mut err) = send(&payload);
     // One recovery attempt, and only for the anchoring case.
     if !ok && is_line_error(&err, &res) && n_inline > 0 {
-        println!("  422: a comment is outside the diff. Moving inline comments to the body and retrying once (never adjusting a line number).");
+        log.out("  422: a comment is outside the diff. Moving inline comments to the body and retrying once (never adjusting a line number).".to_string());
         let (p, moved) = demote_comments(&payload);
         payload = p;
         receipts.push(json!({ "action": "body_only", "reason": "not_anchorable_422", "count": moved, "at": at }));
@@ -1296,12 +1358,13 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
         } else {
             "see the error above"
         };
-        eprintln!("  FAILED to post review: {}\n  ({})", err, hint);
+        log.err(format!("  FAILED to post review: {}\n  ({})", err, hint));
         receipts.push(json!({ "action": "failed", "error": err.chars().take(500).collect::<String>(), "at": at }));
         write_receipts(&a.receipts, &receipts);
         // The mandatory tail: a computed verdict that never reaches the status is
         // worse than no check at all.
         set_status(
+            log,
             &a.repo,
             &sha,
             "error",
@@ -1310,24 +1373,25 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
             a.target_url.as_deref(),
             false,
         );
-        return Ok(ExitCode::from(1));
+        return 1;
     }
     let url = res
         .get("html_url")
         .and_then(Value::as_str)
         .map(str::to_string);
-    println!(
+    log.out(format!(
         "  posted: {}",
         url.as_deref().unwrap_or("(no url returned)")
-    );
+    ));
     receipts.push(json!({ "action": "posted_review", "review_url": url,
         "inline": payload.get("comments").and_then(Value::as_array).map(|c| c.len()).unwrap_or(0), "at": at }));
     if a.no_status {
-        println!("  --no-status: commit status not set");
+        log.out("  --no-status: commit status not set".to_string());
     } else {
         // target_url points at the review, so a red check leads straight to why.
         let target = a.target_url.clone().or(url);
         set_status(
+            log,
             &a.repo,
             &sha,
             &state,
@@ -1338,7 +1402,7 @@ fn post(a: PostArgs) -> Result<ExitCode, String> {
         );
     }
     write_receipts(&a.receipts, &receipts);
-    Ok(ExitCode::SUCCESS)
+    0
 }
 
 #[cfg(test)]

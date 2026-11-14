@@ -334,3 +334,13 @@ details.menu .menubox a:hover { background: var(--sunk); text-decoration: none; 
 details.native { border-top: 1px solid var(--line); padding-top: 10px; }
 details.native summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 label.rowitem { font-weight: 400; }
+
+/* run actions and tools */
+.runactions .row { align-items: center; }
+.runactions h4 { margin: 10px 0 6px; }
+.runactions select, .runactions input[type=text] { width: auto; }
+.runactions + div { margin-top: 14px; }
+.toolspage .card > .row, .toolspage .card > details { margin-top: 12px; }
+.toolspage select { width: auto; max-width: 100%; }
+.runactions .row > b:first-child { min-width: 96px; }
+.toolspage .row select { flex: 0 1 auto; }

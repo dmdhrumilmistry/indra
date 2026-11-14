@@ -2099,6 +2099,26 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/learnings/{id}/accept",
             post(crate::deck::knowledge::learning_accept),
         )
+        .route("/api/run/actions", get(crate::deck::tools::actions))
+        .route("/api/run/record", post(crate::deck::tools::record))
+        .route("/api/run/publish", post(crate::deck::tools::publish))
+        .route("/api/run/post", post(crate::deck::tools::post))
+        .route("/api/tools", get(crate::deck::tools::overview))
+        .route("/api/tools/cache", post(crate::deck::tools::cache))
+        .route(
+            "/api/tools/metrics/purge",
+            post(crate::deck::tools::metrics_purge),
+        )
+        .route(
+            "/api/tools/skills/sync",
+            post(crate::deck::tools::skills_sync),
+        )
+        .route(
+            "/api/tools/skills/install",
+            post(crate::deck::tools::skills_install),
+        )
+        .route("/api/tools/site", post(crate::deck::tools::site))
+        .route("/api/tools/dashes", get(crate::deck::tools::dashes))
         .route("/api/market", get(crate::deck::market::list))
         .route("/api/market/refresh", post(crate::deck::market::refresh))
         .route("/api/market/plugins", get(crate::deck::market::plugins))
@@ -4528,5 +4548,234 @@ while True:
             .collect();
         assert!(order[0] < order[1] && order[1] < order[2]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn review_tools_from_the_console() {
+        let (app, dir) = fixture("tools", false);
+        let tmp = dir.join("state");
+        std::env::set_var("SH_REVIEW_CACHE_DIR", tmp.join("cache"));
+        std::env::set_var("SH_METRICS_DIR", tmp.join("metrics"));
+        let run = dir.join("target/runs/pr-7-20260101");
+        let w = |rel: &str, s: &str| {
+            let p = run.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        };
+        w("verified.jsonl", "{\"id\":\"F1\",\"title\":\"SQL injection in login\",\"vuln_class\":\"sqli\",\"severity\":\"high\",\"status\":\"verified\",\"file\":\"app/login.py\",\"line\":12}\n{\"id\":\"F2\",\"title\":\"Not a bug\",\"vuln_class\":\"xss\",\"severity\":\"low\",\"status\":\"false-positive\",\"file\":\"app/view.py\",\"line\":3}\n");
+        w("run.json", "{\"repo\":\"acme/shop\",\"pr\":7}");
+        w(
+            "review/review-payload.json",
+            "{\"body\":\"one finding\",\"event\":\"COMMENT\",\"comments\":[]}",
+        );
+        w(
+            "review/verdict.json",
+            "{\"head_sha\":\"abc123\",\"state\":\"failure\",\"description\":\"1 finding\"}",
+        );
+        let key = "0:pr-7-20260101";
+
+        // What the run supports.
+        let (st, _, b) = call(
+            &app,
+            "GET",
+            &format!("/api/run/actions?key={}", key),
+            &[AUTH],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let a: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(a["findings"], true);
+        assert_eq!(a["review"], true);
+        assert_eq!(a["repo"], "acme/shop");
+        assert_eq!(a["pr"], "7");
+        let (st, _, _) = call(&app, "GET", "/api/run/actions?key=0:nope", &[AUTH], None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        // Record: a preview writes nothing, then the real thing writes the vault.
+        let vault = dir.join("target/runs/memory");
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/run/record",
+            &[AUTH],
+            Some(json!({ "key": key, "dry_run": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let r: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(r["new"], 1);
+        assert_eq!(r["false-positive"], 1);
+        assert!(!r["commands"].as_array().unwrap().is_empty());
+        assert!(!vault.exists());
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/run/record",
+            &[AUTH],
+            Some(json!({ "key": key })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        assert!(vault.is_dir());
+
+        // Publish: the plan, never the false positive.
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/run/publish",
+            &[AUTH],
+            Some(json!({ "key": key, "to": "github", "min_severity": "low" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let p: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(p["records"].as_array().unwrap().len(), 1);
+        assert!(!b.contains("Not a bug"));
+        for bad in [
+            json!({ "key": key, "to": "slack" }),
+            json!({ "key": key, "to": "jira", "statuses": ["false-positive"] }),
+        ] {
+            let (st, _, _) = call(&app, "POST", "/api/run/publish", &[AUTH], Some(bad)).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+
+        // Post: a dry run sends nothing; a bad repository never reaches gh.
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/run/post",
+            &[AUTH],
+            Some(json!({ "key": key, "dry_run": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let r: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(r["ok"], true);
+        assert!(
+            b.contains("acme/shop#7") && b.contains("[dry-run]"),
+            "{}",
+            b
+        );
+        for (repo, pr) in [("../..", "7"), ("a/b/c", "7"), ("acme/shop", "7; rm")] {
+            let (st, _, _) = call(
+                &app,
+                "POST",
+                "/api/run/post",
+                &[AUTH],
+                Some(json!({ "key": key, "repo": repo, "pr": pr, "dry_run": true })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{} {}", repo, pr);
+        }
+
+        // The Tools page.
+        let (st, _, b) = call(&app, "GET", "/api/tools", &[AUTH], None).await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let t: Value = serde_json::from_str(&b).unwrap();
+        assert!(t["cache"]["root"]
+            .as_str()
+            .unwrap()
+            .starts_with(tmp.join("cache").to_str().unwrap()));
+        assert_eq!(
+            t["metrics_path"]["dir"],
+            tmp.join("metrics").display().to_string()
+        );
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/tools/cache",
+            &[AUTH],
+            Some(json!({ "action": "clear", "repo": ".." })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{}", b);
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/tools/cache",
+            &[AUTH],
+            Some(json!({ "action": "prune", "max_age_days": 1 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _, _) = call(
+            &app,
+            "POST",
+            "/api/tools/cache",
+            &[AUTH],
+            Some(json!({ "action": "drop" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/tools/metrics/purge",
+            &[AUTH],
+            Some(json!({ "older_than_days": 30 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+
+        // Skills into a workspace (the repository is the clone the tests run in).
+        if t["repo"].is_string() {
+            let (st, _, b) = call(
+                &app,
+                "POST",
+                "/api/tools/skills/install",
+                &[AUTH],
+                Some(json!({ "to": "agents", "scope": "workspace", "target": 0 })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{}", b);
+            let r: Value = serde_json::from_str(&b).unwrap();
+            assert!(r["skills"].as_u64().unwrap() > 0);
+            assert!(dir
+                .join("target/.agents/skills/sh-security-review/SKILL.md")
+                .is_file());
+            let (st, _, _) = call(
+                &app,
+                "POST",
+                "/api/tools/skills/install",
+                &[AUTH],
+                Some(json!({ "to": "elsewhere" })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Read-only: previews work, writes are refused.
+        let (app, dir) = fixture("tools-ro", true);
+        let run = dir.join("target/runs/pr-7");
+        std::fs::create_dir_all(run.join("review")).unwrap();
+        std::fs::write(run.join("verified.jsonl"), "").unwrap();
+        std::fs::write(run.join("review/review-payload.json"), "{}").unwrap();
+        for (uri, body) in [
+            ("/api/run/record", json!({ "key": "0:pr-7" })),
+            (
+                "/api/run/post",
+                json!({ "key": "0:pr-7", "repo": "a/b", "pr": "1" }),
+            ),
+            ("/api/tools/cache", json!({ "action": "clear" })),
+            ("/api/tools/metrics/purge", json!({})),
+            ("/api/tools/skills/sync", json!({})),
+            ("/api/tools/skills/install", json!({ "to": "agents" })),
+            ("/api/tools/site", json!({})),
+        ] {
+            let (st, _, b) = call(&app, "POST", uri, &[AUTH], Some(body)).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{} {}", uri, b);
+        }
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/api/run/record",
+            &[AUTH],
+            Some(json!({ "key": "0:pr-7", "dry_run": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", b);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

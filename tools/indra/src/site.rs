@@ -1189,6 +1189,55 @@ fn check_site_links(out: &Path) -> Vec<String> {
     bad
 }
 
+/// Build the site and check its links: the number of docs pages.
+pub fn build_site(repo: &Path, out: &Path) -> Result<usize, String> {
+    let n = build(repo, out)?;
+    let bad = check_site_links(out);
+    if !bad.is_empty() {
+        return Err(format!("build-site: broken links:\n  {}", bad.join("\n  ")));
+    }
+    Ok(n)
+}
+
+/// Lines with em or en dashes: (file, line number, text).
+pub fn find_dashes(root: &Path) -> Vec<(String, usize, String)> {
+    let mut out = Vec::new();
+    for p in dash_files(root) {
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+        for (n, line) in text.lines().enumerate().filter(|(_, l)| l.contains(DASHES)) {
+            out.push((rel.clone(), n + 1, line.trim().chars().take(200).collect()));
+        }
+    }
+    out
+}
+
+const DASHES: [char; 3] = ['\u{2014}', '\u{2013}', '\u{2015}'];
+
+fn dash_files(root: &Path) -> Vec<PathBuf> {
+    const SKIP: [&str; 5] = [".git", "target", "_site", "node_modules", "vendor"];
+    fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if p.is_dir() {
+                if !SKIP.contains(&name.as_str()) {
+                    walk(&p, out);
+                }
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, &mut files);
+    files.sort();
+    files
+}
+
 pub fn run(a: SiteArgs) -> Result<ExitCode, String> {
     let repo = match a.repo {
         Some(r) => r,
@@ -1229,25 +1278,8 @@ pub fn dashes(repo: Option<PathBuf>, fix: bool) -> Result<ExitCode, String> {
         Some(r) => r,
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
-    const SKIP: [&str; 5] = [".git", "target", "_site", "node_modules", "vendor"];
-    fn walk(d: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(rd) = std::fs::read_dir(d) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if p.is_dir() {
-                if !SKIP.contains(&name.as_str()) {
-                    walk(&p, out);
-                }
-            } else {
-                out.push(p);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(&root, &mut files);
-    files.sort();
-    let bad = ['\u{2014}', '\u{2013}', '\u{2015}'];
+    let files = dash_files(&root);
+    let bad = DASHES;
     let mut hits = 0;
     for p in files {
         let Ok(text) = std::fs::read_to_string(&p) else {
