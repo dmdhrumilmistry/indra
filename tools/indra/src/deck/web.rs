@@ -58,6 +58,8 @@ pub struct App {
     pub learnings: Arc<crate::deck::knowledge::Learnings>,
     /// Plan-and-delegate runs: a planner's plan carried out by workers.
     pub delegations: crate::deck::delegate::Delegations,
+    /// Plugin and skill marketplaces, and what was installed from them.
+    pub market: crate::deck::market::Market,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -92,6 +94,7 @@ impl App {
         let learnings = Arc::new(crate::deck::knowledge::Learnings::open(
             settings.data_dir.join("learnings.json"),
         ));
+        let market = crate::deck::market::Market::open(&settings.data_dir);
         let shared = config::Shared::new(settings);
         let engine = Engine::new(procs.clone(), shared.clone());
         Arc::new(App {
@@ -106,6 +109,7 @@ impl App {
             shell: std::sync::atomic::AtomicBool::new(false),
             learnings,
             delegations: Default::default(),
+            market,
         })
     }
 
@@ -2095,6 +2099,20 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/learnings/{id}/accept",
             post(crate::deck::knowledge::learning_accept),
         )
+        .route("/api/market", get(crate::deck::market::list))
+        .route("/api/market/refresh", post(crate::deck::market::refresh))
+        .route("/api/market/plugins", get(crate::deck::market::plugins))
+        .route("/api/market/inspect", post(crate::deck::market::inspect))
+        .route("/api/market/install", post(crate::deck::market::install))
+        .route("/api/market/native", post(crate::deck::market::native))
+        .route(
+            "/api/market/installed/{id}",
+            axum::routing::delete(crate::deck::market::uninstall),
+        )
+        .route(
+            "/api/market/installed/{id}/update",
+            post(crate::deck::market::update),
+        )
         .route(
             "/api/delegations",
             get(delegations_list).post(delegate_start),
@@ -2235,6 +2253,7 @@ mod tests {
             nodes: vec![],
             workflows: vec![],
             teams: vec![],
+            marketplaces: vec![],
         };
         let app = App::new(settings, TOKEN.into(), true);
         (app, dir)

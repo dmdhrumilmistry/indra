@@ -33,6 +33,22 @@ pub struct ConfigFile {
     pub workflow: Vec<WorkflowCfg>,
     /// Plan with one profile, do the steps with cheaper ones.
     pub team: Vec<TeamCfg>,
+    /// Where plugins and skills come from (Claude Code plugin marketplaces).
+    pub marketplace: Vec<MarketplaceCfg>,
+}
+
+/// A plugin marketplace or a repository of skills.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketplaceCfg {
+    pub name: String,
+    /// `owner/repo` on GitHub, an https git URL, or a local folder.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Branch, tag or commit (default: the default branch).
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
 }
 
 /// A planner, workers and an optional reviewer: plan with a strong model,
@@ -572,6 +588,7 @@ pub struct Settings {
     pub nodes: Vec<crate::deck::nodes::Node>,
     pub workflows: Vec<WorkflowCfg>,
     pub teams: Vec<TeamCfg>,
+    pub marketplaces: Vec<MarketplaceCfg>,
 }
 
 /// Settings that the console can replace while it runs (after a config
@@ -1117,6 +1134,25 @@ pub fn build_settings(
     for p in &file.preset {
         known(&p.profile, &format!("preset '{}'", p.name))?;
     }
+    unique(
+        "marketplace",
+        file.marketplace.iter().map(|m| m.name.as_str()),
+    )?;
+    for m in &file.marketplace {
+        let what = format!("marketplace '{}'", m.name);
+        crate::deck::nodes::validate_name(&m.name).map_err(|e| format!("{}: {}", what, e))?;
+        if m.source.trim().is_empty() {
+            return Err(format!(
+                "{}: source is required (owner/repo, a git URL or a folder)",
+                what
+            ));
+        }
+        if let Some(r) = &m.git_ref {
+            if r.starts_with('-') || r.chars().any(|c| c.is_whitespace()) {
+                return Err(format!("{}: bad ref", what));
+            }
+        }
+    }
     unique("team", file.team.iter().map(|t| t.name.as_str()))?;
     for t in &file.team {
         let what = format!("team '{}'", t.name);
@@ -1271,6 +1307,7 @@ pub fn build_settings(
         read_only: opts.read_only || file.server.read_only.unwrap_or(false),
         config_path: path.map(abs),
         data_dir: data_dir(),
+        marketplaces: file.marketplace.clone(),
         teams: file.team.clone(),
     })
 }

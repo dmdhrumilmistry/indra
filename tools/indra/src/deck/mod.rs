@@ -10,6 +10,7 @@ pub mod delegate;
 pub mod discover;
 pub mod knowledge;
 pub mod link;
+pub mod market;
 pub mod nodes;
 pub mod procs;
 pub mod runs;

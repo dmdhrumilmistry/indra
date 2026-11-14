@@ -325,3 +325,12 @@ details.menu .menubox a:hover { background: var(--sunk); text-decoration: none; 
 .step .row code { font-size: 12px; }
 .step textarea { min-height: 110px; }
 .grow { flex: 1 1 auto; min-width: 0; }
+
+/* marketplace */
+.clip2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.addmk { margin: -8px 0 14px; }
+.addmk summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.addmk .form { margin-top: 10px; }
+details.native { border-top: 1px solid var(--line); padding-top: 10px; }
+details.native summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+label.rowitem { font-weight: 400; }

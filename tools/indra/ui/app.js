@@ -350,6 +350,7 @@
       skill: "Skills the agents load. Click one to read or edit it.", prompt: "Reference documents and prompt files the harness uses." };
     var ro = S.ov.read_only;
     m.appendChild(header(titles[kind], subs[kind], ro ? null : [
+      h("a", { class: "btn", href: "#/market", text: "From a marketplace" }),
       h("button", { type: "button", onclick: function () { importDefs(); } }, "Import .md"),
       h("button", { type: "button", class: "primary", onclick: function () { newDef(); } }, "New " + kind)]));
     var formBox = h("div"); m.appendChild(formBox);
@@ -1207,6 +1208,179 @@
       }))));
   }
 
+  // ---- marketplace -------------------------------------------------------------------
+  // Plugins and skills from Claude Code plugin marketplaces (or skill repos),
+  // installed where Claude Code, Codex or a harness will find them.
+  function pageMarket(m, arg) {
+    var parts = String(arg || "").split("/"), want = parts[0] || store("indra.market") || "", tab = parts[1] === "installed" ? "installed" : "browse";
+    var ro = S.ov.read_only, hs = harness();
+    m.appendChild(header("Marketplace", "Plugins, skills and agents from Claude Code plugin marketplaces and skill repositories, installed for Claude Code, Codex or a harness. Fetching happens only when you press Refresh."));
+    var top = h("div"), tabs = h("div"), body = h("div", { class: "stack" });
+    m.appendChild(top); m.appendChild(tabs); m.appendChild(body);
+    api("/api/market").then(function (r) {
+      var list = r.marketplaces, cur = list.find(function (x) { return x.name === want; }) || list.find(function (x) { return x.plugins; }) || list[0];
+      if (cur) store("indra.market", cur.name);
+      top.appendChild(h("div", { class: "vaults" }, list.map(function (x) {
+        var pick = function () { location.hash = "#/market/" + encodeURIComponent(x.name); };
+        var st = x.state || {};
+        var refresh = h("button", { type: "button", disabled: ro, onclick: function (e) {
+          e.stopPropagation(); refresh.disabled = true; refresh.textContent = "Fetching...";
+          api("/api/market/refresh", { method: "POST", body: { m: x.name } }).then(function () { toast("Fetched " + x.name); route(); })
+            .catch(function (err) { toast(err.message, true); refresh.disabled = false; refresh.textContent = "Refresh"; });
+        } }, x.plugins == null ? "Fetch" : "Refresh");
+        return h("div", { class: "vault" + (cur && x.name === cur.name ? " sel" : ""), tabindex: "0", title: x.description || x.source, onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
+          h("b", { text: x.name }), x.builtin ? h("span", { class: "pill", text: "built in" }) : null,
+          h("code", { class: "vpath", text: x.source + (x.ref ? "@" + x.ref : "") }),
+          h("span", { class: "vstats" }, x.plugins == null ? h("span", { class: "muted", text: "not fetched" }) : h("span", null, h("b", { text: String(x.plugins) }), " plugins"),
+            st.fetched ? h("span", { class: "muted", text: ago(st.fetched) }) : null, st.error ? h("span", { class: "warn", title: st.error, text: "fetch failed" }) : null),
+          refresh);
+      })));
+      if (canEdit()) top.appendChild(h("details", { class: "addmk" }, h("summary", { text: "Add a marketplace" }), (function () {
+        var name = h("input", { type: "text", placeholder: "my-team", required: true }), src = h("input", { type: "text", placeholder: "owner/repo, https://.../repo.git, or a folder", required: true }), ref = h("input", { type: "text", placeholder: "optional branch, tag or commit" });
+        return h("form", { class: "form", onsubmit: function (e) {
+          e.preventDefault();
+          var v = { name: name.value.trim(), source: src.value.trim() }; if (ref.value.trim()) v.ref = ref.value.trim();
+          addToSection("marketplace", v).then(function () { toast("Added " + v.name + "; press Fetch"); location.hash = "#/market/" + encodeURIComponent(v.name); route(); }).catch(function (err) { toast(err.message, true); });
+        } }, h("div", { class: "fields" }, h("label", null, "Name", name), h("label", { class: "wide" }, "Source", src), h("label", null, "Ref", ref)),
+          h("p", { class: "muted small", text: "Any Claude Code plugin marketplace (a repository with .claude-plugin/marketplace.json), or a repository of skills (folders with SKILL.md)." }),
+          h("div", null, h("button", { type: "submit", class: "primary" }, "Add")));
+      })()));
+      tabs.appendChild(h("nav", { class: "tabs" },
+        h("a", { href: "#/market/" + encodeURIComponent(cur ? cur.name : ""), class: tab === "browse" ? "on" : "", text: "Browse" }),
+        h("a", { href: "#/market/" + encodeURIComponent(cur ? cur.name : "") + "/installed", class: tab === "installed" ? "on" : "" }, "Installed", r.installed.length ? h("b", { class: "badge", text: String(r.installed.length) }) : null)));
+      if (tab === "installed") return installed(r.installed);
+      if (!cur) { body.appendChild(empty("No marketplaces.")); return; }
+      if (cur.plugins == null) { body.appendChild(empty(cur.state && cur.state.error ? "Fetching failed: " + cur.state.error : "Press Fetch to download " + cur.name + " (" + cur.source + ").")); return; }
+      browse(cur);
+    }).catch(function (e) { body.appendChild(empty(e.message)); });
+
+    function browse(mk) {
+      var search = h("input", { type: "search", placeholder: "Search plugins and skills", "aria-label": "Search" });
+      var cat = h("select", { "aria-label": "Category" }, h("option", { value: "", text: "All categories" }));
+      var list = h("div", { class: "klist" }), detail = h("div");
+      body.appendChild(h("div", { class: "row" }, search, cat));
+      body.appendChild(h("div", { class: "kgrid" }, list, detail));
+      detail.appendChild(empty("Pick a plugin to see what is inside and install it."));
+      api("/api/market/plugins" + q({ m: mk.name })).then(function (c) {
+        var plugins = c.plugins;
+        var cats = {}; plugins.forEach(function (p) { if (p.category) cats[p.category] = 1; });
+        Object.keys(cats).sort().forEach(function (k) { cat.appendChild(h("option", { value: k, text: k })); });
+        function draw() {
+          var f = search.value.trim().toLowerCase();
+          var rows = plugins.filter(function (p) { return (!cat.value || p.category === cat.value) && (!f || (p.name + " " + (p.description || "") + " " + (p.category || "")).toLowerCase().indexOf(f) >= 0); });
+          list.textContent = "";
+          if (!rows.length) { list.appendChild(empty("Nothing matches.")); return; }
+          rows.slice(0, 400).forEach(function (p) {
+            list.appendChild(h("a", { class: "kitem", href: "#", onclick: function (e) { e.preventDefault(); Array.prototype.forEach.call(list.children, function (x) { x.classList.remove("sel"); }); e.currentTarget.classList.add("sel"); show(mk, p); } },
+              h("div", { class: "row" }, h("b", { text: p.name }), p.category ? h("span", { class: "pill", text: p.category }) : null,
+                p.installed && p.installed.length ? h("span", { class: "pill ok", text: "installed" }) : null, !p.installable ? h("span", { class: "pill warn", text: "Claude Code only" }) : null),
+              p.description ? h("div", { class: "muted small clip2", text: p.description }) : null));
+          });
+        }
+        search.addEventListener("input", draw); cat.addEventListener("change", draw); draw();
+      }).catch(function (e) { list.appendChild(empty(e.message)); });
+
+      function show(mk, p) {
+        detail.textContent = "";
+        var inside = p.source_kind !== "here" ? h("div", { class: "muted small", text: "This plugin lives in another repository (" + p.source_kind + "); Look inside fetches it." }) : null;
+        var card = h("div", { class: "card form" },
+          h("div", { class: "row" }, h("h2", { text: p.name }), p.version ? h("span", { class: "pill", text: "v" + p.version }) : null, p.category ? h("span", { class: "pill", text: p.category }) : null),
+          p.description ? h("p", { text: p.description }) : null,
+          h("p", { class: "muted small" }, p.author ? "By " + p.author + ". " : "", p.homepage ? h("a", { href: p.homepage, target: "_blank", rel: "noopener noreferrer", text: "Homepage" }) : null),
+          inside);
+        detail.appendChild(card);
+        if (ro) return;
+        if (!p.installable) { card.appendChild(nativeForm(mk, p, true)); return; }
+        var look = h("button", { type: "button", class: "primary", onclick: function () {
+          look.disabled = true; look.textContent = "Looking...";
+          api("/api/market/inspect", { method: "POST", body: { m: mk.name, plugin: p.name } }).then(function (r) { look.remove(); installForm(card, mk, p, r); })
+            .catch(function (err) { toast(err.message, true); look.disabled = false; look.textContent = "Look inside"; });
+        } }, "Look inside");
+        card.appendChild(h("div", { class: "row" }, look));
+        card.appendChild(nativeForm(mk, p, false));
+      }
+    }
+
+    function targetsSelect() {
+      return h("select", { "aria-label": "Project" }, (hs ? hs.targets : []).map(function (t, i) { return h("option", { value: String(i), text: t }); }));
+    }
+
+    function installForm(card, mk, p, r) {
+      if (!r.items.length) { card.appendChild(h("p", { class: "muted", text: "No skills, agents or commands to copy." + (r.native.length ? " It has " + r.native.join(", ") + ": install it with Claude Code below." : "") })); return; }
+      var boxes = r.items.map(function (it) { var cb = h("input", { type: "checkbox", checked: true }); cb.dataset.key = it.kind + " " + it.name; return { it: it, cb: cb }; });
+      var native = card.querySelector("details.native");
+      var add = function (el) { card.insertBefore(el, native); };
+      add(h("h3", { text: "Inside (" + r.items.length + ")" }));
+      add(h("div", { class: "rowlist" }, boxes.map(function (b) {
+        return h("label", { class: "check rowitem" }, b.cb, h("span", { class: "pill", text: b.it.kind }), h("span", { class: "grow" }, h("b", { text: b.it.name }), b.it.description ? h("span", { class: "muted small", text: "  " + b.it.description.slice(0, 160) }) : null));
+      })));
+      if (r.native.length) add(h("div", { class: "note warn", text: "It also has " + r.native.join(", ") + ", which only Claude Code's own plugin install sets up (below). Copying brings the skills, agents and commands." }));
+      var dest = h("select", { "aria-label": "Install for" },
+        [["claude-user", "Claude Code, for me (~/.claude)"], ["claude-project", "Claude Code, in a project (.claude)"], ["codex-user", "Codex, for me (~/.agents/skills, skills only)"],
+          ["codex-project", "Codex, in a project (.agents/skills, skills only)"], ["harness", "The " + (hs ? hs.name : "") + " harness (its own folders)"], ["new-harness", "A new harness, read from this plugin"]]
+          .map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var proj = targetsSelect(), projLabel = h("label", { hidden: true }, "Project", proj);
+      dest.addEventListener("change", function () { projLabel.hidden = dest.value.indexOf("-project") < 0; });
+      var overwrite = h("input", { type: "checkbox" });
+      var go = h("button", { type: "button", class: "primary", onclick: function () {
+        if (dest.value === "new-harness") {
+          addToSection("harness", { name: p.name, root: r.root, agents: ["agents/*.md"], skills: ["skills/*/SKILL.md"], prompts: ["commands/*.md"] })
+            .then(function () { toast("Added harness " + p.name); }).catch(function (err) { toast(err.message, true); });
+          return;
+        }
+        go.disabled = true;
+        api("/api/market/install", { method: "POST", body: { m: mk.name, plugin: p.name, dest: dest.value, h: S.h, target: Number(proj.value || 0),
+          items: boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return b.cb.dataset.key; }), overwrite: overwrite.checked } })
+          .then(function (x) { toast("Installed " + x.items.length + " item(s) under " + x.base); go.disabled = false; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } }, "Install");
+      add(h("h3", { text: "Install" }));
+      add(h("div", { class: "fields" }, h("label", { class: "wide" }, "For", dest), projLabel));
+      add(h("label", { class: "check" }, overwrite, h("span", { text: "Replace files that exist already" })));
+      add(h("div", { class: "note warn", text: "Install only from sources you trust: skills and agents tell agents what to do, and a skill's scripts run with your permissions when an agent uses them." }));
+      add(h("div", { class: "row" }, go, r.commit ? h("span", { class: "muted small", text: "commit " + r.commit.slice(0, 10) }) : null));
+    }
+
+    function nativeForm(mk, p, only) {
+      var scope = h("select", { "aria-label": "Scope" }, h("option", { value: "user", text: "for me (user)" }), h("option", { value: "project", text: "in a project" }));
+      var proj = targetsSelect(), projLabel = h("label", { hidden: true }, "Project", proj);
+      scope.addEventListener("change", function () { projLabel.hidden = scope.value !== "project"; });
+      var out = h("pre", { class: "view small", hidden: true });
+      var go = h("button", { type: "button", onclick: function () {
+        go.disabled = true; go.textContent = "Installing...";
+        api("/api/market/native", { method: "POST", body: { m: mk.name, plugin: p.name, scope: scope.value, h: S.h, target: Number(proj.value || 0) } })
+          .then(function (x) { out.hidden = false; out.textContent = x.output || "done"; toast("Installed with Claude Code"); })
+          .catch(function (err) { out.hidden = false; out.textContent = err.message; })
+          .then(function () { go.disabled = false; go.textContent = "Install with Claude Code"; });
+      } }, "Install with Claude Code");
+      return h("details", { class: "native", open: only || null }, h("summary", { text: "Or install it as a Claude Code plugin (with its hooks and MCP servers)" }),
+        h("p", { class: "muted small", text: "Runs claude plugin marketplace add, then claude plugin install " + p.name + "@<marketplace> on this machine. Claude Code then manages it (/plugin to see it)." }),
+        h("div", { class: "fields" }, h("label", null, "Scope", scope), projLabel), h("div", { class: "row" }, go), out);
+    }
+
+    function installed(list) {
+      if (!list.length) { body.appendChild(empty("Nothing installed from a marketplace yet.")); return; }
+      body.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+        h("thead", null, h("tr", null, ["Plugin", "Where", "What", "Version", "When", ""].map(function (t) { return h("th", { text: t }); }))),
+        h("tbody", null, list.slice().reverse().map(function (i) {
+          return h("tr", null, h("td", null, h("b", { text: i.plugin }), h("div", { class: "muted small", text: i.marketplace })),
+            h("td", null, h("div", { text: i.dest }), h("code", { class: "small", text: i.base })),
+            h("td", { class: "desc", text: i.items.join(", ") }),
+            h("td", { class: "muted", text: (i.version ? "v" + i.version + " " : "") + (i.commit ? i.commit.slice(0, 8) : "") }),
+            h("td", { class: "muted", text: ago(i.installed) }),
+            h("td", null, ro ? null : h("div", { class: "row" },
+              h("button", { type: "button", onclick: function (e) {
+                e.target.disabled = true;
+                api("/api/market/installed/" + i.id + "/update", { method: "POST" }).then(function () { toast("Updated " + i.plugin); route(); }).catch(function (err) { toast(err.message, true); e.target.disabled = false; });
+              } }, "Update"),
+              h("button", { type: "button", class: "danger", onclick: function () {
+                if (!window.confirm("Remove what was installed from " + i.plugin + " (" + i.items.length + " item(s) under " + i.base + ")?")) return;
+                api("/api/market/installed/" + i.id, { method: "DELETE" }).then(function () { toast("Removed"); route(); }).catch(function (err) { toast(err.message, true); });
+              } }, "Remove"))));
+        })))));
+    }
+  }
+
   // ---- plan and delegate ------------------------------------------------------------
   // A strong model plans; cheaper ones (Haiku, a local model) do the steps.
   function launchTabs(on) {
@@ -2042,7 +2216,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Components"],
-    ["presets", "Presets"], ["teams", "Teams"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
+    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -2133,6 +2307,12 @@
       { k: "args", label: "Extra arguments for the remote indra", type: "list", help: "One per line, e.g. --config and /etc/indra.toml." },
       { k: "ssh_command", label: "ssh client", placeholder: "ssh" }]; },
       summary: function (n) { return n.ssh + "  -  " + (n.targets || []).length + " targets, " + (n.max_parallel || 2) + " agents at once"; } },
+    marketplace: { tab: "marketplaces", noun: "marketplace", fields: function () { return [
+      { k: "name", label: "Name", req: true, help: "A built-in name (indra, anthropic-skills, claude-plugins-official) replaces that built-in." },
+      { k: "source", label: "Source", req: true, placeholder: "owner/repo", help: "owner/repo on GitHub, an https git URL, or a folder on this machine." },
+      { k: "ref", label: "Branch, tag or commit", placeholder: "the default branch" },
+      { k: "description", label: "Description" }]; },
+      summary: function (x) { return x.source + (x.ref ? "@" + x.ref : ""); } },
     team: { tab: "teams", noun: "team", fields: function (c) { var P = cfgProfileNames(c); return [
       { k: "name", label: "Name", req: true, help: "Pick it under Launch > Plan and delegate." },
       { k: "description", label: "Description" },
@@ -2301,7 +2481,7 @@
       }
       ({ general: general, profiles: function () { list("profile"); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, teams: function () { list("team"); }, secrets: secrets, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, teams: function () { list("team"); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, file: file })[tab]();
     }
 
     function general() {
@@ -2539,6 +2719,7 @@
         wfedit: function () { pageWorkflowEditor(m, arg); },
         terminal: function () { pageTerminal(m); },
         delegate: function () { pageDelegate(m); },
+        market: function () { pageMarket(m, arg); },
         plan: function () { pagePlan(m, arg); }
       };
       (pages[page] || pages.overview)();
