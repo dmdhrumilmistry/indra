@@ -1354,7 +1354,14 @@
         box.appendChild(h("table", null, h("thead", null, h("tr", null, ["Run", "Progress", "Results", "By agent", "Updated"].map(function (t) { return h("th", { text: t }); }))),
           h("tbody", null, runs.map(function (r) {
             var groups = Object.keys(r.counts.by_group).map(function (g) { return g + " " + r.counts.by_group[g]; }).join(", ");
-            var go = n.name === "local" ? function () { location.hash = "#/run/" + encodeURIComponent(r.key); } : null;
+            // A remote run opens as a copy fetched to the hub.
+            var go = n.name === "local" ? function () { location.hash = "#/run/" + encodeURIComponent(r.key); } : function () {
+              toast("Copying " + r.name + " from " + n.name + "...");
+              api("/api/nodes/runs/fetch", { method: "POST", body: { h: S.h, node: n.name, name: r.name } }).then(function (f) {
+                toast("Copied " + f.files + " file(s)" + (f.skipped.length ? ", " + f.skipped.length + " skipped (binary or large)" : "") + ". Changes stay in the copy.");
+                location.hash = "#/run/" + encodeURIComponent(f.key);
+              }).catch(function (e) { toast(e.message, true); });
+            };
             return h("tr", { class: go ? "click" : "", onclick: go },
               h("td", null, h("b", { text: r.name }), " ", r.active ? h("span", { class: "pill run live", text: "live" }) : null, h("div", { class: "muted", text: r.target })),
               h("td", null, segs(r.stages)), h("td", { text: String(r.counts.total) }), h("td", { class: "desc", text: groups || "-" }), h("td", { class: "muted", text: ago(r.modified) }));
@@ -1959,15 +1966,26 @@
       fresh: h("input", { type: "radio", name: "pivot-mode", value: "fresh" }),
       keep: h("input", { type: "checkbox" }),
       go: h("button", { class: "primary", type: "submit" }, "Pivot"),
-      note: h("p", { class: "muted small" })
+      note: h("p", { class: "muted small" }),
+      // A fresh start may switch profile (and so runner) and model.
+      profile: h("select", { "aria-label": "Pivot profile" }, h("option", { value: "", text: "the same profile" }),
+        (S.ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name + (p.provider === "ollama" ? "  (Ollama: " + (p.model || "?") + ")" : p.model ? "  (" + p.model + ")" : "") }); })),
+      model: h("input", { type: "text", list: "models", "aria-label": "Pivot model", placeholder: "the same model" })
     };
+    var switchRow = h("div", { class: "fields pivotswitch" }, h("label", null, "Profile (fresh start)", pv.profile), h("label", null, "Model", pv.model));
+    function pivotMode() { pv.profile.disabled = !pv.fresh.checked; if (!pv.fresh.checked) pv.profile.value = ""; }
+    [pv.cont, pv.fresh].forEach(function (r) { r.addEventListener("change", pivotMode); });
+    pivotMode();
     [pv.cont, pv.fresh].forEach(function (r) { r.addEventListener("change", function () { pv.chosen = true; }); });
     var keepRow = h("label", { class: "check" }, pv.keep, "Keep this agent running (the continuation branches its session)");
     var pivotCard = h("form", { class: "card pivot", onsubmit: function (e) {
       e.preventDefault();
       if (!pv.text.value.trim()) { toast("Write the new direction first", true); return; }
       pv.go.disabled = true;
-      api("/api/procs/" + id + "/pivot", { method: "POST", body: { prompt: pv.text.value, mode: pv.fresh.checked ? "fresh" : "continue", keep_running: pv.keep.checked } })
+      var pbody = { prompt: pv.text.value, mode: pv.fresh.checked ? "fresh" : "continue", keep_running: pv.keep.checked };
+      if (pv.fresh.checked && pv.profile.value) pbody.profile = pv.profile.value;
+      if (pv.model.value.trim()) pbody.opts = { model: pv.model.value.trim() };
+      api("/api/procs/" + id + "/pivot", { method: "POST", body: pbody })
         .then(function (r) { location.hash = "#/proc/" + r.id; })
         .catch(function (err) { toast(err.message, true); pv.go.disabled = false; });
     } },
@@ -1975,7 +1993,7 @@
       pv.text,
       h("label", { class: "check" }, pv.cont, h("span", null, h("b", { text: "Continue its session" }), " - keeps everything it learned")),
       h("label", { class: "check" }, pv.fresh, h("span", null, h("b", { text: "Start fresh" }), " - a new agent, given this one's question and result")),
-      keepRow, pv.note, h("div", { class: "row" }, pv.go));
+      switchRow, keepRow, pv.note, h("div", { class: "row" }, pv.go), modelList());
     // Waiting tool requests, and live control of an interactive agent.
     var approvals = h("div", { class: "card approvals", hidden: true, role: "region", "aria-label": "Tool requests waiting for you" });
     var ctxCard = h("div", { class: "card context" });
@@ -2205,12 +2223,14 @@
       var node = h("select", { "aria-label": "Node" }, ov.nodes.map(function (n) { return h("option", { value: n, text: n }); }));
       node.value = it.node || "local";
       var target = h("input", { type: "text", placeholder: it.target || "the harness's first target", "aria-label": "Target" });
+      var runner = h("select", { "aria-label": "Runner" }, h("option", { value: "", text: "the profile's runner" }),
+        (ov.runners || []).map(function (r) { return h("option", { value: r.name, text: r.name }); }));
       var go = h("button", { class: "primary", type: "submit" }, "Run");
       return h("form", { class: "row runform", onsubmit: function (e) {
         e.preventDefault(); go.disabled = true;
-        api("/api/board/items/" + it.id + "/run", { method: "POST", body: { profile: prof.value || null, node: node.value, target: target.value.trim() || null } })
+        api("/api/board/items/" + it.id + "/run", { method: "POST", body: { profile: prof.value || null, runner: runner.value || null, node: node.value, target: target.value.trim() || null } })
           .then(function (r) { toast("Agent process #" + r.proc + " started"); load(); }).catch(function (err) { toast(err.message, true); go.disabled = false; });
-      } }, prof, node, target, go);
+      } }, prof, runner, node, target, go);
     }
     function editItem(it) {
       var f = { title: h("input", { type: "text", value: it.title, required: true }), body: h("textarea", null),
@@ -2610,10 +2630,10 @@
       summary: function (x) { return x.prompt || x.description || ""; } },
     connector: { tab: "connectors", noun: "connector", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
-      { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"]] },
-      { k: "url", label: "Site URL", placeholder: "https://acme.atlassian.net", help: "Jira: your site. GitHub and ClickUp: leave empty for the public API (set it for GitHub Enterprise)." },
-      { k: "project", label: "Project", req: true, help: "Jira project key (SEC), GitHub owner/repo, or ClickUp list id." },
-      { k: "query", label: "Filter", help: "Jira: extra JQL (labels = agent). GitHub: a label. ClickUp: statuses, comma-separated." },
+      { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"], ["linear", "Linear"]] },
+      { k: "url", label: "Site URL", placeholder: "https://acme.atlassian.net", help: "Jira: your site. GitHub, ClickUp and Linear: leave empty for the public API (set it for GitHub Enterprise)." },
+      { k: "project", label: "Project", req: true, help: "Jira project key (SEC), GitHub owner/repo, ClickUp list id, or Linear team key (ENG)." },
+      { k: "query", label: "Filter", help: "Jira: extra JQL (labels = agent). GitHub or Linear: a label. ClickUp: statuses, comma-separated. Imports follow the tracker's pages, up to 500 items." },
       { k: "email", label: "Account email (Jira)" },
       { k: "token", label: "Token", req: true, placeholder: "secret:jira", help: "A secret reference, never the token itself: add the token in the Secrets tab (scope it to connector:<this name>)." },
       { k: "profile", label: "Run with profile", type: "select", options: opts(cfgProfileNames(c), "None") },
@@ -2650,12 +2670,13 @@
       { k: "args", label: "Arguments", type: "list", req: true, help: "One per line. {prompt} is required; {target} is the directory the agent runs in. Each is filled in as one whole argument." },
       { k: "format", label: "Output", type: "select", options: [["", "Plain text (default)"], ["text", "Plain text"], ["claude-stream-json", "Claude Code stream-json: subagents, tool calls, cost"]] },
       { k: "resume_args", label: "Arguments to continue a session", type: "list", help: "Used by Pivot > Continue; {session} is the session id. stream-json runners default to --resume {session}." },
-      { k: "fork_args", label: "Arguments to branch a session", type: "list", help: "Added after those when the original agent keeps running, e.g. --fork-session." }]; },
+      { k: "fork_args", label: "Arguments to branch a session", type: "list", help: "Added after those when the original agent keeps running, e.g. --fork-session." },
+      { k: "model_args", label: "Arguments to pick a model", type: "list", placeholder: "-m\n{model}", help: "One per line, with {model} in one of them, e.g. -m then {model}. Without them, a profile or task cannot choose this runner's model (Claude Code does not need them)." }]; },
       summary: function (r) { return r.command + " " + (r.args || []).join(" "); } },
     node: { tab: "nodes", noun: "node", fields: function () { return [
       { k: "name", label: "Name", req: true },
       { k: "description", label: "Description" },
-      { k: "ssh", label: "SSH destination", req: true, help: "host, user@host, or a Host alias from ~/.ssh/config. `ssh <destination>` must work without a password prompt, and the host key must already be trusted." },
+      { k: "ssh", label: "SSH destination", help: "host, user@host, or a Host alias from ~/.ssh/config. `ssh <destination>` must work without a password prompt, and the host key must already be trusted. Leave it empty for a node that dials in to this hub (indra node connect) and has no SSH." },
       { k: "targets", label: "Targets", type: "list", help: "Codebases on that machine, one path per line, as paths there." },
       { k: "max_parallel", label: "Agents at once", type: "number", placeholder: "2" },
       { k: "port", label: "SSH port", type: "number", placeholder: "22" },
@@ -2663,7 +2684,7 @@
       { k: "indra", label: "indra on the remote", placeholder: "indra" },
       { k: "args", label: "Extra arguments for the remote indra", type: "list", help: "One per line, e.g. --config and /etc/indra.toml." },
       { k: "ssh_command", label: "ssh client", placeholder: "ssh" }]; },
-      summary: function (n) { return n.ssh + "  -  " + (n.targets || []).length + " targets, " + (n.max_parallel || 2) + " agents at once"; } },
+      summary: function (n) { return (n.ssh || "dials in (no SSH)") + "  -  " + (n.targets || []).length + " targets, " + (n.max_parallel || 2) + " agents at once"; } },
     marketplace: { tab: "marketplaces", noun: "marketplace", fields: function () { return [
       { k: "name", label: "Name", req: true, help: "A built-in name (indra, anthropic-skills, claude-plugins-official) replaces that built-in." },
       { k: "source", label: "Source", req: true, placeholder: "owner/repo", help: "owner/repo on GitHub, an https git URL, or a folder on this machine." },
@@ -2699,8 +2720,10 @@
         { k: "profile", label: "Profile", type: "select", options: opts(cfgProfileNames(c), "None"), help: "Model, permission mode and the rest. Its runner, if it names one, replaces the runner above." },
         { k: "model", label: "Model", list: "models", placeholder: "the profile's", help: "This task's model, over the profile's; with Ollama, a local model's name." },
         { k: "provider", label: "Runs on", type: "select", options: [["", "the profile's choice"], ["anthropic", "Anthropic"], ["ollama", "Ollama (local model)"]] },
-        { k: "target", label: "Target", req: true, help: "A directory on that node. Local paths are relative to the config file." },
-        { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} and {node} are filled in." },
+        { k: "component", label: "Component", type: "select", options: opts((c.config.component || []).map(function (x) { return x.name; }), "None"), help: "Start from a reusable component; fields left empty come from it." },
+        { k: "workflow", label: "Runs workflow", type: "select", options: opts((c.config.workflow || []).map(function (x) { return x.name; }), "None (a task)"), help: "Run another workflow as this one step instead of a task." },
+        { k: "target", label: "Target", help: "A directory on that node (or from the component). Local paths are relative to the config file." },
+        { k: "prompt", label: "Prompt", type: "textarea", help: "{target} and {node} are filled in (or the component's prompt)." },
         { k: "needs", label: "Runs after", type: "words", help: "Task ids, separated by spaces or commas. It runs only if they all succeed." },
         { k: "retries", label: "Retries", type: "number", placeholder: "0" }] }]; },
       summary: function (w) { return (w.task || []).map(function (t) { return t.id + "@" + (t.node || "local"); }).join(", "); } },
@@ -2775,7 +2798,7 @@
     function add(item) {
       var ctl = f.fields.map(function (sf) { return { k: sf.k, c: control(sf, item[sf.k]) }; });
       var box = h("fieldset", { class: "rowbox" });
-      var row = { ctl: ctl, box: box };
+      var row = { ctl: ctl, box: box, item: item };
       box.appendChild(h("legend", null, f.noun + " " + (rows.length + 1)));
       ctl.forEach(function (x) { box.appendChild(x.c.el); });
       box.appendChild(h("div", { class: "row" }, h("button", { type: "button", class: "ghost danger", onclick: function () {
@@ -2788,9 +2811,19 @@
     var wrap = h("div", { class: "rowsfield" }, h("span", { class: "flabel", text: f.label }), list,
       h("button", { type: "button", onclick: function () { add({}); } }, "Add " + f.noun));
     return { el: wrap, get: function () {
-      var out = rows.map(function (r) { var o = {}; r.ctl.forEach(function (x) { var v = x.c.get(); if (v !== undefined) o[x.k] = v; }); return o; });
+      // Keys this form does not show (a task's component, sub-workflow or
+      // position, say) are kept as they were.
+      var out = rows.map(function (r) { var o = keepUnshown(r.item, r.ctl); r.ctl.forEach(function (x) { var v = x.c.get(); if (v !== undefined) o[x.k] = v; }); return o; });
       return out.length ? out : undefined;
     } };
+  }
+
+  // A copy of `item` without the keys a form shows: what a save must keep.
+  function keepUnshown(item, ctl) {
+    var o = {}, shown = {};
+    ctl.forEach(function (x) { shown[x.k] = true; });
+    Object.keys(item || {}).forEach(function (k) { if (!shown[k]) o[k] = item[k]; });
+    return o;
   }
 
   function itemForm(fields, item, title, onSave, onCancel) {
@@ -2799,7 +2832,7 @@
     var save = h("button", { class: "primary", type: "submit" }, "Save");
     var form = h("form", { class: "form card cfgform", onsubmit: function (e) {
       e.preventDefault();
-      var o = {}; ctl.forEach(function (x) { var v = x.c.get(); if (v !== undefined) o[x.k] = v; });
+      var o = keepUnshown(item, ctl); ctl.forEach(function (x) { var v = x.c.get(); if (v !== undefined) o[x.k] = v; });
       save.disabled = true; err.hidden = true;
       onSave(o).catch(function (ex) { err.textContent = ex.message; err.hidden = false; save.disabled = false; });
     } }, h("h2", { text: title }), ctl.map(function (x) { return x.c.el; }), err,
@@ -2848,13 +2881,22 @@
         { k: "builtins", label: "Show the built-in profiles (the indra plugin, and Claude Code projects)", type: "bool" },
         { k: "max_parallel", label: "Agents at once on this machine", type: "number", placeholder: "4", help: "Workflows and fan-outs wait for room; a manual Launch always starts." },
         { k: "bind", label: "Listen on", placeholder: "127.0.0.1:7878", help: "Used the next time indra serve starts (now: " + c.startup.bind + "). Keep it on loopback." },
-        { k: "read_only", label: "Start read-only (no launching, no editing)", type: "bool", help: "Used the next time indra serve starts." }];
-      var vals = { builtins: cf.builtins !== false, max_parallel: cf.local.max_parallel, bind: cf.server.bind, read_only: !!cf.server.read_only };
+        { k: "read_only", label: "Start read-only (no launching, no editing)", type: "bool", help: "Used the next time indra serve starts." },
+        { k: "webrtc", label: "Let nodes that dial in use a direct WebRTC channel (else everything goes over their WebSocket)", type: "bool" },
+        { k: "ice_servers", label: "STUN servers for WebRTC", type: "list", placeholder: "stun:stun.l.google.com:19302", help: "One URL per line. TURN servers with a username and credential go in indra.toml as [[server.ice]] (see the nodes guide)." }];
+      var vals = { builtins: cf.builtins !== false, max_parallel: cf.local.max_parallel, bind: cf.server.bind, read_only: !!cf.server.read_only,
+        webrtc: cf.server.webrtc !== false, ice_servers: cf.server.ice_servers };
       var form = itemForm(fields, vals, "General", function (o) {
         // One section at a time; each save returns the version the next one needs.
         return saveSection("builtins", o.builtins ? null : false, "Saved")
-          .then(function () { return saveSection("local", o.max_parallel === undefined ? {} : { max_parallel: o.max_parallel }); })
-          .then(function () { var sv = {}; if (o.bind) sv.bind = o.bind; if (o.read_only) sv.read_only = true; return saveSection("server", sv); });
+          // Each section keeps what this form does not show.
+          .then(function () { var lc = Object.assign({}, cf.local); delete lc.max_parallel; if (o.max_parallel !== undefined) lc.max_parallel = o.max_parallel; return saveSection("local", lc); })
+          .then(function () {
+            var sv = Object.assign({}, cf.server); ["bind", "read_only", "webrtc", "ice_servers"].forEach(function (k) { delete sv[k]; });
+            if (o.bind) sv.bind = o.bind; if (o.read_only) sv.read_only = true; if (!o.webrtc) sv.webrtc = false;
+            if (o.ice_servers && o.ice_servers.length) sv.ice_servers = o.ice_servers;
+            return saveSection("server", sv);
+          });
       }, function () { render(); });
       if (!c.editable) Array.prototype.forEach.call(form.querySelectorAll("input,select,textarea,button"), function (x) { x.disabled = true; });
       body.appendChild(form);

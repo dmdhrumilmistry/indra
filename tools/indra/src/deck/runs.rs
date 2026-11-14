@@ -88,6 +88,24 @@ pub fn list(h: &Harness, limit: usize) -> Vec<Run> {
     runs
 }
 
+/// A copy of a run fetched from a node, under the hub's data folder:
+/// key `n:<node>:<run>`.
+pub fn fetched_dir(data_dir: &Path, key: &str) -> Option<PathBuf> {
+    let rest = key.strip_prefix("n:")?;
+    let (node, name) = rest.split_once(':')?;
+    let ok = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('.')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.:+@".contains(c))
+    };
+    if !ok(node) || !ok(name) || name.contains(':') {
+        return None;
+    }
+    let d = data_dir.join("fetched").join(node).join(name);
+    d.is_dir().then_some(d)
+}
+
 pub fn find(h: &Harness, key: &str) -> Option<PathBuf> {
     run_dirs(h)
         .into_iter()

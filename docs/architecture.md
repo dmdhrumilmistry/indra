@@ -148,7 +148,7 @@ to run it with, so it serves reviews, fixes, research or anything else an agent 
  move to "Done" when you accept it      <--sync---   Done
 ```
 
-- **Connectors** are per tracker (Jira, GitHub Issues, ClickUp; Linear next): how to list items
+- **Connectors** are per tracker (Jira, GitHub Issues, ClickUp, Linear): how to list items
   with a filter, comment, and move one between states. The token is a secret reference, scoped
   to the connector. A connector maps board columns to tracker states. Requests go through the
   system `curl`, credentials on its stdin.

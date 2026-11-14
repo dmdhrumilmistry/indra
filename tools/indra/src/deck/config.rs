@@ -319,6 +319,21 @@ pub struct ServerCfg {
     /// any, direct paths work on the same network; elsewhere traffic is relayed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ice_servers: Vec<String>,
+    /// STUN/TURN servers with credentials: `[[server.ice]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ice: Vec<IceCfg>,
+}
+
+/// One `[[server.ice]]`: a TURN server's URLs and its credentials (the
+/// credential may be a `secret:<name>` reference).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IceCfg {
+    pub urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credential: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -500,7 +515,7 @@ fn none_if_empty(v: &Option<String>) -> Option<String> {
 #[serde(deny_unknown_fields)]
 pub struct ConnectorCfg {
     pub name: String,
-    /// jira | github | clickup
+    /// jira | github | clickup | linear
     pub kind: String,
     /// Base URL: the Jira site (https://acme.atlassian.net); GitHub and
     /// ClickUp default to their public APIs (set it for GitHub Enterprise).
@@ -611,7 +626,7 @@ pub struct Settings {
     pub local_max_parallel: usize,
     /// WebRTC for linked nodes, and its ICE servers.
     pub webrtc: bool,
-    pub ice_servers: Vec<String>,
+    pub ice_servers: Vec<crate::deck::link::IceServer>,
     pub nodes: Vec<crate::deck::nodes::Node>,
     pub workflows: Vec<WorkflowCfg>,
     pub teams: Vec<TeamCfg>,
@@ -962,6 +977,46 @@ pub struct LoadOptions {
     pub bind: Option<String>,
     pub read_only: bool,
     pub cwd: PathBuf,
+}
+
+/// `ice_servers` (plain URLs) and `[[server.ice]]` (with credentials), checked.
+fn ice_servers(s: &ServerCfg) -> Result<Vec<crate::deck::link::IceServer>> {
+    use crate::deck::link::IceServer;
+    let ok = |u: &str| {
+        ["stun:", "stuns:", "turn:", "turns:"]
+            .iter()
+            .any(|p| u.starts_with(p))
+            && u.len() <= 512
+            && !u.chars().any(|c| c.is_control() || c.is_whitespace())
+    };
+    let mut out: Vec<IceServer> = Vec::new();
+    for u in &s.ice_servers {
+        if !ok(u) {
+            return Err(format!(
+                "server.ice_servers: not a stun:/turn: URL: {:?}",
+                u
+            ));
+        }
+        out.push(IceServer {
+            urls: vec![u.clone()],
+            ..Default::default()
+        });
+    }
+    for (i, c) in s.ice.iter().enumerate() {
+        if c.urls.is_empty() || c.urls.iter().any(|u| !ok(u)) {
+            return Err(format!("server.ice[{}]: urls must be stun:/turn: URLs", i));
+        }
+        if let Some(name) = crate::deck::secrets::reference(&c.credential) {
+            crate::deck::secrets::validate_name(name)
+                .map_err(|e| format!("server.ice[{}] credential: {}", i, e))?;
+        }
+        out.push(IceServer {
+            urls: c.urls.clone(),
+            username: c.username.clone(),
+            credential: c.credential.clone(),
+        });
+    }
+    Ok(out)
 }
 
 pub fn load(opts: LoadOptions) -> Result<Settings> {
@@ -1340,7 +1395,7 @@ pub fn build_settings(
         components: file.component.clone(),
         local_max_parallel: file.local.max_parallel.unwrap_or(4).max(1),
         webrtc: file.server.webrtc.unwrap_or(true),
-        ice_servers: file.server.ice_servers.clone(),
+        ice_servers: ice_servers(&file.server)?,
         nodes,
         workflows,
         bind: opts
@@ -1606,6 +1661,44 @@ needs = ["sub"]
             "[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\n[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\n",
         ] {
             let f: ConfigFile = toml::from_str(&format!("{}{}", base, bad)).unwrap();
+            assert!(build_settings(&opts, None, &f).is_err(), "{}", bad);
+        }
+    }
+
+    #[test]
+    fn ice_servers_with_turn_credentials() {
+        use crate::deck::link::{ice_frame, parse_ice};
+        let opts = LoadOptions {
+            config: None,
+            targets: vec![],
+            bind: None,
+            read_only: false,
+            cwd: std::env::temp_dir(),
+        };
+        let f: ConfigFile = toml::from_str(
+            "builtins = false\n[server]\nice_servers = [\"stun:stun.example.org:3478\"]\n\
+[[server.ice]]\nurls = [\"turn:turn.example.org:3478\", \"turns:turn.example.org:5349\"]\nusername = \"indra\"\ncredential = \"secret:turn\"\n",
+        )
+        .unwrap();
+        let s = build_settings(&opts, None, &f).unwrap();
+        assert_eq!(s.ice_servers.len(), 2);
+        assert_eq!(s.ice_servers[1].username, "indra");
+        assert_eq!(s.ice_servers[1].credential, "secret:turn");
+        // Plain URLs stay plain on the wire (older nodes read them); TURN
+        // servers go as objects, and both come back the same.
+        let frame = ice_frame(&s.ice_servers);
+        assert_eq!(frame[0], "stun:stun.example.org:3478");
+        assert_eq!(frame[1]["username"], "indra");
+        assert_eq!(parse_ice(Some(&frame)), s.ice_servers);
+        let one =
+            serde_json::json!([{ "urls": "turn:x:3478", "username": "u", "credential": "c" }, 7]);
+        assert_eq!(parse_ice(Some(&one))[0].urls, vec!["turn:x:3478"]);
+        for bad in [
+            "[server]\nice_servers = [\"http://x\"]\n",
+            "[[server.ice]]\nurls = []\n",
+            "[[server.ice]]\nurls = [\"turn:x\"]\ncredential = \"secret:bad name\"\n",
+        ] {
+            let f: ConfigFile = toml::from_str(&format!("builtins = false\n{}", bad)).unwrap();
             assert!(build_settings(&opts, None, &f).is_err(), "{}", bad);
         }
     }

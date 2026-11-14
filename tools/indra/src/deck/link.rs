@@ -100,21 +100,21 @@ pub mod rtc {
         /// `signal` takes frames for the other side (over the WebSocket);
         /// `inbound` receives frames that arrive over the data channel.
         pub async fn new(
-            ice: &[String],
+            ice: &[super::IceServer],
             signal: mpsc::UnboundedSender<String>,
             inbound: mpsc::UnboundedSender<String>,
             offerer: bool,
         ) -> Result<Arc<Peer>> {
             let api = APIBuilder::new().build();
             let cfg = RTCConfiguration {
-                ice_servers: if ice.is_empty() {
-                    vec![]
-                } else {
-                    vec![RTCIceServer {
-                        urls: ice.to_vec(),
-                        ..Default::default()
-                    }]
-                },
+                ice_servers: ice
+                    .iter()
+                    .map(|s| RTCIceServer {
+                        urls: s.urls.clone(),
+                        username: s.username.clone(),
+                        credential: s.credential.clone(),
+                    })
+                    .collect(),
                 ..Default::default()
             };
             let pc = Arc::new(api.new_peer_connection(cfg).await.map_err(err)?);
@@ -274,6 +274,9 @@ pub struct NodeLink {
     since: AtomicU64,
     epoch: AtomicU64,
     peer: PeerSlot,
+    /// Requests waiting for the node's answer (`req`/`res` frames).
+    reqs: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>,
+    next_req: AtomicU64,
 }
 
 impl NodeLink {
@@ -288,6 +291,30 @@ impl NodeLink {
             since: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             peer: Mutex::new(None),
+            reqs: Mutex::new(HashMap::new()),
+            next_req: AtomicU64::new(1),
+        }
+    }
+
+    /// Ask the node something (`runs`, `info`) and wait for its answer: what
+    /// `indra node runs|info` answer over SSH, for a node that dials in.
+    pub async fn request(&self, what: &str, args: Value, secs: u64) -> Result<Value> {
+        if !self.connected() {
+            return Err(format!("node '{}' is not connected", self.name));
+        }
+        let id = self.next_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.reqs.lock().unwrap().insert(id, tx);
+        self.send(json!({ "t": "req", "id": id, "what": what, "args": args }));
+        let r = tokio::time::timeout(std::time::Duration::from_secs(secs), rx).await;
+        self.reqs.lock().unwrap().remove(&id);
+        match r {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err(format!("node '{}' went away", self.name)),
+            Err(_) => Err(format!(
+                "node '{}' did not answer in {}s (an older indra there?)",
+                self.name, secs
+            )),
         }
     }
 
@@ -373,7 +400,7 @@ pub struct Links {
     codes: Mutex<HashMap<String, (String, u64)>>,
     next_job: AtomicU64,
     /// STUN/TURN servers for WebRTC (none: direct paths on the same network only).
-    pub ice_servers: Mutex<Vec<String>>,
+    pub ice_servers: Mutex<Vec<IceServer>>,
     pub webrtc: AtomicBool,
 }
 
@@ -488,7 +515,8 @@ impl Links {
         let ice = self.ice_servers.lock().unwrap().clone();
         let webrtc = self.webrtc.load(Ordering::SeqCst);
         let _ = tx.send(
-            json!({ "t": "welcome", "hub": self.hub_id, "ice": ice, "webrtc": webrtc }).to_string(),
+            json!({ "t": "welcome", "hub": self.hub_id, "ice": ice_frame(&ice), "webrtc": webrtc })
+                .to_string(),
         );
         *link.conn.lock().unwrap() = Some((epoch, tx.clone()));
         link.since.store(now(), Ordering::SeqCst);
@@ -601,6 +629,21 @@ impl Links {
                     }
                 }
             }
+            "res" => {
+                let id = v.get("id").and_then(Value::as_u64).unwrap_or(0);
+                if let Some(tx) = link.reqs.lock().unwrap().remove(&id) {
+                    let r = if v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                        Ok(v.get("data").cloned().unwrap_or(Value::Null))
+                    } else {
+                        Err(v
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("failed")
+                            .to_string())
+                    };
+                    let _ = tx.send(r);
+                }
+            }
             "ev" => {
                 let job = v.get("job").and_then(Value::as_u64).unwrap_or(0);
                 let seq = v.get("seq").and_then(Value::as_u64).unwrap_or(0);
@@ -658,12 +701,66 @@ struct NodeJob {
     done: bool,
 }
 
+/// A STUN or TURN server for WebRTC. TURN servers usually need a username
+/// and credential; STUN servers do not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credential: String,
+}
+
+/// The `ice` list of a welcome frame: plain URLs (from older hubs, and for
+/// servers without credentials) or objects.
+pub fn parse_ice(v: Option<&Value>) -> Vec<IceServer> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| match x {
+                    Value::String(u) => Some(IceServer {
+                        urls: vec![u.clone()],
+                        ..Default::default()
+                    }),
+                    Value::Object(_) => {
+                        let mut x = x.clone();
+                        // `urls` may be one string.
+                        if let Some(u) = x.get("urls").and_then(Value::as_str).map(String::from) {
+                            x["urls"] = json!([u]);
+                        }
+                        serde_json::from_value::<IceServer>(x).ok()
+                    }
+                    _ => None,
+                })
+                .filter(|s| !s.urls.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What a welcome frame carries: a bare URL where there is nothing else to
+/// say (so older nodes still read it), an object where there is.
+pub fn ice_frame(ice: &[IceServer]) -> Value {
+    Value::Array(
+        ice.iter()
+            .flat_map(|s| {
+                if s.username.is_empty() && s.credential.is_empty() {
+                    s.urls.iter().map(|u| json!(u)).collect::<Vec<_>>()
+                } else {
+                    vec![json!(s)]
+                }
+            })
+            .collect(),
+    )
+}
+
 #[derive(Default)]
 struct NodeState {
     jobs: Mutex<HashMap<u64, NodeJob>>,
     hub: Mutex<Option<String>>,
     /// STUN/TURN servers the hub announced.
-    ice: Mutex<Vec<String>>,
+    ice: Mutex<Vec<IceServer>>,
 }
 
 #[cfg(feature = "webrtc")]
@@ -910,15 +1007,7 @@ async fn node_frame(
             eprintln!("indra: enrolled; the key is in {}", p.display());
         }
         "welcome" => {
-            *state.ice.lock().unwrap() = v
-                .get("ice")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            *state.ice.lock().unwrap() = parse_ice(v.get("ice"));
             let id = v
                 .get("hub")
                 .and_then(Value::as_str)
@@ -930,6 +1019,27 @@ async fn node_frame(
                 state.stop_all();
             }
             *hub_id = Some(id);
+        }
+        "req" => {
+            // What `indra node runs|info` answer over SSH, for this link.
+            let id = v.get("id").and_then(Value::as_u64).unwrap_or(0);
+            let args = v.get("args").cloned().unwrap_or(Value::Null);
+            let r: Result<Value> = match v.get("what").and_then(Value::as_str).unwrap_or("") {
+                "runs" => serde_json::from_value::<crate::deck::nodes::RunsSpec>(args)
+                    .map_err(|e| format!("bad runs request: {}", e))
+                    .map(crate::deck::nodes::runs_for),
+                "info" => serde_json::to_value(crate::deck::nodes::local_info(settings))
+                    .map_err(|e| e.to_string()),
+                "run_files" => serde_json::from_value::<crate::deck::nodes::RunFilesReq>(args)
+                    .map_err(|e| format!("bad run_files request: {}", e))
+                    .and_then(crate::deck::nodes::run_files),
+                other => Err(format!("unknown request {:?}", other)),
+            };
+            let f = match r {
+                Ok(d) => json!({ "t": "res", "id": id, "ok": true, "data": d }),
+                Err(e) => json!({ "t": "res", "id": id, "ok": false, "error": e }),
+            };
+            let _ = ws.send(f.to_string());
         }
         "ping" => {
             let _ = ws.send(json!({ "t": "pong" }).to_string());

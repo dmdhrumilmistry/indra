@@ -1,4 +1,4 @@
-//! Tracker connectors: Jira, GitHub Issues and ClickUp.
+//! Tracker connectors: Jira, GitHub Issues, ClickUp and Linear.
 //!
 //! A connector lists open items matching a filter, comments on one, and moves
 //! one to a named state. Requests go through the system `curl` (Linux, macOS
@@ -13,7 +13,10 @@ use tokio::io::AsyncWriteExt;
 
 pub type Result<T> = std::result::Result<T, String>;
 
-pub const KINDS: [&str; 3] = ["jira", "github", "clickup"];
+pub const KINDS: [&str; 4] = ["jira", "github", "clickup", "linear"];
+
+/// The most items one import reads, across pages.
+pub const MAX_ITEMS: usize = 500;
 
 /// An item in a tracker.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -189,6 +192,7 @@ impl Tracker<'_> {
         let d = match self.cfg.kind.as_str() {
             "github" => "https://api.github.com",
             "clickup" => "https://api.clickup.com",
+            "linear" => "https://api.linear.app",
             _ => "",
         };
         self.cfg
@@ -209,11 +213,59 @@ impl Tracker<'_> {
                 )
             ),
             "clickup" => self.token.clone(),
+            // A Linear API key goes as it is; an OAuth token is a bearer.
+            "linear" if self.token.starts_with("lin_api_") => self.token.clone(),
             _ => format!("Bearer {}", self.token),
         }
     }
 
-    /// Open items matching the connector's filter (at most 50).
+    /// One Linear GraphQL call; GraphQL errors are errors.
+    async fn linear(&self, query: &str, variables: Value) -> Result<Value> {
+        let v = http(
+            "POST",
+            &format!("{}/graphql", self.base()),
+            &self.auth(),
+            Some(&json!({ "query": query, "variables": variables })),
+        )
+        .await?;
+        if let Some(e) = v
+            .get("errors")
+            .and_then(Value::as_array)
+            .filter(|e| !e.is_empty())
+        {
+            return Err(format!(
+                "Linear: {}",
+                e.iter()
+                    .filter_map(|x| x.get("message").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        Ok(v.get("data").cloned().unwrap_or(Value::Null))
+    }
+
+    /// A Linear issue's id and its team's workflow states, from its key (ENG-12).
+    async fn linear_issue(&self, key: &str) -> Result<(String, Vec<Value>)> {
+        let d = self
+            .linear(
+                "query($id:String!){ issue(id:$id){ id team{ states{ nodes{ id name } } } } }",
+                json!({ "id": key }),
+            )
+            .await?;
+        let id = s(&d, "/issue/id");
+        if id.is_empty() {
+            return Err(format!("Linear has no issue {}", key));
+        }
+        let states = d
+            .pointer("/issue/team/states/nodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok((id, states))
+    }
+
+    /// Open items matching the connector's filter, across pages (at most
+    /// MAX_ITEMS).
     pub async fn list(&self) -> Result<Vec<Remote>> {
         let (b, p) = (self.base(), &self.cfg.project);
         match self.cfg.kind.as_str() {
@@ -227,16 +279,39 @@ impl Tracker<'_> {
                         p
                     ),
                 };
-                let url = format!(
-                    "{}/rest/api/3/search/jql?jql={}&fields=summary,description,status&maxResults=50",
-                    b,
-                    encode(&jql)
-                );
-                let v = http("GET", &url, &self.auth(), None).await?;
-                Ok(v.get("issues")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
+                let mut issues: Vec<Value> = Vec::new();
+                let mut token: Option<String> = None;
+                loop {
+                    let mut url = format!(
+                        "{}/rest/api/3/search/jql?jql={}&fields=summary,description,status&maxResults=100",
+                        b,
+                        encode(&jql)
+                    );
+                    if let Some(t) = &token {
+                        url.push_str(&format!("&nextPageToken={}", encode(t)));
+                    }
+                    let v = http("GET", &url, &self.auth(), None).await?;
+                    issues.extend(
+                        v.get("issues")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    token = v
+                        .get("nextPageToken")
+                        .and_then(Value::as_str)
+                        .filter(|t| !t.is_empty())
+                        .map(String::from);
+                    let last = v
+                        .get("isLast")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(token.is_none());
+                    if last || token.is_none() || issues.len() >= MAX_ITEMS {
+                        break;
+                    }
+                }
+                issues.truncate(MAX_ITEMS);
+                Ok(issues
                     .iter()
                     .map(|i| {
                         let key = s(i, "/key");
@@ -254,14 +329,24 @@ impl Tracker<'_> {
                     .collect())
             }
             "github" => {
-                let mut url = format!("{}/repos/{}/issues?state=open&per_page=50", b, p);
-                if let Some(q) = self.cfg.query.as_ref().filter(|q| !q.trim().is_empty()) {
-                    url.push_str(&format!("&labels={}", encode(q)));
+                let mut all: Vec<Value> = Vec::new();
+                for page in 1..=(MAX_ITEMS / 100) {
+                    let mut url = format!(
+                        "{}/repos/{}/issues?state=open&per_page=100&page={}",
+                        b, p, page
+                    );
+                    if let Some(q) = self.cfg.query.as_ref().filter(|q| !q.trim().is_empty()) {
+                        url.push_str(&format!("&labels={}", encode(q)));
+                    }
+                    let v = http("GET", &url, &self.auth(), None).await?;
+                    let got = v.as_array().cloned().unwrap_or_default();
+                    let n = got.len();
+                    all.extend(got);
+                    if n < 100 {
+                        break;
+                    }
                 }
-                let v = http("GET", &url, &self.auth(), None).await?;
-                Ok(v.as_array()
-                    .cloned()
-                    .unwrap_or_default()
+                Ok(all
                     .iter()
                     .filter(|i| i.get("pull_request").is_none())
                     .map(|i| Remote {
@@ -274,7 +359,7 @@ impl Tracker<'_> {
                     .collect())
             }
             "clickup" => {
-                let mut url = format!(
+                let mut base_url = format!(
                     "{}/api/v2/list/{}/task?archived=false&include_closed=false",
                     b,
                     encode(p)
@@ -287,13 +372,30 @@ impl Tracker<'_> {
                     .map(str::trim)
                     .filter(|x| !x.is_empty())
                 {
-                    url.push_str(&format!("&statuses%5B%5D={}", encode(st)));
+                    base_url.push_str(&format!("&statuses%5B%5D={}", encode(st)));
                 }
-                let v = http("GET", &url, &self.auth(), None).await?;
-                Ok(v.get("tasks")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
+                let mut tasks: Vec<Value> = Vec::new();
+                for page in 0..(MAX_ITEMS / 100) {
+                    let v = http(
+                        "GET",
+                        &format!("{}&page={}", base_url, page),
+                        &self.auth(),
+                        None,
+                    )
+                    .await?;
+                    let got = v
+                        .get("tasks")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let empty = got.is_empty();
+                    tasks.extend(got);
+                    if empty || v.get("last_page").and_then(Value::as_bool).unwrap_or(true) {
+                        break;
+                    }
+                }
+                tasks.truncate(MAX_ITEMS);
+                Ok(tasks
                     .iter()
                     .map(|t| Remote {
                         key: s(t, "/id"),
@@ -308,6 +410,55 @@ impl Tracker<'_> {
                         },
                         url: s(t, "/url"),
                         state: s(t, "/status/status"),
+                    })
+                    .collect())
+            }
+            "linear" => {
+                // The team by its key (ENG); open means not completed or
+                // canceled; the filter, if any, is a label name.
+                let mut filter = json!({
+                    "team": { "key": { "eq": p } },
+                    "state": { "type": { "nin": ["completed", "canceled"] } },
+                });
+                if let Some(q) = self.cfg.query.as_ref().filter(|q| !q.trim().is_empty()) {
+                    filter["labels"] = json!({ "some": { "name": { "eq": q.trim() } } });
+                }
+                let mut nodes: Vec<Value> = Vec::new();
+                let mut after: Option<String> = None;
+                loop {
+                    let d = self
+                        .linear(
+                            "query($filter:IssueFilter,$after:String){ issues(first:100, after:$after, filter:$filter){ nodes{ identifier title description url state{ name } } pageInfo{ hasNextPage endCursor } } }",
+                            json!({ "filter": filter, "after": after }),
+                        )
+                        .await?;
+                    nodes.extend(
+                        d.pointer("/issues/nodes")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    let more = d
+                        .pointer("/issues/pageInfo/hasNextPage")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    after = d
+                        .pointer("/issues/pageInfo/endCursor")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    if !more || after.is_none() || nodes.len() >= MAX_ITEMS {
+                        break;
+                    }
+                }
+                nodes.truncate(MAX_ITEMS);
+                Ok(nodes
+                    .iter()
+                    .map(|i| Remote {
+                        key: s(i, "/identifier"),
+                        title: s(i, "/title"),
+                        body: s(i, "/description"),
+                        url: s(i, "/url"),
+                        state: s(i, "/state/name"),
                     })
                     .collect())
             }
@@ -347,6 +498,14 @@ impl Tracker<'_> {
                     &format!("{}/api/v2/task/{}/comment", b, encode(key)),
                     &self.auth(),
                     Some(&json!({ "comment_text": text, "notify_all": false })),
+                )
+                .await
+            }
+            "linear" => {
+                let (id, _) = self.linear_issue(key).await?;
+                self.linear(
+                    "mutation($input:CommentCreateInput!){ commentCreate(input:$input){ success } }",
+                    json!({ "input": { "issueId": id, "body": text } }),
                 )
                 .await
             }
@@ -431,6 +590,25 @@ impl Tracker<'_> {
             )
             .await
             .map(|_| ()),
+            "linear" => {
+                let (id, states) = self.linear_issue(key).await?;
+                let want = state.to_lowercase();
+                let st = states
+                    .iter()
+                    .find(|x| s(x, "/name").to_lowercase() == want)
+                    .ok_or_else(|| format!("Linear's team has no state '{}' for {}", state, key))?;
+                let d = self
+                    .linear(
+                        "mutation($id:String!,$input:IssueUpdateInput!){ issueUpdate(id:$id, input:$input){ success } }",
+                        json!({ "id": id, "input": { "stateId": s(st, "/id") } }),
+                    )
+                    .await?;
+                if d.pointer("/issueUpdate/success") == Some(&json!(true)) {
+                    Ok(())
+                } else {
+                    Err(format!("Linear did not move {} to '{}'", key, state))
+                }
+            }
             k => Err(format!("unknown connector kind '{}'", k)),
         }
     }
@@ -439,6 +617,123 @@ impl Tracker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for all four trackers, paging the way each one does.
+    async fn fake() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use axum::extract::{Query, Request};
+        use std::collections::HashMap;
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let s2 = seen.clone();
+        let issues = |n: usize, from: usize| -> Vec<Value> {
+            (from..from + n).map(|i| json!({ "number": i, "title": format!("t{}", i), "body": "", "html_url": "", "state": "open" })).collect()
+        };
+        let app = axum::Router::new()
+            .route("/repos/o/r/issues", axum::routing::get(move |Query(q): Query<HashMap<String, String>>| async move {
+                let mut v = if q.get("page").map(String::as_str) == Some("1") { issues(100, 0) } else { issues(30, 100) };
+                v[0]["pull_request"] = json!({});
+                axum::Json(json!(v))
+            }))
+            .route("/rest/api/3/search/jql", axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                let page2 = q.get("nextPageToken").map(String::as_str) == Some("t2");
+                let n = if page2 { 5 } else { 100 };
+                let list: Vec<Value> = (0..n).map(|i| json!({ "key": format!("SEC-{}", i), "fields": { "summary": "s", "status": { "name": "To Do" } } })).collect();
+                axum::Json(if page2 { json!({ "issues": list, "isLast": true }) } else { json!({ "issues": list, "nextPageToken": "t2", "isLast": false }) })
+            }))
+            .route("/api/v2/list/L1/task", axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                let p1 = q.get("page").map(String::as_str) == Some("1");
+                let n = if p1 { 3 } else { 100 };
+                let list: Vec<Value> = (0..n).map(|i| json!({ "id": format!("c{}", i), "name": "n", "status": { "status": "open" } })).collect();
+                axum::Json(json!({ "tasks": list, "last_page": p1 }))
+            }))
+            .route("/graphql", axum::routing::post(move |req: Request| {
+                let seen = s2.clone();
+                async move {
+                    let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    let b: Value = serde_json::from_slice(&axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap()).unwrap();
+                    seen.lock().unwrap().push(json!({ "auth": auth, "body": b }));
+                    let q = b["query"].as_str().unwrap_or("");
+                    let v = &b["variables"];
+                    axum::Json(if q.contains("issues(") {
+                        if v["after"].is_null() {
+                            json!({ "data": { "issues": { "nodes": [{ "identifier": "ENG-1", "title": "a", "url": "u1", "state": { "name": "Todo" } }, { "identifier": "ENG-2", "title": "b", "state": { "name": "Todo" } }], "pageInfo": { "hasNextPage": true, "endCursor": "c1" } } } })
+                        } else {
+                            json!({ "data": { "issues": { "nodes": [{ "identifier": "ENG-3", "title": "c", "state": { "name": "In Progress" } }], "pageInfo": { "hasNextPage": false, "endCursor": "c2" } } } })
+                        }
+                    } else if q.contains("issue(id") {
+                        if v["id"] == "ENG-404" {
+                            json!({ "data": { "issue": null }, "errors": [{ "message": "Entity not found" }] })
+                        } else {
+                            json!({ "data": { "issue": { "id": "uuid-1", "team": { "states": { "nodes": [{ "id": "s-rev", "name": "In Review" }, { "id": "s-done", "name": "Done" }] } } } } })
+                        }
+                    } else if q.contains("commentCreate") {
+                        json!({ "data": { "commentCreate": { "success": true } } })
+                    } else {
+                        json!({ "data": { "issueUpdate": { "success": true } } })
+                    })
+                }
+            }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (url, seen)
+    }
+
+    fn cfg(kind: &str, url: &str, project: &str, query: Option<&str>) -> ConnectorCfg {
+        serde_json::from_value(json!({ "name": "c", "kind": kind, "url": url, "project": project, "query": query, "token": "secret:t" })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_tracker_pages_and_linear_works() {
+        if crate::deck::config::which("curl").is_none() {
+            return;
+        }
+        let (url, seen) = fake().await;
+        fn t(c: &ConnectorCfg) -> Tracker<'_> {
+            Tracker {
+                cfg: c,
+                token: "lin_api_k".into(),
+            }
+        }
+        let gh = cfg("github", &url, "o/r", None);
+        assert_eq!(t(&gh).list().await.unwrap().len(), 128); // 130 less a pull request per page
+        let jira = cfg("jira", &url, "SEC", None);
+        assert_eq!(t(&jira).list().await.unwrap().len(), 105);
+        let cu = cfg("clickup", &url, "L1", None);
+        assert_eq!(t(&cu).list().await.unwrap().len(), 103);
+
+        let lin = cfg("linear", &url, "ENG", Some("agent"));
+        let items = t(&lin).list().await.unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(),
+            vec!["ENG-1", "ENG-2", "ENG-3"]
+        );
+        assert_eq!(items[2].state, "In Progress");
+        t(&lin).comment("ENG-1", "done by indra").await.unwrap();
+        t(&lin).transition("ENG-1", "in review").await.unwrap();
+        assert!(t(&lin)
+            .transition("ENG-1", "Shipped")
+            .await
+            .unwrap_err()
+            .contains("no state 'Shipped'"));
+        assert!(t(&lin)
+            .comment("ENG-404", "x")
+            .await
+            .unwrap_err()
+            .contains("Entity not found"));
+        let log = seen.lock().unwrap().clone();
+        // A Linear API key goes as it is, not as a bearer token.
+        assert_eq!(log[0]["auth"], "lin_api_k");
+        let f = &log[0]["body"]["variables"]["filter"];
+        assert_eq!(f["team"]["key"]["eq"], "ENG");
+        assert_eq!(f["labels"]["some"]["name"]["eq"], "agent");
+        assert!(log.iter().any(
+            |x| x["body"]["variables"]["input"]["body"] == "done by indra"
+                && x["body"]["variables"]["input"]["issueId"] == "uuid-1"
+        ));
+        assert!(log
+            .iter()
+            .any(|x| x["body"]["variables"]["input"]["stateId"] == "s-rev"));
+    }
 
     #[test]
     fn helpers() {

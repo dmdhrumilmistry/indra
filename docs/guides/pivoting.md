@@ -22,7 +22,9 @@ used.
 ## How to pivot
 
 On a process page, use **Pivot this agent**: type the new instruction, choose Continue or
-Fresh, and press Pivot. The new process opens. Its page says "Pivoted from #N (same session)"
+Fresh, and press Pivot. Either can change the **model**; a Fresh pivot can also switch to another
+**profile** (and so another runner, or a model on Ollama). A continued session stays with its
+runner and profile, because the session lives in that runner's history. The new process opens. Its page says "Pivoted from #N (same session)"
 or "(fresh)", and the original lists "Pivots: #M".
 
 By default the original is **stopped first**, so two agents never edit the same files at once.

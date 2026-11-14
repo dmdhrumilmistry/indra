@@ -1,5 +1,5 @@
 
-# Python bytecode from the bundled scripts
+# Python bytecode (the test suite's stand-in agents)
 __pycache__/
 *.py[cod]
 
@@ -9,5 +9,5 @@ __pycache__/
 # Rust build output
 tools/indra/target/
 
-# Built website (scripts/build-site.py)
+# Built website (indra dev site)
 _site/

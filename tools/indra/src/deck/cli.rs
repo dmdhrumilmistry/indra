@@ -543,7 +543,14 @@ pub fn run_nodes(a: NodesArgs) -> Result<ExitCode, String> {
     )];
     rt.block_on(async {
         let mut set = tokio::task::JoinSet::new();
-        for (i, n) in s.nodes.iter().cloned().enumerate() {
+        // A node that dials in has no SSH to probe; its state is the hub's.
+        for (i, n) in s
+            .nodes
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, n)| !n.ssh.is_empty())
+        {
             set.spawn(async move { (i, nodes::remote_info(&n).await) });
         }
         let mut res: Vec<(usize, Result<nodes::NodeInfo, String>)> = Vec::new();
@@ -557,14 +564,16 @@ pub fn run_nodes(a: NodesArgs) -> Result<ExitCode, String> {
         }
     });
     let failed = rows.iter().filter(|r| r.2.is_err()).count();
+    let dial_in: Vec<&nodes::Node> = s.nodes.iter().filter(|n| n.ssh.is_empty()).collect();
     if a.json {
-        let v: Vec<_> = rows
+        let mut v: Vec<_> = rows
             .iter()
             .map(|(n, d, r, m)| match r {
                 Ok(i) => serde_json::json!({ "name": n, "at": d, "max_parallel": m, "info": i }),
                 Err(e) => serde_json::json!({ "name": n, "at": d, "max_parallel": m, "error": e }),
             })
             .collect();
+        v.extend(dial_in.iter().map(|n| serde_json::json!({ "name": n.name, "dials_in": true, "max_parallel": n.max_parallel })));
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     } else {
         for (n, d, r, m) in &rows {
@@ -598,6 +607,12 @@ pub fn run_nodes(a: NodesArgs) -> Result<ExitCode, String> {
                 }
                 Err(e) => println!("{:<14} DOWN  {}  {}", n, d, e),
             }
+        }
+        for n in &dial_in {
+            println!(
+                "{:<14} link  dials in to the hub (no SSH): see Nodes in the console, or `indra node connect` on it",
+                n.name
+            );
         }
     }
     Ok(if failed > 0 {
@@ -704,6 +719,8 @@ pub enum NodeCmd {
     Info,
     /// List run directories described by a JSON spec on stdin
     Runs,
+    /// One run's text files as JSON (the hub opens a copy of a remote run)
+    Runfiles,
     /// Run one agent job given as JSON on stdin; stops it when stdin closes
     Exec,
     /// Dial in to a hub and run its jobs here, reconnecting as needed (no SSH)
@@ -743,6 +760,7 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
     match a.cmd {
         NodeCmd::Info => nodes::cmd_info(&load(opts, None, false)?),
         NodeCmd::Runs => nodes::cmd_runs(),
+        NodeCmd::Runfiles => nodes::cmd_run_files(),
         NodeCmd::Exec => nodes::cmd_exec(&load(opts, None, false)?),
         NodeCmd::Connect {
             hub,

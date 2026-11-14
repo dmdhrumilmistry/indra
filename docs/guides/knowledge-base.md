@@ -128,7 +128,7 @@ providers' own; if one changes, follow the provider's documentation.
 
 What the skill does:
 
-1. **Builds a plan** with a bundled script: findings at or above a severity (default medium),
+1. **Builds a plan** with `indra publish plan`: findings at or above a severity (default medium),
    verified only by default, at most 25. Jira gets one issue per finding with a priority;
    GitHub one issue per finding; Confluence and Notion one page per review.
 2. **Asks you first.** It shows the destination and every title and creates nothing until you

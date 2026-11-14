@@ -320,7 +320,83 @@ fn expand_target(t: &str) -> PathBuf {
 pub fn cmd_runs() -> Result<ExitCode, String> {
     let spec: RunsSpec = serde_json::from_str(read_stdin_line()?.trim())
         .map_err(|e| format!("bad runs request: {}", e))?;
-    let h = Harness {
+    println!(
+        "{}",
+        serde_json::to_string(&runs_for(spec)).map_err(|e| e.to_string())?
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What a hub asks to copy one run: where runs are, and which one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunFilesReq {
+    pub spec: RunsSpec,
+    pub name: String,
+}
+
+/// The most a copied run may hold, and the most one file may.
+pub const RUN_COPY_MAX: u64 = 20 << 20;
+pub const RUN_FILE_MAX: u64 = 4 << 20;
+
+/// One run's text files on this machine, for the hub to open a copy:
+/// `{files: [{rel, text}], skipped: [rel]}`. Binary and oversized files are
+/// skipped, never sent partially.
+pub fn run_files(r: RunFilesReq) -> Result<Value, String> {
+    if r.name.is_empty() || r.name.contains(['/', '\\']) || r.name.starts_with('.') {
+        return Err("bad run name".into());
+    }
+    let h = remote_harness(r.spec);
+    let dir = crate::deck::runs::run_dirs(&h)
+        .into_iter()
+        .map(|(_, d)| d)
+        .find(|d| {
+            d.file_name()
+                .map(|n| n.to_string_lossy() == r.name)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| format!("no run named {}", r.name))?;
+    let (mut files, mut skipped, mut total) = (Vec::new(), Vec::new(), 0u64);
+    let mut stack = vec![(dir.clone(), 0usize)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let p = e.path();
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                if depth < 6 {
+                    stack.push((p, depth + 1));
+                }
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&dir)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if size > RUN_FILE_MAX || total + size > RUN_COPY_MAX {
+                skipped.push(rel);
+                continue;
+            }
+            match std::fs::read_to_string(&p) {
+                Ok(text) => {
+                    total += size;
+                    files.push(json!({ "rel": rel, "text": text }));
+                }
+                Err(_) => skipped.push(rel),
+            }
+        }
+    }
+    Ok(json!({ "files": files, "skipped": skipped }))
+}
+
+fn remote_harness(spec: RunsSpec) -> Harness {
+    Harness {
         name: "remote".into(),
         description: String::new(),
         root: PathBuf::from("."),
@@ -334,12 +410,33 @@ pub fn cmd_runs() -> Result<ExitCode, String> {
         group_by: spec.group_by,
         stages: spec.stages,
         builtin: false,
-    };
-    println!(
-        "{}",
-        serde_json::to_string(&crate::deck::runs::list(&h, 100)).map_err(|e| e.to_string())?
-    );
+    }
+}
+
+/// `indra node runfiles`: one run's files as JSON (a request on stdin).
+pub fn cmd_run_files() -> Result<ExitCode, String> {
+    let r: RunFilesReq = serde_json::from_str(read_stdin_line()?.trim())
+        .map_err(|e| format!("bad runfiles request: {}", e))?;
+    println!("{}", run_files(r)?);
     Ok(ExitCode::SUCCESS)
+}
+
+/// A run's files from a node over SSH.
+pub async fn remote_run_files(n: &Node, r: &RunFilesReq) -> Result<Value, String> {
+    let input = serde_json::to_string(r).map_err(|e| e.to_string())?;
+    let out = n.call("runfiles", &input, 120).await?;
+    let line = out
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .ok_or("the node sent no files (an older indra there?)")?;
+    serde_json::from_str(line).map_err(|e| e.to_string())
+}
+
+/// The runs a hub asked about, on this machine (over SSH or the link).
+pub fn runs_for(spec: RunsSpec) -> Value {
+    let h = remote_harness(spec);
+    serde_json::to_value(crate::deck::runs::list(&h, 100)).unwrap_or(Value::Null)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
