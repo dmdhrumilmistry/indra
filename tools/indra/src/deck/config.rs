@@ -385,6 +385,12 @@ pub struct ProfileCfg {
     /// Environment for the agent, e.g. ANTHROPIC_BASE_URL for a local model.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Start with the memory notes most relevant to the prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory: bool,
+    /// Before finishing, propose learnings for the inbox (Claude Code runners).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reflect: bool,
 }
 
 impl ProfileCfg {

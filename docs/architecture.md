@@ -168,6 +168,23 @@ Workflows are already DAGs of tasks with dependencies. The editor makes them vis
 - The graph is stored as ordinary `[[workflow]]` TOML (with positions), so `indra run` and the
   text editor keep working.
 
+## Knowledge and context (built)
+
+Agents share what they learn through the same memory vaults reviews use (`indra mem`):
+
+- **In:** a launch with `memory` (per launch, or from its profile, so workflow tasks and board
+  items inherit it) recalls the notes most relevant to the prompt from the harness's vaults on
+  the hub and appends them to the prompt, so local and remote agents get the same context. The
+  process records which notes it was given.
+- **Out:** with `reflect`, when an interactive agent's last turn ends, the hub sends one more
+  user message asking for learnings as JSON before it closes the agent's input. The answer is
+  parsed into proposals in an inbox (`learnings.json`), with the process, session, profile and
+  directory they came from. A person accepts a proposal into a vault (a `learning` note, merged
+  into a note of the same title) or discards it; nothing an agent says becomes memory unreviewed.
+- **Context size:** the hub tracks the tokens of the agent's last top-level turn and the model's
+  context window from Claude Code's stream, and shows them on the process page and in
+  `indra attach`.
+
 ## Terminals (built)
 
 Two terminal surfaces sit on the same API as the console, so they add views, not powers:

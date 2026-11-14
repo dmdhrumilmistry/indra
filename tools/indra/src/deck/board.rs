@@ -415,15 +415,24 @@ pub async fn run(app: &App, id: u64, req: RunReq) -> Result<u64> {
         &Default::default(),
     )
     .map_err(|e| e.message())?;
-    let prompt = prompt_for(&it, conn);
     let harness = settings
         .harnesses
         .first()
         .map(|h| h.name.clone())
         .unwrap_or_default();
+    let (prompt, memory, reflect) = crate::deck::knowledge::prepare(
+        &settings,
+        &harness,
+        &prompt_for(&it, conn),
+        profile.as_deref(),
+        None,
+        None,
+    );
     let start = StartOpts {
         agent,
         profile: profile.clone(),
+        memory,
+        reflect,
         ..Default::default()
     };
     let pid = if node == crate::deck::nodes::LOCAL {

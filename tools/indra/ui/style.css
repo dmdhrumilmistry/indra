@@ -263,3 +263,24 @@ body.termpage { display: flex; flex-direction: column; height: 100vh; overflow: 
 .termbox .xterm { height: 100%; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .cmd.lines { white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; }
+
+/* knowledge */
+.kgrid { display: grid; grid-template-columns: minmax(240px, 360px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .kgrid { grid-template-columns: minmax(0, 1fr); } }
+.klist { display: flex; flex-direction: column; gap: 6px; max-height: 75vh; overflow: auto; }
+.kitem { display: grid; gap: 3px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--fg); text-decoration: none; min-width: 0; }
+.kitem:hover { border-color: var(--accent); }
+.kitem.sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.kitem .small, .small { font-size: 12.5px; }
+.kitem .muted { overflow: hidden; text-overflow: ellipsis; }
+textarea.notetext { width: 100%; min-height: 320px; font-family: var(--mono); font-size: 13px; box-sizing: border-box; resize: vertical; }
+.split2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .split2 { grid-template-columns: 1fr; } }
+.learning textarea { min-height: 90px; font-family: inherit; }
+.knowctl { display: grid; gap: 8px; }
+.knowctl small { color: var(--muted); font-weight: 400; }
+.context .bar { margin: 6px 0 10px; grid-template-columns: 56px 1fr auto; }
+.fill.hot { background: var(--warn); }
+.context form { margin-top: 8px; }
+.knowctl label.check { display: flex; gap: 8px; align-items: baseline; font-weight: 400; }
+.knowctl label.check b { font-weight: 600; }

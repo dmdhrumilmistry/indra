@@ -285,9 +285,19 @@ impl Engine {
             }
             None => (t.runner.clone(), Default::default()),
         };
+        let (prompt, memory, reflect) = crate::deck::knowledge::prepare(
+            &settings,
+            harness,
+            &prompt,
+            t.profile.as_deref(),
+            None,
+            None,
+        );
         let start = crate::deck::procs::StartOpts {
             agent,
             profile: t.profile.clone(),
+            memory,
+            reflect,
             ..Default::default()
         };
         if t.node == LOCAL {

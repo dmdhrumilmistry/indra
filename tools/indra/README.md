@@ -284,9 +284,9 @@ open the browser for you, `--read-only` to turn off launching and editing.
 |---|---|
 | **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read or edit it, and see what it uses and is used by. A save is refused if the file changed since you loaded it. |
 | **Graph map** | Pipeline stages run agents, agents spawn agents and invoke skills (a family reference such as `sh-kb-*` loads every member), and everything reads its prompts. |
-| **Memory** | The `indra mem` vaults the harness reads and writes, as graphs. |
+| **Knowledge** | The `indra mem` vaults the harness reads and writes: search, read, edit, link and delete notes, the graph, and its health (dangling links, orphans). Also the **learnings inbox**: what agents proposed they learned, to accept into memory or discard. See [Context, memory and learnings](../../docs/guides/context-and-learnings.md). |
 | **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
-| **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, and the final cost. Stop ends the whole process tree. |
+| **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
 | **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. See [the board guide](../../docs/guides/board.md). |
 | **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |
 | **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. See [Settings](#settings). |
@@ -478,6 +478,12 @@ name   = "local"                     # Claude Code on a local model, through Oll
 runner = "claude"
 model  = "qwen3-coder"
 env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+
+[[profile]]
+name    = "learner"
+runner  = "claude"
+memory  = true                       # start with the memory notes relevant to the prompt
+reflect = true                       # propose learnings for review before finishing
 ```
 
 For runners other than Claude Code, set `model_args` (e.g. `["--model", "{model}"]`) to let a
@@ -533,6 +539,26 @@ target and runner, and the two processes link to each other. API:
 A custom runner can continue sessions with `resume_args = ["--resume", "{session}"]` (and
 `fork_args`). See [Pivoting agents](../../docs/guides/pivoting.md).
 
+### Knowledge: context, memory and learnings
+
+Agents can start with what earlier agents learned, and finish by proposing what they learned:
+
+- **Memory at launch.** Tick **Give it relevant memory** on Launch (or set `memory = true` on a
+  profile): the notes from the harness's vaults that best match the prompt (graph-aware
+  `indra mem recall`, six notes, about 4,000 characters) are appended after the prompt. The
+  process page lists them.
+- **Learnings.** Tick **Ask for learnings at the end** (or `reflect = true`): before a Claude Code
+  agent's input closes, it is asked what a future agent should know. Its answer, and learnings
+  people add from a process page or `indra attach`, wait in **Knowledge > Learnings** with their
+  source (process, session, profile, directory) until you accept one into a vault, as a
+  `learning` note, or discard it.
+- **Context meter.** Each process page shows the tokens in the agent's context against its
+  model's window, so you can pivot before it fills up.
+- **Manage memory** on **Knowledge**: search, read, edit, link, create and delete notes, see the
+  graph, and fix dangling links and orphans.
+
+See [Context, memory and learnings](../../docs/guides/context-and-learnings.md).
+
 ### Terminals
 
 Two ways to work with agents from a terminal instead of the console's pages.
@@ -561,7 +587,9 @@ process 7 running  claude on local  in ~/code/my-api  session 5f0c...
 streams the agent's events and takes commands: plain text is a message to the agent; `/allow`,
 `/always` and `/deny [reason]` answer tool requests; `/mode`, `/model` and `/interrupt` steer it;
 `/pivot [--fresh] [--keep] <text>` redirects it and follows the new process; `/switch <id>`,
-`/agents`, `/status`, `/stop`, `/quit`. It works for agents on every node, like the console.
+`/agents`, `/status`, `/stop`, `/learn <text>` (a learning for the inbox), `/quit`. Its header
+shows the agent's context size and the memory it was given. It works for agents on every node,
+like the console.
 
 **A terminal in the browser.** Start the console with `indra serve --shell` and the
 **Terminal** page opens a real PTY in a new tab: your shell (`$SHELL`) or Claude Code's

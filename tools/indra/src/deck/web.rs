@@ -54,6 +54,8 @@ pub struct App {
     pub board: Arc<crate::deck::board::Board>,
     /// The browser terminal (`indra serve --shell`): a shell on this machine.
     pub shell: std::sync::atomic::AtomicBool,
+    /// Learnings agents and people proposed, waiting for review.
+    pub learnings: Arc<crate::deck::knowledge::Learnings>,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -85,6 +87,9 @@ impl App {
         let board = Arc::new(crate::deck::board::Board::open(
             settings.data_dir.join("board.json"),
         ));
+        let learnings = Arc::new(crate::deck::knowledge::Learnings::open(
+            settings.data_dir.join("learnings.json"),
+        ));
         let shared = config::Shared::new(settings);
         let engine = Engine::new(procs.clone(), shared.clone());
         Arc::new(App {
@@ -97,6 +102,7 @@ impl App {
             config,
             board,
             shell: std::sync::atomic::AtomicBool::new(false),
+            learnings,
         })
     }
 
@@ -127,7 +133,7 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-
 
 // ---- errors ------------------------------------------------------------------
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl ApiError {
     pub fn message(self) -> String {
@@ -141,20 +147,23 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn bad(msg: impl Into<String>) -> ApiError {
+pub(crate) fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
-fn not_found(msg: impl Into<String>) -> ApiError {
+pub(crate) fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, msg.into())
 }
-fn forbidden(msg: impl Into<String>) -> ApiError {
+pub(crate) fn forbidden(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::FORBIDDEN, msg.into())
 }
-fn internal(msg: impl Into<String>) -> ApiError {
+pub(crate) fn internal(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg.into())
 }
+pub(crate) fn conflict(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::CONFLICT, msg.into())
+}
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 // ---- auth --------------------------------------------------------------------
 
@@ -287,7 +296,7 @@ struct HQ {
 }
 
 impl App {
-    fn harness(&self, name: Option<&str>) -> ApiResult<Harness> {
+    pub(crate) fn harness(&self, name: Option<&str>) -> ApiResult<Harness> {
         let s = self.settings();
         match name.filter(|n| !n.is_empty()) {
             Some(n) => s
@@ -356,6 +365,7 @@ async fn overview(State(app): State<Arc<App>>) -> Json<Value> {
         "presets": s.presets,
         "profiles": s.profiles,
         "approvals": app.procs.list().iter().map(|p| p.pending.len()).sum::<usize>(),
+        "learnings": app.learnings.proposed(),
         "procs": app.procs.list(),
         "nodes": std::iter::once(LOCAL.to_string()).chain(s.nodes.iter().map(|n| n.name.clone())).collect::<Vec<_>>(),
         "workflows": s.workflows.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
@@ -533,6 +543,10 @@ struct LaunchReq {
     /// Per-launch changes on top of the profile (model, permission mode, ...).
     #[serde(default)]
     opts: nodes::AgentOpts,
+    /// Give it the relevant memory notes (default: the profile's choice).
+    memory: Option<bool>,
+    /// Ask it for learnings before it finishes (default: the profile's choice).
+    reflect: Option<bool>,
 }
 
 /// A profile and per-launch overrides, resolved into a runner and options.
@@ -613,9 +627,21 @@ async fn proc_start(
     let target = targets.get(r.target).ok_or_else(|| bad("unknown target"))?;
     let settings = app.settings();
     let (runner_name, agent) = resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
+    let profile = r.profile.clone().filter(|p| !p.is_empty());
+    let (full_prompt, memory, reflect) = crate::deck::knowledge::prepare(
+        &settings,
+        &h.name,
+        prompt,
+        profile.as_deref(),
+        r.memory,
+        r.reflect,
+    );
+    let prompt = full_prompt.as_str();
     let start = StartOpts {
         agent,
-        profile: r.profile.clone().filter(|p| !p.is_empty()),
+        profile,
+        memory,
+        reflect,
         ..StartOpts::default()
     };
     let id = if node == LOCAL {
@@ -810,6 +836,10 @@ async fn proc_pivot(
         // The same model, mode and environment as the agent it continues.
         agent: p.opts().clone(),
         profile: p.profile().map(String::from),
+        // A continuation already has the memory it was given; it reflects
+        // at the end if the original would have.
+        memory: vec![],
+        reflect: view.reflect,
     };
     let harness = p.harness_name().to_string();
     let new = if p.node_name() == LOCAL {
@@ -1767,6 +1797,44 @@ pub fn router(app: Arc<App>) -> Router {
         .route(
             "/vendor/LICENSE-xterm",
             get(|| async { asset("text/plain; charset=utf-8", XTERM_LICENSE) }),
+        )
+        .route("/api/knowledge", get(crate::deck::knowledge::vaults))
+        .route(
+            "/api/knowledge/init",
+            post(crate::deck::knowledge::vault_init),
+        )
+        .route(
+            "/api/knowledge/notes",
+            get(crate::deck::knowledge::notes).post(crate::deck::knowledge::note_create),
+        )
+        .route(
+            "/api/knowledge/note",
+            get(crate::deck::knowledge::note_get)
+                .put(crate::deck::knowledge::note_put)
+                .delete(crate::deck::knowledge::note_delete),
+        )
+        .route(
+            "/api/knowledge/link",
+            post(crate::deck::knowledge::note_link),
+        )
+        .route(
+            "/api/knowledge/recall",
+            get(crate::deck::knowledge::recall_preview),
+        )
+        .route("/api/knowledge/health", get(crate::deck::knowledge::health))
+        .route(
+            "/api/learnings",
+            get(crate::deck::knowledge::learnings_list)
+                .post(crate::deck::knowledge::learning_create),
+        )
+        .route(
+            "/api/learnings/{id}",
+            axum::routing::patch(crate::deck::knowledge::learning_update)
+                .delete(crate::deck::knowledge::learning_delete),
+        )
+        .route(
+            "/api/learnings/{id}/accept",
+            post(crate::deck::knowledge::learning_accept),
         )
         .route("/api/term", get(term_ws))
         .route("/api/term/check", get(term_check))
@@ -3543,6 +3611,286 @@ while True:
         assert!(seen.contains("ended"), "got: {}", seen);
         let log = std::fs::read_to_string(dir.join("data/logs/terminal.log")).unwrap();
         assert!(log.contains("\"what\":\"shell in "));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The fixture, with a memory vault (`vault/` under its root) on its harness.
+    fn fixture_with_memory(name: &str, read_only: bool) -> (Arc<App>, PathBuf) {
+        let (base, dir) = fixture(name, read_only);
+        let mut settings = (*base.settings()).clone();
+        settings.harnesses[0].memory = vec!["vault".into()];
+        (App::new(settings, TOKEN.into(), true), dir)
+    }
+
+    #[tokio::test]
+    async fn knowledge_is_managed_from_the_console() {
+        let (app, dir) = fixture_with_memory("knowledge", false);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let get = |uri: String| {
+            let app = app.clone();
+            async move {
+                let (s, _, b) = call(&app, "GET", &uri, &[AUTH], None).await;
+                (s, serde_json::from_str::<Value>(&b).unwrap_or(Value::Null))
+            }
+        };
+        let send = |method: &'static str, uri: &'static str, body: Value| {
+            let app = app.clone();
+            async move {
+                let (s, _, b) = call(&app, method, uri, &[AUTH, origin], Some(body)).await;
+                (s, serde_json::from_str::<Value>(&b).unwrap_or(Value::Null))
+            }
+        };
+        let (_, k) = get("/api/knowledge".into()).await;
+        assert_eq!(k["vaults"][0]["exists"], false);
+        assert_eq!(
+            send("POST", "/api/knowledge/init", json!({})).await.0,
+            StatusCode::OK
+        );
+        let (s, a) = send(
+            "POST",
+            "/api/knowledge/notes",
+            json!({ "title": "Session fixation", "body": "Login kept the old session id.", "type": "finding", "tags": ["auth"] }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", a);
+        let a = a["id"].as_str().unwrap().to_string();
+        let (_, b) = send(
+            "POST",
+            "/api/knowledge/notes",
+            json!({ "title": "Rotate the session", "body": "Rotate after login.", "links": ["Session fixation"] }),
+        )
+        .await;
+        let b = b["id"].as_str().unwrap().to_string();
+        send(
+            "POST",
+            "/api/knowledge/notes",
+            json!({ "title": "Lonely", "body": "x" }),
+        )
+        .await;
+        // A duplicate title is refused rather than overwritten.
+        assert_eq!(
+            send("POST", "/api/knowledge/notes", json!({ "title": "Lonely" }))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, found) = get("/api/knowledge/notes?q=fixation".into()).await;
+        assert_eq!(found["notes"][0]["id"], a.as_str());
+        assert_eq!(found["total"], 3);
+        // Edit with optimistic concurrency.
+        let (_, n) = get(format!("/api/knowledge/note?id={}", a)).await;
+        let text = n["text"]
+            .as_str()
+            .unwrap()
+            .replace("old session id", "old session id (fixed)");
+        let stale = json!({ "id": a, "text": text, "hash": "0000" });
+        assert_eq!(
+            send("PUT", "/api/knowledge/note", stale).await.0,
+            StatusCode::CONFLICT
+        );
+        let ok = json!({ "id": a, "text": text, "hash": n["hash"] });
+        assert_eq!(
+            send("PUT", "/api/knowledge/note", ok).await.0,
+            StatusCode::OK
+        );
+        let (_, n) = get(format!("/api/knowledge/note?id={}", a)).await;
+        assert!(n["body"].as_str().unwrap().contains("(fixed)"));
+        assert_eq!(n["relations"][0]["dir"], "in");
+        // Links: once, then a no-op.
+        let link = json!({ "from": b, "to": "Session fixation", "rel": "mitigates" });
+        assert_eq!(
+            send("POST", "/api/knowledge/link", link.clone()).await.1["changed"],
+            true
+        );
+        assert_eq!(
+            send("POST", "/api/knowledge/link", link).await.1["changed"],
+            false
+        );
+        let (_, h) = get("/api/knowledge/health".into()).await;
+        assert_eq!(h["orphans"][0]["title"], "Lonely");
+        // What an agent would be given for a prompt.
+        let (_, r) = get("/api/knowledge/recall?q=fix%20the%20session%20fixation".into()).await;
+        assert_eq!(r["notes"][0]["id"], a.as_str());
+        assert!(r["text"].as_str().unwrap().contains("Relevant memory"));
+        let (s, _, _) = call(
+            &app,
+            "DELETE",
+            "/api/knowledge/note?id=lonely",
+            &[AUTH, origin],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        // Learnings: proposed, edited, accepted into memory once.
+        let (_, l) = send(
+            "POST",
+            "/api/learnings",
+            json!({ "title": "Tests need Postgres", "body": "Run make db.", "tags": ["#Tests"] }),
+        )
+        .await;
+        let lid = l["id"].as_u64().unwrap();
+        let (_, ov) = get("/api/overview".into()).await;
+        assert_eq!(ov["learnings"], 1);
+        let (s, _, _) = call(
+            &app,
+            "PATCH",
+            &format!("/api/learnings/{}", lid),
+            &[AUTH, origin],
+            Some(json!({ "body": "Run make db first." })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let accept = format!("/api/learnings/{}/accept", lid);
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &accept,
+            &[AUTH, origin],
+            Some(json!({ "links": ["Rotate the session"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let (s, _, _) = call(&app, "POST", &accept, &[AUTH, origin], Some(json!({}))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (_, n) = get("/api/knowledge/note?id=tests-need-postgres".into()).await;
+        assert_eq!(n["type"], "learning");
+        assert_eq!(n["tags"][0], "tests");
+        assert!(n["body"].as_str().unwrap().contains("Run make db first."));
+        assert_eq!(n["source"], "indra console");
+        let (_, ls) = get("/api/learnings".into()).await;
+        assert_eq!(ls[0]["status"], "accepted");
+        // Read-only: nothing changes.
+        let (ro, dir2) = fixture_with_memory("knowledge-ro", true);
+        let (s, _, _) = call(
+            &ro,
+            "POST",
+            "/api/knowledge/init",
+            &[AUTH, origin],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, _, _) = call(
+            &ro,
+            "POST",
+            "/api/learnings",
+            &[AUTH, origin],
+            Some(json!({ "title": "x" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[cfg(unix)]
+    const REFLECTOR: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+log = open(os.environ["FAKE_REFLECT_LOG"], "a")
+def out(o):
+    print(json.dumps(o), flush=True)
+def recv():
+    l = sys.stdin.readline()
+    if not l:
+        sys.exit(0)
+    log.write("IN " + l); log.flush()
+    return json.loads(l)
+m = recv()
+out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {}}})
+while True:
+    m = recv()
+    if m["type"] != "user":
+        continue
+    c = m["message"]["content"]
+    if "Before you finish" in c:
+        ans = '[{"title": "Use make db", "body": "The tests need Postgres.", "tags": ["tests"]}]'
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": ans}], "usage": {"input_tokens": 10, "cache_read_input_tokens": 3000, "output_tokens": 40}}})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": ans, "modelUsage": {"m": {"contextWindow": 123456}}})
+    else:
+        out({"type": "system", "subtype": "init", "model": "m", "session_id": "s-9"})
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}], "usage": {"input_tokens": 1000, "cache_read_input_tokens": 2000, "output_tokens": 50}}, "session_id": "s-9"})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": "done", "session_id": "s-9"})
+"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agents_start_with_memory_and_propose_learnings() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, dir) = fixture_with_memory("reflect", false);
+        let vault = dir.join("vault");
+        crate::mem::vault::init(&vault).unwrap();
+        crate::mem::cli::add_note(
+            &vault,
+            &crate::mem::cli::NewNote {
+                title: "Session handling lives in auth".into(),
+                body: "Sessions are created in src/auth/session.rs.".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let script = dir.join("reflector.py");
+        let log = dir.join("reflect.log");
+        std::fs::write(&script, REFLECTOR).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("FAKE_REFLECT_LOG", &log);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "reflector".into(),
+            command: script.display().to_string(),
+            args: vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
+            format: "claude-stream-json".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: Some(script.clone()),
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "reflector", "prompt": "fix the session handling", "target": 0, "memory": true, "reflect": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let mut v = json!(null);
+        for _ in 0..400 {
+            v = json!(app.procs.get(id).unwrap().view());
+            if v["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(v["status"], "exited", "{}", v);
+        assert_eq!(v["reflection"], "received");
+        assert_eq!(v["memory"][0]["title"], "Session handling lives in auth");
+        assert_eq!(v["context_tokens"], 3050);
+        assert_eq!(v["context_window"], 123456);
+        let sent = std::fs::read_to_string(&log).unwrap();
+        // The prompt comes first, then the memory; the last turn asks for learnings.
+        let p = sent.find("fix the session handling").unwrap();
+        let m = sent.find("Relevant memory").unwrap();
+        assert!(
+            p < m && sent.contains("src/auth/session.rs") && sent.contains("Before you finish")
+        );
+        crate::deck::knowledge::harvest(&app);
+        crate::deck::knowledge::harvest(&app); // once only
+        let l = app.learnings.list();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].title, "Use make db");
+        assert_eq!(l[0].origin.proc, Some(id));
+        assert_eq!(l[0].origin.session.as_deref(), Some("s-9"));
+        assert_eq!(l[0].origin.by, "agent");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

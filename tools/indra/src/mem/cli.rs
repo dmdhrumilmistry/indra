@@ -445,11 +445,11 @@ fn render_new(
 // ---- output shapes -------------------------------------------------------
 
 #[derive(Serialize)]
-struct NoteRef {
-    id: String,
-    title: String,
+pub struct NoteRef {
+    pub id: String,
+    pub title: String,
     #[serde(rename = "type")]
-    kind: Option<String>,
+    pub kind: Option<String>,
 }
 
 fn note_ref(v: &Vault, i: usize) -> NoteRef {
@@ -462,10 +462,10 @@ fn note_ref(v: &Vault, i: usize) -> NoteRef {
 }
 
 #[derive(Serialize)]
-struct Rel {
-    rel: String,
-    dir: &'static str,
-    note: NoteRef,
+pub struct Rel {
+    pub rel: String,
+    pub dir: &'static str,
+    pub note: NoteRef,
 }
 
 fn rels_of(v: &Vault, g: &Graph, i: usize) -> Vec<Rel> {
@@ -528,6 +528,366 @@ fn links_summary(v: &Vault, g: &Graph, i: usize, max: usize) -> String {
     s
 }
 
+/// A note to write: what `indra mem add` takes.
+#[derive(Default)]
+pub struct NewNote {
+    pub title: String,
+    pub body: String,
+    pub kind: Option<String>,
+    pub tags: Vec<String>,
+    pub aliases: Vec<String>,
+    /// Untyped links (`related`).
+    pub links: Vec<String>,
+    /// Typed relations (REL, NOTE).
+    pub rels: Vec<(String, String)>,
+    pub source: Option<String>,
+    pub folder: Option<String>,
+    /// Merge into an existing note with this title instead of failing.
+    pub upsert: bool,
+}
+
+#[derive(Serialize)]
+pub struct Written {
+    pub id: String,
+    pub path: String,
+    pub created: bool,
+    /// Link targets that are not notes (yet).
+    pub unresolved: Vec<String>,
+}
+
+/// Create a note (or with `upsert`, merge into the one with that title).
+pub fn add_note(root: &std::path::Path, n: &NewNote) -> Result<Written> {
+    let NewNote {
+        title,
+        body,
+        kind,
+        tags,
+        aliases,
+        links,
+        rels,
+        source,
+        folder,
+        upsert,
+    } = n;
+    let upsert = *upsert;
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title must not be empty".into());
+    }
+    let tags = clean_tags(tags);
+    let mut wanted: Vec<(String, String)> = links
+        .iter()
+        .map(|l| (DEFAULT_REL.to_string(), l.trim().to_string()))
+        .collect();
+    for (rel, target) in rels {
+        wanted.push((parse_rel(rel)?, target.trim().to_string()));
+    }
+    if wanted.iter().any(|(_, t)| t.is_empty()) {
+        return Err("link target must not be empty".into());
+    }
+
+    let _lock = Lock::acquire(root)?;
+    let v = Vault::open(root)?;
+    let mut lines = Vec::new();
+    let mut unresolved = Vec::new();
+    for (rel, target) in &wanted {
+        if v.resolve(target).is_none() {
+            unresolved.push(target.clone());
+        }
+        let l = rel_line(&v, rel, target);
+        if !lines.contains(&l) {
+            lines.push(l);
+        }
+    }
+
+    let existing = v.resolve(&title);
+    let (id, path, created) = match existing {
+        Some(i) if upsert => {
+            let n = &v.notes[i];
+            let (mut doc, crlf) = vault::read_for_edit(&n.path)?;
+            // Idempotent: the same text upserted twice is stored once.
+            if !body.trim().is_empty() && !doc.contains(body.trim()) {
+                doc = append_text(&doc, body);
+            }
+            let have: HashSet<(String, Option<usize>)> = n
+                .links
+                .iter()
+                .map(|l| (l.rel.clone(), v.resolve(&l.target)))
+                .collect();
+            let new_lines: Vec<String> = wanted
+                .iter()
+                .filter(|(rel, t)| {
+                    v.resolve(t)
+                        .map(|j| !have.contains(&(rel.clone(), Some(j))))
+                        .unwrap_or(true)
+                })
+                .map(|(rel, t)| rel_line(&v, rel, t))
+                .filter(|l| !doc.contains(l.as_str()))
+                .collect();
+            doc = add_relation_lines(&doc, &new_lines);
+            if !tags.is_empty() {
+                let fm = frontmatter::split(&doc)
+                    .0
+                    .map(frontmatter::parse)
+                    .unwrap_or_default();
+                let mut all = fm.get_list("tags");
+                all.extend(tags.iter().cloned());
+                doc = frontmatter::set_field(
+                    &doc,
+                    "tags",
+                    &frontmatter::render_list(&clean_tags(&all)),
+                );
+            }
+            if let Some(k) = &kind {
+                if n.kind.is_none() {
+                    doc = frontmatter::set_field(&doc, "type", &frontmatter::quote(k));
+                }
+            }
+            doc = touch(&doc);
+            vault::finish_edit(&n.path, &doc, crlf)?;
+            (n.id.clone(), n.path.clone(), false)
+        }
+        Some(i) => {
+            return Err(format!(
+            "a note named '{}' already exists ({}). Use --upsert to merge, or `indra mem append`",
+            title, v.notes[i].id
+        ))
+        }
+        None => {
+            let id = v.fresh_id(&title, folder.as_deref());
+            let path = v.path_for_id(&id);
+            let doc = render_new(
+                &title,
+                kind.as_deref(),
+                &tags,
+                aliases,
+                source.as_deref(),
+                body,
+                &lines,
+            );
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            // create_new: never clobber a file that appeared meanwhile.
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
+            std::io::Write::write_all(&mut f, doc.as_bytes()).map_err(|e| e.to_string())?;
+            (id, path, true)
+        }
+    };
+    Ok(Written {
+        id,
+        path: path.display().to_string(),
+        created,
+        unresolved,
+    })
+}
+
+/// How much `recall` returns.
+pub struct RecallOpts {
+    pub limit: usize,
+    pub depth: usize,
+    pub max_chars: usize,
+    pub kind: Option<String>,
+    pub tag: Option<String>,
+}
+
+impl Default for RecallOpts {
+    fn default() -> Self {
+        RecallOpts {
+            limit: 8,
+            depth: 1,
+            max_chars: 6000,
+            kind: None,
+            tag: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct Recalled {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub tags: Vec<String>,
+    pub score: f64,
+    /// How the graph reached it from a search hit (None: a hit itself).
+    pub via: Option<String>,
+    pub text: String,
+    pub relations: Vec<Rel>,
+    #[serde(skip)]
+    pub links: String,
+}
+
+#[derive(Serialize)]
+pub struct Recall {
+    pub query: String,
+    pub vault: String,
+    pub results: Vec<Recalled>,
+}
+
+/// Graph-aware recall: rank by search, then spread through the graph, within
+/// a character budget. What `indra mem recall` prints and agents are given.
+pub fn recall(root: &std::path::Path, q: &str, o: &RecallOpts) -> Result<Recall> {
+    let limit = o.limit.max(1);
+    let v = Vault::open(root)?;
+    let g = Graph::build(&v);
+    let idx = search::Index::build(&v.notes);
+    let hits = idx.search(&v.notes, q, |n| note_matches(n, &o.kind, &o.tag));
+    let top = hits.first().map(|h| h.1).unwrap_or(1.0).max(1e-9);
+    let seeds: Vec<(usize, f64)> = hits
+        .iter()
+        .take(limit * 2)
+        .map(|&(i, s)| (i, s / top))
+        .collect();
+    let act = g.activate(&seeds, o.depth, 0.5);
+    let mut ranked: Vec<(usize, f64, Option<Step>)> =
+        act.into_iter().map(|(i, (s, st))| (i, s, st)).collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.truncate(limit);
+    let per = (o.max_chars / limit).max(240);
+    let mut budget = o.max_chars;
+    let results = ranked
+        .iter()
+        .map(|(i, s, st)| {
+            let n = &v.notes[*i];
+            let text = if budget > 0 {
+                body_excerpt(n, per.min(budget))
+            } else {
+                String::new()
+            };
+            budget = budget.saturating_sub(text.chars().count());
+            Recalled {
+                id: n.id.clone(),
+                title: n.title.clone(),
+                kind: n.kind.clone(),
+                tags: n.tags.clone(),
+                score: (s * 1000.0).round() / 1000.0,
+                via: st.as_ref().map(|s| describe_step(&v, s)),
+                text,
+                relations: rels_of(&v, &g, *i),
+                links: links_summary(&v, &g, *i, 8),
+            }
+        })
+        .collect();
+    Ok(Recall {
+        query: q.to_string(),
+        vault: v.root.display().to_string(),
+        results,
+    })
+}
+
+/// A recall as Markdown, for a person or an agent's prompt.
+pub fn render_recall(r: &Recall) -> String {
+    use std::fmt::Write;
+    let mut o = String::new();
+    if r.results.is_empty() {
+        let _ = writeln!(
+            o,
+            "# Memory recall: {}\n\nNothing relevant in {}.",
+            r.query, r.vault
+        );
+        return o;
+    }
+    let _ = writeln!(o, "# Memory recall: {}\n", r.query);
+    for n in &r.results {
+        let _ = writeln!(o, "{}", recalled_block(n));
+    }
+    o
+}
+
+/// One recalled note as Markdown (heading, metadata, text, links).
+pub fn recalled_block(n: &Recalled) -> String {
+    let mut head = format!("## {}\n_id: {}", n.title, n.id);
+    if let Some(k) = &n.kind {
+        head.push_str(&format!(" | type: {}", k));
+    }
+    if !n.tags.is_empty() {
+        head.push_str(&format!(" | tags: {}", n.tags.join(", ")));
+    }
+    head.push_str(&format!(" | score: {:.2}", n.score));
+    match &n.via {
+        Some(v) => head.push_str(&format!(" | via: {}", v)),
+        None => head.push_str(" | via: search"),
+    }
+    head.push('_');
+    let mut o = format!("{}\n", head);
+    if !n.text.is_empty() {
+        o.push_str(&format!("\n{}\n", n.text));
+    }
+    if !n.links.is_empty() {
+        o.push_str(&format!("\nlinks: {}\n", n.links));
+    }
+    o
+}
+
+/// Add a typed relation FROM -> TO. False when it was already there.
+pub fn link_notes(root: &std::path::Path, from: &str, to: &str, rel: &str) -> Result<bool> {
+    let rel = parse_rel(rel)?;
+    let _lock = Lock::acquire(root)?;
+    let v = Vault::open(root)?;
+    let i = v.require(from)?;
+    let n = &v.notes[i];
+    let target = v.resolve(to);
+    if target == Some(i) {
+        return Err("a note cannot link to itself".into());
+    }
+    let exists = n.links.iter().any(|l| {
+        l.rel == rel
+            && match target {
+                Some(j) => v.resolve(&l.target) == Some(j),
+                None => same_unresolved(&l.target, to),
+            }
+    });
+    if exists {
+        return Ok(false);
+    }
+    let (doc, crlf) = vault::read_for_edit(&n.path)?;
+    let doc = add_relation_lines(&doc, &[rel_line(&v, &rel, to)]);
+    vault::finish_edit(&n.path, &touch(&doc), crlf)?;
+    Ok(true)
+}
+
+/// Delete a note; returns its id and the notes whose links to it now dangle.
+pub fn remove_note(root: &std::path::Path, note: &str) -> Result<(String, Vec<String>)> {
+    let _lock = Lock::acquire(root)?;
+    let v = Vault::open(root)?;
+    let g = Graph::build(&v);
+    let i = v.require(note)?;
+    let n = &v.notes[i];
+    std::fs::remove_file(&n.path)
+        .map_err(|e| format!("cannot delete {}: {}", n.path.display(), e))?;
+    let back = g.inc[i]
+        .iter()
+        .map(|(j, _)| v.notes[*j].id.clone())
+        .collect();
+    Ok((n.id.clone(), back))
+}
+
+/// Notes as the console lists them.
+pub fn note_summary(v: &Vault, g: &Graph, i: usize) -> serde_json::Value {
+    let n = &v.notes[i];
+    serde_json::json!({
+        "id": n.id, "title": n.title, "type": n.kind, "tags": n.tags, "updated": n.updated,
+        "created": n.created, "source": n.source, "links": g.degree(i),
+    })
+}
+
+/// One note in full, for the console.
+pub fn note_detail(v: &Vault, g: &Graph, i: usize) -> serde_json::Value {
+    let n = &v.notes[i];
+    serde_json::json!({
+        "id": n.id, "title": n.title, "type": n.kind, "tags": n.tags, "aliases": n.aliases,
+        "source": n.source, "created": n.created, "updated": n.updated,
+        "path": n.path.display().to_string(), "body": n.body, "relations": rels_of(v, g, i),
+        "unresolved": g.dangling.iter().filter(|d| d.from == i).map(|d| &d.target).collect::<Vec<_>>(),
+    })
+}
+
 // ---- commands -----------------------------------------------------------
 
 pub fn run(cli: MemArgs) -> Result<ExitCode> {
@@ -568,115 +928,46 @@ pub fn run(cli: MemArgs) -> Result<ExitCode> {
             folder,
             upsert,
         } => {
-            let title = title.trim().to_string();
-            if title.is_empty() {
-                return Err("title must not be empty".into());
-            }
             let body = match body {
                 Some(b) => read_text(&[b])?,
                 None => String::new(),
             };
-            let tags = clean_tags(&tags);
-            let mut wanted: Vec<(String, String)> = links
-                .iter()
-                .map(|l| (DEFAULT_REL.to_string(), l.clone()))
-                .collect();
+            let mut relations = Vec::new();
             for r in &rels {
                 let (rel, target) = r
                     .split_once('=')
                     .ok_or_else(|| format!("--rel expects REL=NOTE, got '{}'", r))?;
-                wanted.push((parse_rel(rel)?, target.trim().to_string()));
+                relations.push((rel.to_string(), target.trim().to_string()));
             }
-            if wanted.iter().any(|(_, t)| t.is_empty()) {
-                return Err("link target must not be empty".into());
-            }
-
-            let _lock = Lock::acquire(&root)?;
-            let v = Vault::open(&root)?;
-            let mut lines = Vec::new();
-            let mut unresolved = Vec::new();
-            for (rel, target) in &wanted {
-                if v.resolve(target).is_none() {
-                    unresolved.push(target.clone());
-                }
-                let l = rel_line(&v, rel, target);
-                if !lines.contains(&l) {
-                    lines.push(l);
-                }
-            }
-
-            let existing = v.resolve(&title);
-            let (id, path, created) = match existing {
-                Some(i) if upsert => {
-                    let n = &v.notes[i];
-                    let (mut doc, crlf) = vault::read_for_edit(&n.path)?;
-                    // Idempotent: the same text upserted twice is stored once.
-                    if !body.trim().is_empty() && !doc.contains(body.trim()) {
-                        doc = append_text(&doc, &body);
-                    }
-                    let have: HashSet<(String, Option<usize>)> =
-                        n.links.iter().map(|l| (l.rel.clone(), v.resolve(&l.target))).collect();
-                    let new_lines: Vec<String> = wanted
-                        .iter()
-                        .filter(|(rel, t)| v.resolve(t).map(|j| !have.contains(&(rel.clone(), Some(j)))).unwrap_or(true))
-                        .map(|(rel, t)| rel_line(&v, rel, t))
-                        .filter(|l| !doc.contains(l.as_str()))
-                        .collect();
-                    doc = add_relation_lines(&doc, &new_lines);
-                    if !tags.is_empty() {
-                        let fm = frontmatter::split(&doc).0.map(frontmatter::parse).unwrap_or_default();
-                        let mut all = fm.get_list("tags");
-                        all.extend(tags.iter().cloned());
-                        doc = frontmatter::set_field(&doc, "tags", &frontmatter::render_list(&clean_tags(&all)));
-                    }
-                    if let Some(k) = &kind {
-                        if n.kind.is_none() {
-                            doc = frontmatter::set_field(&doc, "type", &frontmatter::quote(k));
-                        }
-                    }
-                    doc = touch(&doc);
-                    vault::finish_edit(&n.path, &doc, crlf)?;
-                    (n.id.clone(), n.path.clone(), false)
-                }
-                Some(i) => {
-                    return Err(format!(
-                        "a note named '{}' already exists ({}). Use --upsert to merge, or `indra mem append`",
-                        title, v.notes[i].id
-                    ))
-                }
-                None => {
-                    let id = v.fresh_id(&title, folder.as_deref());
-                    let path = v.path_for_id(&id);
-                    let doc = render_new(&title, kind.as_deref(), &tags, &aliases, source.as_deref(), &body, &lines);
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                    }
-                    // create_new: never clobber a file that appeared meanwhile.
-                    let mut f = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                        .map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
-                    std::io::Write::write_all(&mut f, doc.as_bytes()).map_err(|e| e.to_string())?;
-                    (id, path, true)
-                }
-            };
-            for t in &unresolved {
+            let out = add_note(
+                &root,
+                &NewNote {
+                    title,
+                    body,
+                    kind,
+                    tags,
+                    aliases,
+                    links,
+                    rels: relations,
+                    source,
+                    folder,
+                    upsert,
+                },
+            )?;
+            for t in &out.unresolved {
                 eprintln!(
                     "indra: note: '{}' does not exist yet; kept as an unresolved link",
                     t
                 );
             }
             if json {
-                print_json(&serde_json::json!({
-                    "id": id, "path": path.display().to_string(), "created": created, "unresolved": unresolved
-                }))?;
+                print_json(&out)?;
             } else {
                 println!(
                     "{} {} ({})",
-                    if created { "created" } else { "updated" },
-                    id,
-                    path.display()
+                    if out.created { "created" } else { "updated" },
+                    out.id,
+                    out.path
                 );
             }
         }
@@ -693,48 +984,27 @@ pub fn run(cli: MemArgs) -> Result<ExitCode> {
             report_write(json, "updated", &n.id)?;
         }
         Cmd::Link { from, to, rel } => {
-            let rel = parse_rel(&rel)?;
-            let _lock = Lock::acquire(&root)?;
+            let changed = link_notes(&root, &from, &to, &rel)?;
             let v = Vault::open(&root)?;
-            let i = v.require(&from)?;
-            let n = &v.notes[i];
-            let target = v.resolve(&to);
-            if target == Some(i) {
-                return Err("a note cannot link to itself".into());
-            }
-            let exists = n.links.iter().any(|l| {
-                l.rel == rel
-                    && match target {
-                        Some(j) => v.resolve(&l.target) == Some(j),
-                        None => same_unresolved(&l.target, &to),
-                    }
-            });
-            if exists {
-                if json {
-                    print_json(&serde_json::json!({ "id": n.id, "changed": false }))?;
-                } else {
-                    println!(
-                        "already linked: {} -[{}]-> {}",
-                        n.id,
-                        rel,
-                        link_target(&v, &to)
-                    );
-                }
-                return Ok(ExitCode::SUCCESS);
-            }
-            if target.is_none() {
+            let id = v.notes[v.require(&from)?].id.clone();
+            let rel = parse_rel(&rel)?;
+            if changed && v.resolve(&to).is_none() {
                 eprintln!(
                     "indra: note: '{}' does not exist yet; kept as an unresolved link",
                     to.trim()
                 );
             }
-            let (doc, crlf) = vault::read_for_edit(&n.path)?;
-            let doc = add_relation_lines(&doc, &[rel_line(&v, &rel, &to)]);
-            vault::finish_edit(&n.path, &touch(&doc), crlf)?;
             if json {
-                print_json(&serde_json::json!({ "id": n.id, "changed": true }))?;
+                print_json(&serde_json::json!({ "id": id, "changed": changed }))?;
+            } else if changed {
+                println!("linked {} -[{}]-> {}", id, rel, link_target(&v, &to));
             } else {
-                println!("linked {} -[{}]-> {}", n.id, rel, link_target(&v, &to));
+                println!(
+                    "already linked: {} -[{}]-> {}",
+                    id,
+                    rel,
+                    link_target(&v, &to)
+                );
             }
         }
         Cmd::Unlink { from, to, rel } => {
@@ -932,81 +1202,21 @@ pub fn run(cli: MemArgs) -> Result<ExitCode> {
             kind,
             tag,
         } => {
-            let q = query.join(" ");
-            let v = Vault::open(&root)?;
-            let g = Graph::build(&v);
-            let idx = search::Index::build(&v.notes);
-            let hits = idx.search(&v.notes, &q, |n| note_matches(n, &kind, &tag));
-            let top = hits.first().map(|h| h.1).unwrap_or(1.0).max(1e-9);
-            let seeds: Vec<(usize, f64)> = hits
-                .iter()
-                .take(limit.max(1) * 2)
-                .map(|&(i, s)| (i, s / top))
-                .collect();
-            let act = g.activate(&seeds, depth, 0.5);
-            let mut ranked: Vec<(usize, f64, Option<Step>)> =
-                act.into_iter().map(|(i, (s, st))| (i, s, st)).collect();
-            ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-            ranked.truncate(limit);
-            let per = (max_chars / limit.max(1)).max(240);
-            let mut budget = max_chars;
+            let r = recall(
+                &root,
+                &query.join(" "),
+                &RecallOpts {
+                    limit,
+                    depth,
+                    max_chars,
+                    kind,
+                    tag,
+                },
+            )?;
             if json {
-                let out: Vec<_> = ranked
-                    .iter()
-                    .map(|(i, s, st)| {
-                        let n = &v.notes[*i];
-                        let text = body_excerpt(n, per.min(budget));
-                        budget = budget.saturating_sub(text.chars().count());
-                        serde_json::json!({
-                            "id": n.id, "title": n.title, "type": n.kind, "tags": n.tags,
-                            "score": (s * 1000.0).round() / 1000.0,
-                            "via": st.as_ref().map(|s| describe_step(&v, s)),
-                            "text": text, "relations": rels_of(&v, &g, *i),
-                        })
-                    })
-                    .collect();
-                print_json(
-                    &serde_json::json!({ "query": q, "vault": v.root.display().to_string(), "results": out }),
-                )?;
-            } else if ranked.is_empty() {
-                println!(
-                    "# Memory recall: {}\n\nNothing relevant in {}.",
-                    q,
-                    v.root.display()
-                );
+                print_json(&r)?;
             } else {
-                println!("# Memory recall: {}\n", q);
-                for (i, s, st) in &ranked {
-                    let n = &v.notes[*i];
-                    let mut head = format!("## {}\n_id: {}", n.title, n.id);
-                    if let Some(k) = &n.kind {
-                        head.push_str(&format!(" | type: {}", k));
-                    }
-                    if !n.tags.is_empty() {
-                        head.push_str(&format!(" | tags: {}", n.tags.join(", ")));
-                    }
-                    head.push_str(&format!(" | score: {:.2}", s));
-                    match st {
-                        Some(step) => {
-                            head.push_str(&format!(" | via: {}", describe_step(&v, step)))
-                        }
-                        None => head.push_str(" | via: search"),
-                    }
-                    head.push('_');
-                    println!("{}", head);
-                    if budget > 0 {
-                        let text = body_excerpt(n, per.min(budget));
-                        budget = budget.saturating_sub(text.chars().count());
-                        if !text.is_empty() {
-                            println!("\n{}", text);
-                        }
-                    }
-                    let links = links_summary(&v, &g, *i, 8);
-                    if !links.is_empty() {
-                        println!("\nlinks: {}", links);
-                    }
-                    println!();
-                }
+                print!("{}", render_recall(&r));
             }
         }
         Cmd::Neighbors { note, depth, rel } => {
@@ -1375,21 +1585,11 @@ pub fn run(cli: MemArgs) -> Result<ExitCode> {
             }
         }
         Cmd::Rm { note } => {
-            let _lock = Lock::acquire(&root)?;
-            let v = Vault::open(&root)?;
-            let g = Graph::build(&v);
-            let i = v.require(&note)?;
-            let n = &v.notes[i];
-            std::fs::remove_file(&n.path)
-                .map_err(|e| format!("cannot delete {}: {}", n.path.display(), e))?;
-            let back: Vec<&str> = g.inc[i]
-                .iter()
-                .map(|(j, _)| v.notes[*j].id.as_str())
-                .collect();
+            let (id, back) = remove_note(&root, &note)?;
             if json {
-                print_json(&serde_json::json!({ "removed": n.id, "now_unresolved_in": back }))?;
+                print_json(&serde_json::json!({ "removed": id, "now_unresolved_in": back }))?;
             } else {
-                println!("removed {}", n.id);
+                println!("removed {}", id);
                 if !back.is_empty() {
                     println!("links to it are now unresolved in: {}", back.join(", "));
                 }

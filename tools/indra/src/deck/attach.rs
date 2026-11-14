@@ -338,6 +338,20 @@ fn print_head(p: &Paint, v: &Value) {
             model.unwrap_or("-")
         );
     }
+    let mut ctx = Vec::new();
+    if let Some(t) = v["context_tokens"].as_u64() {
+        let w = v["context_window"].as_u64().unwrap_or(200_000);
+        ctx.push(format!("context {}k of {}k tokens", t / 1000, w / 1000));
+    }
+    if let Some(m) = v["memory"].as_array().filter(|m| !m.is_empty()) {
+        ctx.push(format!("{} memory note(s) given", m.len()));
+    }
+    if v["reflect"].as_bool() == Some(true) {
+        ctx.push("proposes learnings at the end".into());
+    }
+    if !ctx.is_empty() {
+        println!("  {}", ctx.join(", "));
+    }
 }
 
 fn print_pending(p: &Paint, v: &Value) {
@@ -375,6 +389,7 @@ const HELP: &str = "\
   /pivot [--fresh] [--keep] <text>
                   new direction: continue the session (or start fresh), stop
                   the agent unless --keep, then follow the new process
+  /learn <text>   put a learning about this agent's work in the inbox
   /status         where it is and what it waits for
   /agents         list running agents      /switch <id>  follow another
   /stop           stop the agent           /quit         leave (Ctrl-D)";
@@ -554,6 +569,22 @@ pub async fn attach(c: Console, id: Option<u64>) -> Result<(), String> {
                 "stop" => {
                     c.call("POST", &format!("{}/stop", base), None).await?;
                     Ok(Step::Say("stopping".into()))
+                }
+                "learn" if !arg.is_empty() => {
+                    let title: String = arg
+                        .split(['.', '\n'])
+                        .next()
+                        .unwrap_or(arg)
+                        .chars()
+                        .take(100)
+                        .collect();
+                    c.call(
+                        "POST",
+                        "/api/learnings",
+                        Some(json!({ "title": title.trim(), "body": arg, "proc": id })),
+                    )
+                    .await?;
+                    Ok(Step::Say("added to the learnings inbox (Knowledge > Learnings in the console)".into()))
                 }
                 "status" | "st" => {
                     let v = c.call("GET", &base, None).await?;

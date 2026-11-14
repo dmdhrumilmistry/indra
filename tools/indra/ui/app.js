@@ -395,33 +395,228 @@
     });
   }
 
-  function pageMemory(m, idx) {
-    m.appendChild(header("Memory", "Memory vaults this harness reads and writes: past findings, learnings and their relations."));
-    api("/api/memory" + hq()).then(function (list) {
-      if (!list.length) { m.appendChild(empty("This harness has no memory vaults configured.")); return; }
-      var cur = idx === undefined ? (list.find(function (v) { return v.exists && v.notes; }) || list[0]).index : Number(idx);
-      m.appendChild(h("div", { class: "grid" }, list.map(function (v) {
-        return h("div", { class: "card click" + (v.index === cur ? " sel" : ""), tabindex: "0", role: "button",
-          onclick: function () { location.hash = "#/memory/" + v.index; } },
-          h("div", { class: "cmd", text: v.path }),
-          h("div", { class: "stats" }, h("div", { class: "stat" }, h("b", { text: String(v.notes) }), h("span", { text: "notes" })),
-            h("div", { class: "stat" }, h("b", { text: String(v.links) }), h("span", { text: "links" }))),
-          v.exists ? null : h("p", { class: "muted", text: "Not created yet: the first review run with memory enabled creates it." }));
+  // ---- knowledge ------------------------------------------------------------------
+  // Memory vaults managed in place, the learnings inbox, the graph, and health.
+  var KTABS = [["notes", "Notes"], ["learnings", "Learnings"], ["graph", "Graph"], ["health", "Health"]];
+  function csv(s) { return String(s || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
+  function pageKnowledge(m, arg) {
+    var parts = String(arg || "").split("/");
+    var tab = KTABS.some(function (t) { return t[0] === parts[0]; }) ? parts[0] : "notes";
+    var want = parts.length > 1 && parts[1] !== "" ? Number(parts[1]) : null;
+    var noteId = parts.length > 2 ? parts.slice(2).join("/") : null;
+    var ro = S.ov.read_only;
+    m.appendChild(header("Knowledge", "What agents know: the memory vaults they read and write, and the learnings they propose for you to review."));
+    var top = h("div"), tabsBox = h("div"), body = h("div", { class: "stack" });
+    m.appendChild(top); m.appendChild(tabsBox); m.appendChild(body);
+    function go(t, i, id) { location.hash = "#/knowledge/" + t + "/" + i + (id ? "/" + encodeURIComponent(id) : ""); }
+    api("/api/knowledge" + hq()).then(function (k) {
+      var vaults = k.vaults;
+      var cur = want !== null && vaults.some(function (v) { return v.index === want; }) ? want
+        : ((vaults.find(function (v) { return v.exists && v.notes; }) || vaults.find(function (v) { return v.exists; }) || vaults[0] || { index: 0 }).index);
+      var v = vaults.find(function (x) { return x.index === cur; });
+      if (vaults.length) {
+        top.appendChild(h("div", { class: "grid" }, vaults.map(function (x) {
+          return h("div", { class: "card click" + (x.index === cur ? " sel" : ""), tabindex: "0", role: "button",
+            onclick: function () { go(tab === "learnings" ? "notes" : tab, x.index); } },
+            h("div", { class: "cmd", text: x.path }),
+            x.exists ? h("div", { class: "stats" },
+              h("div", { class: "stat" }, h("b", { text: String(x.notes) }), h("span", { text: "notes" })),
+              h("div", { class: "stat" }, h("b", { text: String(x.links) }), h("span", { text: "links" })),
+              h("div", { class: "stat" }, h("b", { text: String(x.dangling) }), h("span", { text: "dangling" })))
+              : h("div", null, h("p", { class: "muted", text: "Not created yet." }), ro ? null : h("button", { type: "button", onclick: function (e) {
+                e.stopPropagation();
+                api("/api/knowledge/init", { method: "POST", body: { h: S.h, i: x.index } }).then(function () { toast("Vault created"); go("notes", x.index); route(); })
+                  .catch(function (err) { toast(err.message, true); });
+              } }, "Create it")));
+        })));
+      } else {
+        top.appendChild(h("div", { class: "note", text: "This harness names no memory vaults. Add memory = [\"~/notes\"] (or \"{target}/.memory\") to it in Settings > Harnesses. Learnings can still be collected below." }));
+      }
+      tabsBox.appendChild(h("nav", { class: "tabs", "aria-label": "Knowledge sections" }, KTABS.map(function (t) {
+        return h("a", { href: "#/knowledge/" + t[0] + "/" + cur, class: t[0] === tab ? "on" : "", "aria-current": t[0] === tab ? "page" : null },
+          t[1], t[0] === "learnings" && k.learnings ? h("b", { class: "badge warn", text: " " + k.learnings }) : null);
       })));
-      var v = list.find(function (x) { return x.index === cur; });
-      if (!v || !v.exists) return;
-      m.appendChild(h("h2", { text: "Graph" }));
-      api("/api/memory/graph" + hq({ i: cur })).then(function (g) {
-        var gv = graphView(m, g, function (n, panel) {
+      if (tab === "learnings") return learnings(vaults, cur);
+      if (!v || !v.exists) { body.appendChild(empty(vaults.length ? "Create this vault first." : "No vault to show.")); return; }
+      if (tab === "graph") return graph(cur);
+      if (tab === "health") return health(cur);
+      notes(cur, noteId);
+    }).catch(function (e) { body.appendChild(empty(e.message)); });
+
+    function notes(i, id) {
+      var search = h("input", { type: "search", placeholder: "Search notes", "aria-label": "Search notes", value: store("indra.kq") || "" });
+      var kind = h("select", { "aria-label": "Type" }, h("option", { value: "", text: "Any type" }));
+      var list = h("div", { class: "klist" }), detail = h("div");
+      var bar = h("div", { class: "row" }, search, kind, ro ? null : h("button", { type: "button", class: "primary", onclick: function () { newNote(); } }, "New note"));
+      body.appendChild(bar);
+      body.appendChild(h("div", { class: "kgrid" }, list, detail));
+      var titles = h("datalist", { id: "note-titles" }); body.appendChild(titles);
+      var t = null;
+      search.addEventListener("input", function () { clearTimeout(t); t = setTimeout(load, 200); });
+      kind.addEventListener("change", load);
+      function load() {
+        store("indra.kq", search.value);
+        api("/api/knowledge/notes" + hq({ i: i, q: search.value || null, type: kind.value || null })).then(function (r) {
+          if (kind.options.length === 1) r.types.forEach(function (x) { kind.appendChild(h("option", { value: x, text: x })); });
+          list.textContent = ""; titles.textContent = "";
+          r.notes.forEach(function (n) { titles.appendChild(h("option", { value: n.title })); });
+          if (!r.notes.length) { list.appendChild(empty(search.value ? "Nothing matches." : "No notes yet.")); return; }
+          r.notes.forEach(function (n) {
+            list.appendChild(h("a", { class: "kitem" + (n.id === id ? " sel" : ""), href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(n.id) },
+              h("div", { class: "row" }, h("b", { text: n.title }), n.type ? h("span", { class: "pill", text: n.type }) : null),
+              n.snippet ? h("div", { class: "muted small", text: n.snippet }) : null,
+              h("div", { class: "muted small", text: [n.tags.map(function (x) { return "#" + x; }).join(" "), n.links + " links", n.updated || ""].filter(Boolean).join(" | ") })));
+          });
+        }).catch(function (e) { list.textContent = ""; list.appendChild(empty(e.message)); });
+      }
+      load();
+      if (id) show(id); else detail.appendChild(empty("Pick a note to read or edit it."));
+      function show(nid) {
+        api("/api/knowledge/note" + hq({ i: i, id: nid })).then(function (d) {
+          detail.textContent = "";
+          var ta = h("textarea", { class: "notetext", "aria-label": "Note text", spellcheck: "false" }); ta.value = d.text;
+          var hash = d.hash;
+          var rels = d.relations.filter(function (r) { return r.dir === "out"; }), back = d.relations.filter(function (r) { return r.dir === "in"; });
+          function relList(title, xs) {
+            return [h("h3", { text: title }), xs.length ? h("ul", { class: "links" }, xs.map(function (r) {
+              return h("li", null, h("span", { class: "rel", text: r.rel }), h("a", { href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(r.note.id), text: r.note.title }));
+            })) : h("p", { class: "muted", text: "none" })];
+          }
+          var to = h("input", { type: "text", list: "note-titles", placeholder: "another note", "aria-label": "Link to" });
+          var rel = h("input", { type: "text", value: "related", "aria-label": "Relation", size: "12" });
+          detail.appendChild(h("div", { class: "card" },
+            h("div", { class: "row" }, h("h2", { text: d.title }), d.type ? h("span", { class: "pill", text: d.type }) : null),
+            h("p", { class: "muted small", text: [d.tags.map(function (x) { return "#" + x; }).join(" "), d.source ? "source: " + d.source : "", d.updated ? "updated " + d.updated : ""].filter(Boolean).join(" | ") }),
+            h("div", { class: "split2" }, h("div", null, relList("Links out", rels)), h("div", null, relList("Backlinks", back))),
+            d.unresolved.length ? h("p", { class: "muted small", text: "Unresolved: " + d.unresolved.join(", ") }) : null,
+            ro ? null : h("form", { class: "row", onsubmit: function (e) {
+              e.preventDefault();
+              if (!to.value.trim()) return;
+              api("/api/knowledge/link", { method: "POST", body: { h: S.h, i: i, from: d.id, to: to.value.trim(), rel: rel.value.trim() || "related" } })
+                .then(function (r) { toast(r.changed ? "Linked" : "Already linked"); show(d.id); load(); }).catch(function (err) { toast(err.message, true); });
+            } }, h("span", { class: "muted", text: "Link to" }), to, h("span", { class: "muted", text: "as" }), rel, h("button", { type: "submit" }, "Link")),
+            h("h3", { text: "Text" }), ta,
+            h("p", { class: "muted small", text: d.path }),
+            ro ? null : h("div", { class: "row" },
+              h("button", { type: "button", class: "primary", onclick: function () {
+                api("/api/knowledge/note", { method: "PUT", body: { h: S.h, i: i, id: d.id, text: ta.value, hash: hash } })
+                  .then(function (r) { hash = r.hash; toast("Saved"); show(d.id); load(); }).catch(function (err) { toast(err.message, true); });
+              } }, "Save"),
+              h("button", { type: "button", class: "danger", onclick: function () {
+                if (!window.confirm("Delete the note \"" + d.title + "\"? Links to it become unresolved.")) return;
+                api("/api/knowledge/note" + hq({ i: i, id: d.id }), { method: "DELETE" }).then(function () { toast("Deleted"); go("notes", i); })
+                  .catch(function (err) { toast(err.message, true); });
+              } }, "Delete"))));
+        }).catch(function (e) { detail.textContent = ""; detail.appendChild(empty(e.message)); });
+      }
+      function newNote() {
+        var f = { title: h("input", { type: "text", required: true }), type: h("input", { type: "text", list: "note-types", placeholder: "learning, pattern, finding, decision..." }),
+          tags: h("input", { type: "text", placeholder: "comma separated" }), links: h("input", { type: "text", placeholder: "titles of notes it relates to, comma separated" }),
+          body: h("textarea", { placeholder: "What should an agent know?" }) };
+        detail.textContent = "";
+        detail.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+          e.preventDefault();
+          api("/api/knowledge/notes", { method: "POST", body: { h: S.h, i: i, title: f.title.value, type: f.type.value, tags: csv(f.tags.value), links: csv(f.links.value), body: f.body.value } })
+            .then(function (r) { toast("Created " + r.id); go("notes", i, r.id); }).catch(function (err) { toast(err.message, true); });
+        } }, h("h3", { text: "New note" }), h("label", null, "Title", f.title), h("label", null, "Type", f.type),
+          h("datalist", { id: "note-types" }, ["learning", "pattern", "finding", "technique", "tool", "decision"].map(function (x) { return h("option", { value: x }); })),
+          h("label", null, "Tags", f.tags), h("label", null, "Links", f.links), h("label", null, "Text", f.body),
+          h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Create"), h("button", { type: "button", onclick: function () { go("notes", i, noteId); route(); } }, "Cancel"))));
+        f.title.focus();
+      }
+    }
+
+    function learnings(vaults, cur) {
+      var holder = h("div", { class: "stack" });
+      body.appendChild(h("p", { class: "muted", text: "Agents launched with \"Ask for learnings\" (or a profile with reflect = true) propose what they learned before they finish. Nothing reaches memory until you accept it: it then becomes a learning note, with where it came from, and later agents are given it when it is relevant." }));
+      body.appendChild(holder);
+      var existing = vaults.filter(function (v) { return true; });
+      function vaultSelect() {
+        var s = h("select", { "aria-label": "Vault" }, existing.map(function (v) { return h("option", { value: String(v.index), text: v.path + (v.exists ? "" : " (created on accept)") }); }));
+        s.value = String(cur);
+        return s;
+      }
+      function load() {
+        api("/api/learnings").then(function (list) {
+          holder.textContent = "";
+          var open = list.filter(function (l) { return l.status === "proposed"; }), done = list.filter(function (l) { return l.status !== "proposed"; });
+          if (!ro) holder.appendChild(addForm());
+          if (!open.length) holder.appendChild(empty("Nothing waiting for review."));
+          open.forEach(function (l) { holder.appendChild(card(l)); });
+          if (done.length) holder.appendChild(h("details", { class: "card" }, h("summary", { text: "Accepted (" + done.length + ")" }),
+            h("ul", { class: "links" }, done.map(function (l) {
+              var vi = vaults.findIndex(function (v) { return l.note && v.path === l.note[0]; });
+              return h("li", null, h("span", { class: "rel", text: ago(l.created) }),
+                vi >= 0 ? h("a", { href: "#/knowledge/notes/" + vaults[vi].index + "/" + encodeURIComponent(l.note[1]), text: l.title }) : h("span", { text: l.title }));
+            }))));
+        }).catch(function (e) { holder.textContent = ""; holder.appendChild(empty(e.message)); });
+      }
+      function origin(o) {
+        var bits = [o.by === "agent" ? "proposed by the agent" : "added by a person"];
+        if (o.runner) bits.push(o.runner + (o.profile ? " (" + o.profile + ")" : ""));
+        if (o.target) bits.push("in " + o.target);
+        return h("p", { class: "muted small" }, o.proc ? h("a", { href: "#/proc/" + o.proc, text: "process #" + o.proc }) : null, (o.proc ? ", " : "") + bits.join(", "));
+      }
+      function card(l) {
+        var title = h("input", { type: "text", value: l.title, "aria-label": "Title" });
+        var text = h("textarea", { "aria-label": "Learning" }); text.value = l.body;
+        var tags = h("input", { type: "text", value: l.tags.join(", "), "aria-label": "Tags", placeholder: "tags, comma separated" });
+        var links = h("input", { type: "text", list: "note-titles", placeholder: "link to notes (titles, comma separated)", "aria-label": "Links" });
+        var vs = vaultSelect();
+        function patch() { return api("/api/learnings/" + l.id, { method: "PATCH", body: { title: title.value, body: text.value, tags: csv(tags.value) } }); }
+        return h("div", { class: "card form learning" }, origin(l.origin),
+          h("label", null, "Title", title), h("label", null, "What it learned", text), h("label", null, "Tags", tags),
+          ro ? null : h("div", { class: "row" }, h("label", null, "Into", vs), h("label", null, "Links", links)),
+          ro ? null : h("div", { class: "row" },
+            h("button", { type: "button", class: "primary", onclick: function () {
+              patch().then(function () { return api("/api/learnings/" + l.id + "/accept", { method: "POST", body: { h: S.h, i: Number(vs.value), links: csv(links.value) } }); })
+                .then(function (r) { toast((r.note.created ? "Saved as " : "Merged into ") + r.note.id); load(); refreshOverview(); })
+                .catch(function (err) { toast(err.message, true); });
+            } }, "Accept into memory"),
+            h("button", { type: "button", onclick: function () { patch().then(function () { toast("Saved"); }).catch(function (err) { toast(err.message, true); }); } }, "Save edits"),
+            h("button", { type: "button", class: "danger", onclick: function () {
+              api("/api/learnings/" + l.id, { method: "DELETE" }).then(function () { load(); refreshOverview(); }).catch(function (err) { toast(err.message, true); });
+            } }, "Discard")));
+      }
+      function addForm() {
+        var t = h("input", { type: "text", placeholder: "Add a learning yourself: a short title", "aria-label": "New learning title" });
+        var b = h("textarea", { placeholder: "What should future agents know?", "aria-label": "New learning", rows: "2" });
+        return h("details", { class: "card" }, h("summary", { text: "Add a learning" }), h("form", { class: "form", onsubmit: function (e) {
+          e.preventDefault();
+          api("/api/learnings", { method: "POST", body: { title: t.value, body: b.value } }).then(function () { load(); refreshOverview(); }).catch(function (err) { toast(err.message, true); });
+        } }, t, b, h("div", null, h("button", { type: "submit" }, "Add to the inbox"))));
+      }
+      body.appendChild(h("datalist", { id: "note-titles" }));
+      load();
+    }
+
+    function graph(i) {
+      api("/api/memory/graph" + hq({ i: i })).then(function (g) {
+        var gv = graphView(body, g, function (n, panel) {
           panel.appendChild(h("h3", { text: n.type }));
           panel.appendChild(h("h2", { text: n.title }));
           if (n.raw.tags && n.raw.tags.length) panel.appendChild(h("div", { class: "chips" }, n.raw.tags.map(function (t) { return h("span", { class: "pill", text: "#" + t }); })));
+          panel.appendChild(h("a", { href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(n.id), text: "Open and edit" }));
           if (n.raw.body) panel.appendChild(h("pre", { text: n.raw.body.trim() }));
           panel.appendChild(h("div", null, linkList("Links out", n.out.map(function (l) { return { rel: l.rel, title: l.n.title, id: l.n.id }; }), function (l) { gv.select(l.id); })));
           panel.appendChild(h("div", null, linkList("Backlinks", n.inc.map(function (l) { return { rel: l.rel, title: l.n.title, id: l.n.id }; }), function (l) { gv.select(l.id); })));
         });
-      });
-    });
+      }).catch(function (e) { body.appendChild(empty(e.message)); });
+    }
+
+    function health(i) {
+      api("/api/knowledge/health" + hq({ i: i })).then(function (r) {
+        var link = function (id, title) { return h("a", { href: "#/knowledge/notes/" + i + "/" + encodeURIComponent(id), text: title }); };
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "Dangling links (" + r.dangling.length + ")" }),
+          h("p", { class: "muted small", text: "Links to notes that do not exist. Create the note, or fix the link." }),
+          r.dangling.length ? h("ul", { class: "links" }, r.dangling.map(function (d) {
+            return h("li", null, link(d.from, d.title), h("span", { class: "rel", text: " -" + d.rel + "-> " }), h("span", { text: d.target }));
+          })) : h("p", { class: "muted", text: "none" })));
+        body.appendChild(h("div", { class: "card" }, h("h3", { text: "Orphans (" + r.orphans.length + ")" }),
+          h("p", { class: "muted small", text: "Notes nothing links to and that link nowhere: recall reaches them only by search. Link them to related notes." }),
+          r.orphans.length ? h("ul", { class: "links" }, r.orphans.map(function (o) { return h("li", null, link(o.id, o.title)); })) : h("p", { class: "muted", text: "none" })));
+      }).catch(function (e) { body.appendChild(empty(e.message)); });
+    }
   }
 
   function segs(stages) { return h("div", { class: "segs", title: stages.map(function (s) { return s.name + ": " + s.state; }).join(", ") }, stages.map(function (s) { return h("i", { class: s.state }); })); }
@@ -536,9 +731,12 @@
         MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var effort = h("select", { "aria-label": "Effort" }, h("option", { value: "", text: "default" }),
         ["low", "medium", "high", "xhigh", "max"].map(function (x) { return h("option", { value: x, text: x }); }));
+      var memory = h("input", { type: "checkbox" }), reflect = h("input", { type: "checkbox" });
+      var memNote = h("div", { class: "muted small" });
       function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
       function fillProfile() {
         var p = prof() || {};
+        memory.checked = !!p.memory; reflect.checked = !!p.reflect;
         if (p.runner && Array.prototype.some.call(runner.options, function (o) { return o.value === p.runner; })) runner.value = p.runner;
         model.placeholder = p.model || "default"; mode.options[0].text = p.permission_mode ? "profile: " + p.permission_mode : "default";
         effort.options[0].text = p.effort ? "profile: " + p.effort : "default";
@@ -592,7 +790,7 @@
         if (model.value.trim()) o.model = model.value.trim();
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
-        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o } })
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
           .then(function (r) { location.hash = "#/proc/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
@@ -601,6 +799,16 @@
         h("div", { class: "row" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", null, "Target", target)),
         h("div", { class: "row" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
         modelList(),
+        h("div", { class: "card knowctl" },
+          h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
+          h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: function () {
+            var p = prompt.value.trim(); if (!p) { memNote.textContent = "Write the prompt first."; return; }
+            memNote.textContent = "Recalling...";
+            api("/api/knowledge/recall" + hq({ q: p })).then(function (r) {
+              memNote.textContent = r.notes.length ? "It would get: " + r.notes.map(function (n) { return n.title; }).join("; ") : "Nothing relevant in memory for this prompt.";
+            }).catch(function (e) { memNote.textContent = e.message; });
+          } }, "Preview what it would get"), memNote),
+          h("label", { class: "check" }, reflect, h("span", null, h("b", { text: "Ask for learnings at the end" }), h("small", { text: " - before it finishes, a Claude Code agent proposes what it learned; review them under Knowledge > Learnings" })))),
         note,
         h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On a remote node the job travels as JSON over SSH." }), preview),
         h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. A remote node runs only runners from its own configuration." }),
@@ -927,6 +1135,37 @@
       keepRow, pv.note, h("div", { class: "row" }, pv.go));
     // Waiting tool requests, and live control of an interactive agent.
     var approvals = h("div", { class: "card approvals", hidden: true, role: "region", "aria-label": "Tool requests waiting for you" });
+    var ctxCard = h("div", { class: "card context" });
+    var lf = { title: h("input", { type: "text", placeholder: "A short title", "aria-label": "Learning title" }),
+      body: h("textarea", { rows: "3", placeholder: "What should a future agent know?", "aria-label": "Learning" }) };
+    var learnForm = h("form", { class: "form", hidden: true, onsubmit: function (e) {
+      e.preventDefault();
+      api("/api/learnings", { method: "POST", body: { title: lf.title.value, body: lf.body.value, proc: Number(id) } })
+        .then(function () { toast("Added to Knowledge > Learnings"); lf.title.value = ""; lf.body.value = ""; learnForm.hidden = true; refreshOverview(); })
+        .catch(function (err) { toast(err.message, true); });
+    } }, lf.title, lf.body, h("div", null, h("button", { type: "submit" }, "Add to the inbox")));
+    function renderContext(p) {
+      ctxCard.textContent = "";
+      ctxCard.appendChild(h("h3", { text: "Context" }));
+      if (p.context_tokens) {
+        var win = p.context_window || 200000, pct = Math.min(100, Math.round(100 * p.context_tokens / win));
+        var fill = h("div", { class: "fill" + (pct >= 80 ? " hot" : "") }); fill.style.width = pct + "%";
+        ctxCard.appendChild(h("div", { class: "bar", title: p.context_tokens + " tokens in context at the last turn" }, h("span", { text: "window" }), h("div", { class: "track" }, fill),
+          h("b", { text: Math.round(p.context_tokens / 1000) + "k / " + Math.round(win / 1000) + "k" })));
+      } else {
+        ctxCard.appendChild(h("p", { class: "muted small", text: p.interactive || p.runner === "claude" ? "Context size appears after its first turn." : "This runner does not report its context size." }));
+      }
+      ctxCard.appendChild(h("p", { class: "small" }, h("b", { text: "Memory: " }), p.memory.length ? null : h("span", { class: "muted", text: "none given" })));
+      if (p.memory.length) ctxCard.appendChild(h("ul", { class: "links" }, p.memory.map(function (n) {
+        return h("li", null, h("a", { href: "#/knowledge/notes/" + n.vault + "/" + encodeURIComponent(n.id), text: n.title }));
+      })));
+      var rf = !p.reflect ? null : p.reflection === "asked" ? "Asked for learnings; waiting for its answer." : p.reflection === "received" ? "Its learnings are in Knowledge > Learnings." : "Will be asked for learnings before it finishes.";
+      if (rf) ctxCard.appendChild(h("p", { class: "small" }, h("b", { text: "Learnings: " }), rf));
+      if (!S.ov.read_only) {
+        ctxCard.appendChild(h("button", { type: "button", class: "ghost", onclick: function () { learnForm.hidden = !learnForm.hidden; if (!learnForm.hidden) lf.title.focus(); } }, "Save a learning from this agent"));
+        ctxCard.appendChild(learnForm);
+      }
+    }
     var cv = {
       mode: h("select", { "aria-label": "Permission mode" }, MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); })),
       model: h("input", { type: "text", list: "models", "aria-label": "Model", placeholder: "opus, sonnet, a full model id..." }),
@@ -986,7 +1225,7 @@
     m.appendChild(approvals);
     m.appendChild(h("div", { class: "split" },
       h("div", null, h("div", { class: "row" }, h("h2", { text: "Live feed" }), h("label", { class: "row muted" }, follow, "Follow")), feed),
-      h("div", null, controlCard, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
+      h("div", null, controlCard, ctxCard, h("div", { class: "card" }, h("h3", { text: "Subagents" }), agentsBox, h("h3", { text: "Tool calls" }), toolsBox),
         S.ov.read_only ? null : pivotCard)));
     function updatePivot(p, children) {
       var hasSession = !!p.session && p.can_resume;
@@ -1034,6 +1273,7 @@
       Promise.all([api("/api/procs/" + id), api("/api/procs")]).then(function (r) {
         renderInfo(r[0]);
         renderControl(r[0]);
+        renderContext(r[0]);
         updatePivot(r[0], r[1].filter(function (x) { return x.parent === Number(id); }).reverse());
       }).catch(function (e) { top.textContent = ""; top.appendChild(empty(e.message)); });
     }
@@ -1489,8 +1729,10 @@
       { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
-      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." }]; },
-      summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : ""); } },
+      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },
+      { k: "memory", label: "Start with the memory notes most relevant to the prompt", type: "bool" },
+      { k: "reflect", label: "Before finishing, propose learnings for review (Claude Code)", type: "bool" }]; },
+      summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : "") + (p.memory ? ", memory" : "") + (p.reflect ? ", reflects" : ""); } },
     runner: { tab: "runners", noun: "runner", fields: function () { return [
       { k: "name", label: "Name", req: true, help: "How you pick it on Launch and in workflows. A built-in name (claude, codex, gemini) replaces the built-in." },
       { k: "command", label: "Program", req: true, help: "A program on PATH or a full path. It runs directly, never through a shell." },
@@ -1837,6 +2079,8 @@
       var b = $("running-badge"); b.hidden = !ov.running; b.textContent = String(ov.running);
       var a = $("approvals-badge"); a.hidden = !ov.approvals; a.textContent = String(ov.approvals || 0);
       a.title = ov.approvals ? ov.approvals + " tool request(s) waiting for you" : "";
+      var l = $("learnings-badge"); l.hidden = !ov.learnings; l.textContent = String(ov.learnings || 0);
+      l.title = ov.learnings ? ov.learnings + " learning(s) waiting for review" : "";
     });
   }
 
@@ -1845,7 +2089,7 @@
     S.cleanup = [];
     var parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
     var page = parts[0], arg = parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined;
-    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows" }[page] || page;
+    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows", memory: "knowledge" }[page] || page;
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -1866,7 +2110,8 @@
         prompts: function () { pageDefs(m, "prompt"); },
         def: function () { pageDef(m, arg); },
         graph: function () { pageGraph(m, arg); },
-        memory: function () { pageMemory(m, arg); },
+        memory: function () { pageKnowledge(m, "graph/" + (arg || "")); },
+        knowledge: function () { pageKnowledge(m, arg); },
         runs: function () { pageRuns(m); },
         run: function () { pageRun(m, arg); },
         nodes: function () { pageNodes(m); },

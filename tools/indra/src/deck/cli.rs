@@ -319,6 +319,7 @@ async fn serve(
     tokio::spawn(async move {
         loop {
             crate::deck::board::tick(&ticker).await;
+            crate::deck::knowledge::harvest(&ticker);
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     });
