@@ -71,15 +71,18 @@ permission_mode = "acceptEdits"
 allowed_tools   = ["Read", "Grep", "Glob", "Edit", "Bash(git diff:*)"]
 
 [[profile]]
-name   = "local"                       # Claude Code against a local Ollama model
-runner = "claude"
-model  = "qwen3-coder"
-env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+name     = "local"                     # Claude Code against a local Ollama model
+runner   = "claude"
+model    = "qwen3-coder"
+provider = "ollama"
 ```
 
 Launch, presets, workflow tasks and board items name a profile; the model and mode can still be
 overridden per launch and changed live. Ollama serves the Anthropic Messages API (v0.14 and
-later), so Claude Code runs unchanged on a local model.
+later), so Claude Code runs unchanged on a local model. `subagent_provider = "ollama"` keeps
+the main agent on Anthropic and sends its subagents to Ollama through a model router on
+loopback that routes each request by its model and keeps credentials off Ollama (see
+`docs/guides/local-models.md`).
 
 ## Secrets (built)
 

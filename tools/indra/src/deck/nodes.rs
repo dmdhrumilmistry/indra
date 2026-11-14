@@ -620,12 +620,42 @@ pub struct AgentOpts {
     /// Environment for the agent (e.g. ANTHROPIC_BASE_URL for a local model).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// "ollama": the whole agent on a model served by Ollama (Claude Code or
+    /// Codex). Empty or "anthropic": as the runner is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// "ollama": Claude Code's subagents on Ollama (the model named by
+    /// CLAUDE_CODE_SUBAGENT_MODEL) while the main agent stays where it is,
+    /// through the model router in the process that starts the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_provider: Option<String>,
+    /// The Ollama server (default http://localhost:11434).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_url: Option<String>,
 }
+
+/// Where Ollama listens unless a profile says otherwise.
+pub const OLLAMA_URL: &str = "http://localhost:11434";
+/// The providers a profile can name.
+pub const PROVIDERS: [&str; 2] = ["anthropic", "ollama"];
 
 impl AgentOpts {
     /// Values end up as arguments and environment of a program, so each is
     /// checked: no option smuggling (a leading `-`), no control characters.
     pub fn validate(&self) -> Result<(), String> {
+        for (what, p) in [
+            ("provider", &self.provider),
+            ("subagent provider", &self.subagent_provider),
+        ] {
+            if let Some(p) = p {
+                if !PROVIDERS.contains(&p.as_str()) {
+                    return Err(format!("{} must be one of {}", what, PROVIDERS.join(", ")));
+                }
+            }
+        }
+        if let Some(u) = &self.ollama_url {
+            crate::deck::router::check_url(u)?;
+        }
         let word = |what: &str, v: &str, max: usize| -> Result<(), String> {
             if v.is_empty()
                 || v.len() > max
@@ -699,7 +729,25 @@ impl AgentOpts {
         }
         o.env
             .extend(other.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if other.provider.is_some() {
+            o.provider = other.provider.clone();
+        }
+        if other.subagent_provider.is_some() {
+            o.subagent_provider = other.subagent_provider.clone();
+        }
+        if other.ollama_url.is_some() {
+            o.ollama_url = other.ollama_url.clone();
+        }
         o
+    }
+
+    fn ollama(&self) -> String {
+        self.ollama_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or(OLLAMA_URL)
+            .trim_end_matches('/')
+            .to_string()
     }
 }
 
@@ -797,12 +845,117 @@ pub fn agent_command(
             ));
         }
     }
+    let env = provider_env(r, claude, o, &mut args)?;
     Ok(AgentCommand {
         program,
         args,
-        env: o.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        env: env.into_iter().collect(),
         control,
     })
+}
+
+fn is(p: &Option<String>, name: &str) -> bool {
+    p.as_deref() == Some(name)
+}
+
+/// The environment (and for Codex, the flag) that puts an agent, or its
+/// subagents, on Ollama. Variables the profile sets itself win.
+fn provider_env(
+    r: &Runner,
+    claude: bool,
+    o: &AgentOpts,
+    args: &mut Vec<String>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut env = o.env.clone();
+    let ollama = o.ollama();
+    if is(&o.provider, "ollama") {
+        let Some(model) = o.model.clone() else {
+            return Err(
+                "pick the Ollama model to run (the profile's model, e.g. qwen3-coder)".into(),
+            );
+        };
+        if claude {
+            // Through the router, which keeps every credential off Ollama:
+            // Claude Code sends whatever login it has to its base URL.
+            let upstream = env
+                .get("ANTHROPIC_BASE_URL")
+                .filter(|u| !u.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| ollama.clone());
+            let base = crate::deck::router::register(crate::deck::router::Route {
+                ollama: upstream,
+                local: vec![model.clone()],
+                all_local: true,
+                ..Default::default()
+            })?;
+            env.insert("ANTHROPIC_BASE_URL".into(), base);
+            let mut set = |k: &str, v: &str| {
+                env.entry(k.to_string()).or_insert_with(|| v.to_string());
+            };
+            set("ANTHROPIC_AUTH_TOKEN", "ollama");
+            set("ANTHROPIC_API_KEY", "");
+            set("CLAUDE_CODE_OAUTH_TOKEN", "");
+            // Agent files say `model: opus` or `haiku`, and Claude Code makes
+            // background calls with its small model: all of them local too.
+            for k in [
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_SMALL_FAST_MODEL",
+                "CLAUDE_CODE_SUBAGENT_MODEL",
+            ] {
+                set(k, &model);
+            }
+        } else if runner_is(r, "codex") {
+            args.push("--oss".into());
+            env.entry("CODEX_OSS_BASE_URL".into())
+                .or_insert_with(|| format!("{}/v1", ollama));
+        } else {
+            return Err(format!(
+                "runner '{}' has no built-in Ollama support (Claude Code and Codex do); set its own options in the profile's environment instead",
+                r.name
+            ));
+        }
+    }
+    if is(&o.subagent_provider, "ollama") && !is(&o.provider, "ollama") {
+        if !claude {
+            return Err(format!(
+                "runner '{}' is not Claude Code, so it has no subagents to hand to Ollama",
+                r.name
+            ));
+        }
+        let Some(sub) = env
+            .get("CLAUDE_CODE_SUBAGENT_MODEL")
+            .filter(|m| !m.trim().is_empty())
+            .cloned()
+        else {
+            return Err("set the subagent model: the Ollama model the subagents run on".into());
+        };
+        // Whatever the main agent used before (a gateway, say) stays its upstream.
+        let anthropic = env
+            .get("ANTHROPIC_BASE_URL")
+            .filter(|u| !u.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "https://api.anthropic.com".into());
+        let base = crate::deck::router::register(crate::deck::router::Route {
+            ollama,
+            local: vec![sub],
+            anthropic,
+            all_local: false,
+        })?;
+        env.insert("ANTHROPIC_BASE_URL".into(), base);
+    }
+    Ok(env)
+}
+
+/// Whether a runner runs `name` (by its name or its program).
+fn runner_is(r: &Runner, name: &str) -> bool {
+    r.name == name
+        || r.program
+            .as_deref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy() == name)
+            .unwrap_or(false)
 }
 
 /// A user turn for Claude Code's stream-json input.
@@ -856,6 +1009,122 @@ pub fn runner_argv_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runner(name: &str, format: &str, args: &[&str], model_args: &[&str]) -> Runner {
+        Runner {
+            name: name.into(),
+            command: name.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            format: format.into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: model_args.iter().map(|s| s.to_string()).collect(),
+            program: Some(PathBuf::from(format!("/usr/bin/{}", name))),
+        }
+    }
+
+    fn env_of(ac: &AgentCommand) -> BTreeMap<String, String> {
+        ac.env.iter().cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn ollama_providers() {
+        let t = std::path::Path::new("/t");
+        let claude = runner("claude", "claude-stream-json", &["-p", "{prompt}"], &[]);
+        let codex = runner("codex", "text", &["exec", "{prompt}"], &["-m", "{model}"]);
+        let gemini = runner("gemini", "text", &["-p", "{prompt}"], &["-m", "{model}"]);
+
+        // The whole agent on Ollama: every model alias maps to the local one,
+        // and what the profile sets itself wins.
+        let mut o = AgentOpts {
+            model: Some("qwen3-coder".into()),
+            provider: Some("ollama".into()),
+            ollama_url: Some("http://gpu-box:11434/".into()),
+            ..Default::default()
+        };
+        o.env
+            .insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "llama3.2".into());
+        let ac = agent_command(&claude, "go", t, None, &o).unwrap();
+        let e = env_of(&ac);
+        // Through the router (credentials never reach Ollama), to that server.
+        assert!(e["ANTHROPIC_BASE_URL"].starts_with("http://127.0.0.1:"));
+        assert!(crate::deck::router::stats()
+            .iter()
+            .any(|s| s["ollama"] == "http://gpu-box:11434" && s["all_local"] == true));
+        assert_eq!(e["CLAUDE_CODE_OAUTH_TOKEN"], "");
+        assert_eq!(e["ANTHROPIC_AUTH_TOKEN"], "ollama");
+        assert_eq!(e["ANTHROPIC_API_KEY"], "");
+        assert_eq!(e["ANTHROPIC_DEFAULT_OPUS_MODEL"], "qwen3-coder");
+        assert_eq!(e["CLAUDE_CODE_SUBAGENT_MODEL"], "qwen3-coder");
+        assert_eq!(e["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "llama3.2");
+        assert!(ac.args.windows(2).any(|w| w == ["--model", "qwen3-coder"]));
+
+        // Codex: --oss, the model, and Ollama's OpenAI-compatible endpoint.
+        let o = AgentOpts {
+            model: Some("gpt-oss:20b".into()),
+            provider: Some("ollama".into()),
+            ..Default::default()
+        };
+        let ac = agent_command(&codex, "go", t, None, &o).unwrap();
+        assert!(ac.args.contains(&"--oss".to_string()));
+        assert!(ac.args.windows(2).any(|w| w == ["-m", "gpt-oss:20b"]));
+        assert_eq!(
+            env_of(&ac)["CODEX_OSS_BASE_URL"],
+            "http://localhost:11434/v1"
+        );
+
+        // A runner without built-in support says so; a provider needs a model.
+        assert!(agent_command(&gemini, "go", t, None, &o)
+            .unwrap_err()
+            .contains("no built-in Ollama"));
+        let no_model = AgentOpts {
+            provider: Some("ollama".into()),
+            ..Default::default()
+        };
+        assert!(agent_command(&claude, "go", t, None, &no_model).is_err());
+        let bad = AgentOpts {
+            provider: Some("openai".into()),
+            ..Default::default()
+        };
+        assert!(agent_command(&claude, "go", t, None, &bad)
+            .unwrap_err()
+            .contains("provider"));
+        let bad_url = AgentOpts {
+            provider: Some("ollama".into()),
+            model: Some("m".into()),
+            ollama_url: Some("file:///x".into()),
+            ..Default::default()
+        };
+        assert!(agent_command(&claude, "go", t, None, &bad_url).is_err());
+
+        // Subagents on Ollama, the main agent where it was: through the router.
+        let mut o = AgentOpts {
+            model: Some("opus".into()),
+            subagent_provider: Some("ollama".into()),
+            ..Default::default()
+        };
+        assert!(agent_command(&claude, "go", t, None, &o)
+            .unwrap_err()
+            .contains("subagent model"));
+        o.env
+            .insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), "qwen3-coder".into());
+        let ac = agent_command(&claude, "go", t, None, &o).unwrap();
+        let e = env_of(&ac);
+        assert!(
+            e["ANTHROPIC_BASE_URL"].starts_with("http://127.0.0.1:"),
+            "{:?}",
+            e
+        );
+        assert!(!e.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(ac.args.windows(2).any(|w| w == ["--model", "opus"]));
+        assert!(crate::deck::router::stats()
+            .iter()
+            .any(|s| s["local_models"][0] == "qwen3-coder"
+                && s["anthropic"] == "https://api.anthropic.com"));
+        assert!(agent_command(&codex, "go", t, None, &o)
+            .unwrap_err()
+            .contains("no subagents"));
+    }
 
     #[test]
     fn resume_arguments() {

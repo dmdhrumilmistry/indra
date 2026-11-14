@@ -1040,6 +1040,10 @@
         MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var effort = h("select", { "aria-label": "Effort" }, h("option", { value: "", text: "default" }),
         ["low", "medium", "high", "xhigh", "max"].map(function (x) { return h("option", { value: x, text: x }); }));
+      var where = h("select", { "aria-label": "Runs on" }, [["", "as configured"], ["anthropic", "Anthropic (the runner's own setup)"], ["ollama", "Ollama: the whole agent on a local model"],
+        ["subagents", "Anthropic, with its subagents on Ollama"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var subModel = h("input", { type: "text", list: "models", "aria-label": "Subagent model", placeholder: "an Ollama model, e.g. qwen3-coder" });
+      var subLabel = h("label", { hidden: true }, "Subagents' Ollama model", subModel);
       var memory = h("input", { type: "checkbox" }), reflect = h("input", { type: "checkbox" });
       var memNote = h("div", { class: "muted small" });
       function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
@@ -1048,11 +1052,12 @@
         memory.checked = !!p.memory; reflect.checked = !!p.reflect;
         if (p.runner && Array.prototype.some.call(runner.options, function (o) { return o.value === p.runner; })) runner.value = p.runner;
         model.placeholder = p.model || "default"; mode.options[0].text = p.permission_mode ? "profile: " + p.permission_mode : "default";
+        where.options[0].text = p.provider === "ollama" ? "profile: Ollama" : p.subagent_provider === "ollama" ? "profile: subagents on Ollama" : "as configured";
         effort.options[0].text = p.effort ? "profile: " + p.effort : "default";
         update();
       }
       profile.addEventListener("change", fillProfile);
-      [model, mode, effort].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
+      [model, mode, effort, where, subModel].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
       var preview = h("div", { class: "cmd" });
       var go = h("button", { class: "primary", type: "submit" }, "Launch");
       function cur() { return nodes.find(function (n) { return n.name === node.value; }) || nodes[0]; }
@@ -1078,11 +1083,15 @@
             .map(function (a) { return a.split("{target}").join(t).split("{prompt}").join(p); })).concat(viaStdin ? ["--input-format", "stream-json"] : []).concat(extra)
             .map(function (a) { return /[\s"'$`\;&|<>]/.test(a) ? JSON.stringify(a) : a; }).join(" ") : "";
           if (viaStdin) preview.textContent += "\n(the prompt goes over stdin, so you can approve its tool requests and change its mode and model while it runs)";
+          var on = where.value || (pr.provider === "ollama" ? "ollama" : pr.subagent_provider === "ollama" ? "subagents" : "");
+          if (on === "ollama") preview.textContent += "\n(on Ollama at " + (pr.ollama_url || "http://localhost:11434") + ": every model it asks for, subagents included, is " + (model.value || pr.model || "the model you pick") + ")";
+          if (on === "subagents") preview.textContent += "\n(the main agent stays on Anthropic; requests for " + (subModel.value || pr.subagent_model || "the subagent model") + " go to Ollama through indra's model router)";
         } else {
           preview.textContent = "ssh " + n.ssh + " -- indra node exec   (job: " + JSON.stringify({ runner: runner.value, target: t, prompt: p }) + ")";
         }
         var why = !runner.value ? (n.error ? "This node is unreachable: " + n.error : "No runner is installed on this node.") : !n.targets.length ? "This node has no targets configured." : "";
         note.textContent = why; note.hidden = !why;
+        subLabel.hidden = where.value !== "subagents";
         go.disabled = !prompt.value.trim() || !runner.value || !n.targets.length;
       }
       var note = h("div", { class: "note warn", hidden: true });
@@ -1099,6 +1108,8 @@
         if (model.value.trim()) o.model = model.value.trim();
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
+        if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
+        if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
         api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
           .then(function (r) { location.hash = "#/proc/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
@@ -1107,6 +1118,7 @@
         h("label", null, "Prompt", h("small", { text: "{target} becomes the target path, {node} the node name." }), prompt),
         h("div", { class: "fields" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", { class: "wide" }, "Target", target)),
         h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+        h("div", { class: "fields" }, h("label", null, "Runs on", where), subLabel),
         modelList(),
         h("div", { class: "card knowctl" },
           h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
@@ -1955,10 +1967,22 @@
   var MODES = [["manual", "manual: ask before every tool"], ["acceptEdits", "acceptEdits: file edits run, the rest asks"],
     ["auto", "auto: Claude decides what is safe"], ["plan", "plan: read and plan, change nothing"],
     ["dontAsk", "dontAsk: deny whatever would ask"], ["bypassPermissions", "bypassPermissions: run everything"]];
+  // Model suggestions: Claude's, then whatever the local Ollama server has.
   function modelList() {
     if ($("models")) return null;
-    return h("datalist", { id: "models" }, ["opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "qwen3-coder", "gpt-oss:20b"]
+    var dl = h("datalist", { id: "models" }, ["opus", "sonnet", "haiku", "fable", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
       .map(function (x) { return h("option", { value: x }); }));
+    ollamaModels().then(function (r) {
+      (r.models || []).forEach(function (x) { dl.appendChild(h("option", { value: x.name, label: "Ollama" + (x.parameters ? ", " + x.parameters : "") })); });
+      if (!(r.models || []).length) ["qwen3-coder", "gpt-oss:20b"].forEach(function (x) { dl.appendChild(h("option", { value: x })); });
+    });
+    return dl;
+  }
+  var ollamaCache = {};
+  function ollamaModels(url) {
+    var k = url || "";
+    if (!ollamaCache[k]) ollamaCache[k] = api("/api/ollama" + (url ? hq({ url: url }) : "")).catch(function (e) { return { models: [], error: e.message }; });
+    return ollamaCache[k];
   }
 
   // Whether this console may edit indra.toml (see Settings).
@@ -2125,6 +2149,7 @@
     var layoutBtn = h("button", { type: "button" }, "Tidy layout");
     m.appendChild(header(original ? "Edit workflow " + original : "New workflow", "Drag tasks, components and workflows in from the left. Drag from a task's right edge to another task to make the second run after the first. Select an arrow and press Delete to remove it.", [status, layoutBtn, save]));
     m.appendChild(h("div", { class: "wfedit" }, palette, scroller, inspector));
+    m.appendChild(modelList() || h("span"));
 
     function changed() { dirty = true; status.textContent = "Unsaved changes"; }
     function task(id) { return wf.task.find(function (t) { return t.id === id; }); }
@@ -2282,6 +2307,9 @@
         f.appendChild(field("Node", sel_("node", cfgNodeNames(c), cc && cc.node ? "component: " + cc.node : "local")));
         f.appendChild(field("Profile", sel_("profile", cfgProfileNames(c), cc && cc.profile ? "component: " + cc.profile : "None")));
         f.appendChild(field("Runner", sel_("runner", cfgRunnerNames(c), cc && cc.runner ? "component: " + cc.runner : "claude (or the profile's)")));
+        var mdl = text("model", false, "the profile's"); mdl.setAttribute("list", "models");
+        f.appendChild(field("Model", mdl, "Over the profile's; with Ollama, a local model's name."));
+        f.appendChild(field("Runs on", sel_("provider", ["anthropic", "ollama"], "the profile's choice")));
         f.appendChild(field("Target", text("target", false, cc && cc.target ? cc.target : "a directory on that node")));
         f.appendChild(field("Prompt", text("prompt", true, cc && cc.prompt ? cc.prompt : "What should the agent do? {target} and {node} are filled in.")));
         f.appendChild(field("Retries", text("retries", false, cc && cc.retries ? String(cc.retries) : "0")));
@@ -2384,8 +2412,10 @@
     { label: "Opus with Haiku subagents", v: { name: "lead", description: "Opus leads; Claude Code's own subagents run on Haiku", runner: "claude", model: "opus", permission_mode: "acceptEdits", subagent_model: "haiku" } },
     { label: "Worker (Sonnet, accept edits)", v: { name: "worker", description: "Does the work the planner laid out", runner: "claude", model: "sonnet", permission_mode: "acceptEdits",
       allowed_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash(git diff:*)", "Bash(git status:*)"] } },
-    { label: "Local model (Ollama)", v: { name: "local", description: "Claude Code against a local model served by Ollama", runner: "claude", model: "qwen3-coder",
-      permission_mode: "manual", env: { ANTHROPIC_BASE_URL: "http://localhost:11434", ANTHROPIC_AUTH_TOKEN: "ollama", ANTHROPIC_API_KEY: "" } } }
+    { label: "Local model (Ollama)", v: { name: "local", description: "Claude Code on a local model served by Ollama", runner: "claude", model: "qwen3-coder", provider: "ollama", permission_mode: "manual" } },
+    { label: "Opus with Ollama subagents", v: { name: "lead-local", description: "Opus leads on Anthropic; its subagents run on a local model", runner: "claude", model: "opus", permission_mode: "acceptEdits",
+      subagent_model: "qwen3-coder", subagent_provider: "ollama" } },
+    { label: "Codex on Ollama", v: { name: "codex-local", description: "Codex on a local model served by Ollama", runner: "codex", model: "gpt-oss:20b", provider: "ollama" } }
   ];
 
   // Starting points for "Add team" (they name profiles from the templates above).
@@ -2425,16 +2455,22 @@
       { k: "name", label: "Name", req: true, help: "Pick it on Launch, in presets, in workflow tasks and on the board." },
       { k: "description", label: "Description" },
       { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") },
-      { k: "model", label: "Model", list: "models", placeholder: "default", help: "An alias (opus, sonnet, haiku) or a full model id; for Ollama, the local model's name." },
+      { k: "model", label: "Model", list: "models", placeholder: "default", help: "An alias (opus, sonnet, haiku) or a full model id; for Ollama, the local model's name (the list shows what your Ollama server has)." },
+      { k: "provider", label: "Runs on", type: "select", options: [["", "Anthropic, or however the runner is set up"], ["ollama", "Ollama: the whole agent on the model above"]],
+        help: "Ollama works with Claude Code (0.14+ serves its API) and Codex (--oss). indra sets the base URL and maps opus, sonnet and haiku to the model above, so agent files that name them run locally too." },
+      { k: "ollama_url", label: "Ollama server", placeholder: "http://localhost:11434", help: "Another machine's Ollama, e.g. http://gpu-box:11434. Leave empty for this machine." },
       { k: "permission_mode", label: "Permission mode", type: "select", options: [["", "default"]].concat(MODES) },
       { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
-      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. ANTHROPIC_BASE_URL=http://localhost:11434 for a local model through Ollama. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },
+      { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. CLAUDE_CODE_MAX_OUTPUT_TOKENS=8000. For Ollama, use Runs on above instead of setting ANTHROPIC_BASE_URL here. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },
       { k: "subagent_model", label: "Model for its subagents", list: "models", placeholder: "same as the agent", help: "Claude Code only (CLAUDE_CODE_SUBAGENT_MODEL): e.g. haiku, so an Opus agent hands its Task subagents to a cheaper model." },
+      { k: "subagent_provider", label: "Subagents run on", type: "select", options: [["", "the same place as the agent"], ["ollama", "Ollama (the subagent model above is a local one)"]],
+        help: "Claude Code only. The main agent stays on Anthropic and its subagents run locally: indra points Claude Code at its model router, which sends the subagent model to Ollama and everything else to Anthropic. Your API key or login never goes to Ollama." },
       { k: "memory", label: "Start with the memory notes most relevant to the prompt", type: "bool" },
       { k: "reflect", label: "Before finishing, propose learnings for review (Claude Code)", type: "bool" }]; },
-      summary: function (p) { return [p.runner || "any runner", p.model || "default model", p.permission_mode || "default mode"].join(", ") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : "") + (p.memory ? ", memory" : "") + (p.reflect ? ", reflects" : ""); } },
+      summary: function (p) { return [p.runner || "any runner", (p.model || "default model") + (p.provider === "ollama" ? " on Ollama" : ""), p.permission_mode || "default mode"].join(", ")
+        + (p.subagent_model ? ", subagents: " + p.subagent_model + (p.subagent_provider === "ollama" ? " on Ollama" : "") : "") + (p.env && Object.keys(p.env).length ? ", env: " + Object.keys(p.env).join(" ") : "") + (p.memory ? ", memory" : "") + (p.reflect ? ", reflects" : ""); } },
     runner: { tab: "runners", noun: "runner", fields: function () { return [
       { k: "name", label: "Name", req: true, help: "How you pick it on Launch and in workflows. A built-in name (claude, codex, gemini) replaces the built-in." },
       { k: "command", label: "Program", req: true, help: "A program on PATH or a full path. It runs directly, never through a shell." },
@@ -2488,6 +2524,8 @@
         { k: "node", label: "Node", type: "select", options: opts(cfgNodeNames(c)), dflt: "local" },
         { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c)), dflt: "claude" },
         { k: "profile", label: "Profile", type: "select", options: opts(cfgProfileNames(c), "None"), help: "Model, permission mode and the rest. Its runner, if it names one, replaces the runner above." },
+        { k: "model", label: "Model", list: "models", placeholder: "the profile's", help: "This task's model, over the profile's; with Ollama, a local model's name." },
+        { k: "provider", label: "Runs on", type: "select", options: [["", "the profile's choice"], ["anthropic", "Anthropic"], ["ollama", "Ollama (local model)"]] },
         { k: "target", label: "Target", req: true, help: "A directory on that node. Local paths are relative to the config file." },
         { k: "prompt", label: "Prompt", type: "textarea", req: true, help: "{target} and {node} are filled in." },
         { k: "needs", label: "Runs after", type: "words", help: "Task ids, separated by spaces or commas. It runs only if they all succeed." },

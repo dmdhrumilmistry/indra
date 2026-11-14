@@ -149,6 +149,13 @@ pub struct TaskCfg {
     /// Profile to run with; its runner, if it names one, replaces `runner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// This task's model, over the profile's (with `provider = "ollama"`,
+    /// an Ollama model name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// "ollama" or "anthropic", over the profile's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// `{target}` and `{node}` are filled in.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prompt: String,
@@ -442,6 +449,17 @@ pub struct ProfileCfg {
     /// e.g. "haiku" under an Opus main agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// "ollama" runs the agent on a model served by Ollama; the model is
+    /// `model`. Claude Code and Codex are supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// "ollama" hands Claude Code's subagents (`subagent_model`) to Ollama
+    /// while the main agent stays on Anthropic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_provider: Option<String>,
+    /// The Ollama server, if not http://localhost:11434.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_url: Option<String>,
 }
 
 impl ProfileCfg {
@@ -464,8 +482,17 @@ impl ProfileCfg {
                 }
                 env
             },
+            provider: none_if_empty(&self.provider),
+            subagent_provider: none_if_empty(&self.subagent_provider),
+            ollama_url: none_if_empty(&self.ollama_url),
         }
     }
+}
+
+fn none_if_empty(v: &Option<String>) -> Option<String> {
+    v.as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// A tracker the board imports work from and reports back to.
@@ -890,8 +917,16 @@ pub fn default_runners() -> Vec<RunnerCfg> {
     claude.fork_args = vec!["--fork-session".into()];
     vec![
         claude,
-        r("codex", "codex", &["exec", "{prompt}"], "text"),
-        r("gemini", "gemini", &["-p", "{prompt}"], "text"),
+        {
+            let mut c = r("codex", "codex", &["exec", "{prompt}"], "text");
+            c.model_args = vec!["-m".into(), "{model}".into()];
+            c
+        },
+        {
+            let mut g = r("gemini", "gemini", &["-p", "{prompt}"], "text");
+            g.model_args = vec!["-m".into(), "{model}".into()];
+            g
+        },
     ]
 }
 
@@ -1278,6 +1313,15 @@ pub fn build_settings(
         crate::deck::nodes::validate_name(&w.name).map_err(|e| format!("workflow name: {}", e))?;
         let mut w = expand_workflow(w, &file.workflow, &file.component)?;
         validate_workflow(&w, &node_names)?;
+        for t in &w.tasks {
+            crate::deck::nodes::AgentOpts {
+                model: t.model.clone(),
+                provider: t.provider.clone().filter(|p| !p.is_empty()),
+                ..Default::default()
+            }
+            .validate()
+            .map_err(|e| format!("workflow '{}' task '{}': {}", w.name, t.id, e))?;
+        }
         // Local targets are relative to the config file; remote ones are the remote's business.
         for t in &mut w.tasks {
             if t.node == crate::deck::nodes::LOCAL {
@@ -1562,6 +1606,38 @@ needs = ["sub"]
             "[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\n[[team]]\nname = \"t\"\nplanner = \"planner\"\nworker = \"builder\"\n",
         ] {
             let f: ConfigFile = toml::from_str(&format!("{}{}", base, bad)).unwrap();
+            assert!(build_settings(&opts, None, &f).is_err(), "{}", bad);
+        }
+    }
+
+    #[test]
+    fn ollama_profiles_and_tasks() {
+        let opts = LoadOptions {
+            config: None,
+            targets: vec![],
+            bind: None,
+            read_only: false,
+            cwd: std::env::temp_dir(),
+        };
+        let good = "builtins = false\n\
+[[profile]]\nname = \"local\"\nrunner = \"claude\"\nmodel = \"qwen3-coder\"\nprovider = \"ollama\"\nollama_url = \"http://gpu:11434\"\n\
+[[profile]]\nname = \"lead\"\nmodel = \"opus\"\nsubagent_model = \"qwen3-coder\"\nsubagent_provider = \"ollama\"\n\
+[[workflow]]\nname = \"w\"\n[[workflow.task]]\nid = \"a\"\ntarget = \".\"\nprompt = \"p\"\nprofile = \"lead\"\nmodel = \"llama3\"\nprovider = \"ollama\"\n";
+        let f: ConfigFile = toml::from_str(good).unwrap();
+        let s = build_settings(&opts, None, &f).unwrap();
+        let o = s.profile("local").unwrap().opts();
+        assert_eq!(o.provider.as_deref(), Some("ollama"));
+        assert_eq!(o.ollama_url.as_deref(), Some("http://gpu:11434"));
+        let o = s.profile("lead").unwrap().opts();
+        assert_eq!(o.subagent_provider.as_deref(), Some("ollama"));
+        assert_eq!(o.env["CLAUDE_CODE_SUBAGENT_MODEL"], "qwen3-coder");
+        assert_eq!(s.workflows[0].tasks[0].model.as_deref(), Some("llama3"));
+        for bad in [
+            "[[profile]]\nname = \"x\"\nprovider = \"openai\"\n",
+            "[[profile]]\nname = \"x\"\nprovider = \"ollama\"\nollama_url = \"file:///x\"\n",
+            "[[workflow]]\nname = \"v\"\n[[workflow.task]]\nid = \"a\"\ntarget = \".\"\nprompt = \"p\"\nprovider = \"bedrock\"\n",
+        ] {
+            let f: ConfigFile = toml::from_str(&format!("builtins = false\n{}", bad)).unwrap();
             assert!(build_settings(&opts, None, &f).is_err(), "{}", bad);
         }
     }

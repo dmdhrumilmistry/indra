@@ -55,7 +55,7 @@ fn now() -> u64 {
     crate::deck::runs::now()
 }
 
-fn random_token(bytes: usize) -> String {
+pub(crate) fn random_token(bytes: usize) -> String {
     let mut b = vec![0u8; bytes];
     let _ = getrandom::fill(&mut b);
     b.iter().map(|x| format!("{:02x}", x)).collect()

@@ -266,7 +266,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Agent control:** approve or deny each tool request, switch an agent between permission modes
   (manual, acceptEdits, auto, plan, ...) and models while it runs, interrupt it, or send it a
   follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
-  plan and the model you pick (or a local one through Ollama) does the work.
+  plan and the model you pick (or a local one through Ollama) does the work. A profile can also
+  keep Claude on Anthropic and hand just its subagents to a local model, through indra's model
+  router, which keeps your credentials off the model server.
 - **Marketplace:** browse Claude Code plugin marketplaces (Anthropic's skills and official
   directory built in, add any other) and install their skills, agents and commands for Claude
   Code, Codex or a harness, or as native Claude Code plugins; update and remove them later.
@@ -328,7 +330,8 @@ how remote execution stays safe.
 
 **Design:** [architecture](docs/architecture.md) (agent control, profiles, secrets, transport,
 the board, graph workflows). **Guides:** [handling agent processes](docs/guides/processes.md) (watching, stopping, logs,
-capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md), and
+capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md),
+[local models with Ollama](docs/guides/local-models.md), and
 [knowledge base and integrations](docs/guides/knowledge-base.md).
 
 <p align="center"><img src="assets/screenshots/pivot.png" alt="Pivoting an agent: continue its session with a new instruction" width="720"></p>

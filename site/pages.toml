@@ -108,6 +108,14 @@ file = "docs/guides/plan-and-delegate.md"
 
 [[page]]
 group = "Guides"
+slug = "local-models"
+title = "Local models with Ollama"
+description = "Whole agents, or just Claude Code's subagents, on models you host; credentials never reach Ollama."
+[[page.source]]
+file = "docs/guides/local-models.md"
+
+[[page]]
+group = "Guides"
 slug = "context-and-learnings"
 title = "Context, memory and learnings"
 description = "Start agents with the relevant memory, collect what they learn, and manage vaults in the console."

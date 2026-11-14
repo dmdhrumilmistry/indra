@@ -46,10 +46,10 @@ model           = "haiku"
 permission_mode = "acceptEdits"
 
 [[profile]]
-name   = "local"                            # Claude Code against a self-hosted model
-runner = "claude"
-model  = "qwen3-coder"
-env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+name     = "local"                          # Claude Code against a self-hosted model
+runner   = "claude"
+model    = "qwen3-coder"
+provider = "ollama"                         # see the local models guide
 
 [[team]]
 name         = "opus-haiku"
@@ -63,8 +63,9 @@ reviewer     = "planner"                    # optional: no reviewer, no review s
 # max_steps  = 8
 ```
 
-A Codex or Gemini CLI profile works the same way (`runner = "codex"`, with the runner's
-`model_args` to pick a model).
+A Codex or Gemini CLI profile works the same way (`runner = "codex"`; the built-in Codex and
+Gemini runners take `model`). For local models in any role, and for subagents on a local model
+inside one Claude Code session, see [Local models with Ollama](local-models.md).
 
 ## Run one
 

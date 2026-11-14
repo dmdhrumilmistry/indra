@@ -13,6 +13,7 @@ pub mod link;
 pub mod market;
 pub mod nodes;
 pub mod procs;
+pub mod router;
 pub mod runs;
 pub mod secrets;
 pub mod term;
