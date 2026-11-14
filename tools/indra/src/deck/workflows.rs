@@ -30,6 +30,10 @@ pub struct TaskRun {
     pub runner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub prompt: String,
     pub needs: Vec<String>,
     pub retries: u32,
@@ -283,8 +287,15 @@ impl Engine {
                     prof.opts(),
                 )
             }
-            None => (t.runner.clone(), Default::default()),
+            None => (t.runner.clone(), crate::deck::nodes::AgentOpts::default()),
         };
+        // The task's own model and provider win over the profile's.
+        let agent = agent.with(&crate::deck::nodes::AgentOpts {
+            model: t.model.clone().filter(|m| !m.trim().is_empty()),
+            provider: t.provider.clone().filter(|p| !p.trim().is_empty()),
+            ..Default::default()
+        });
+        agent.validate()?;
         let (prompt, memory, reflect) = crate::deck::knowledge::prepare(
             &settings,
             harness,
@@ -343,6 +354,8 @@ fn task_run(t: &TaskCfg) -> TaskRun {
         target: t.target.clone(),
         runner: t.runner.clone(),
         profile: t.profile.clone(),
+        model: t.model.clone(),
+        provider: t.provider.clone(),
         prompt: t.prompt.clone(),
         needs: t.needs.clone(),
         retries: t.retries,
@@ -396,6 +409,8 @@ pub fn fan_out(runner: &str, prompt: &str, targets: &[(String, String)]) -> Work
                 needs: Vec::new(),
                 retries: 0,
                 profile: None,
+                model: None,
+                provider: None,
                 component: None,
                 workflow: None,
                 pos: None,
@@ -425,6 +440,8 @@ mod tests {
             needs: needs.iter().map(|s| s.to_string()).collect(),
             retries: 0,
             profile: None,
+            model: None,
+            provider: None,
             component: None,
             workflow: None,
             pos: None,

@@ -2103,6 +2103,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/run/record", post(crate::deck::tools::record))
         .route("/api/run/publish", post(crate::deck::tools::publish))
         .route("/api/run/post", post(crate::deck::tools::post))
+        .route("/api/ollama", get(crate::deck::tools::ollama))
         .route("/api/tools", get(crate::deck::tools::overview))
         .route("/api/tools/cache", post(crate::deck::tools::cache))
         .route(

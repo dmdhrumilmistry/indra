@@ -390,3 +390,38 @@ pub async fn dashes(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
         .collect();
     Ok(Json(json!({ "found": list })))
 }
+
+// ---- Ollama --------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct OllamaQ {
+    url: Option<String>,
+}
+
+/// The models an Ollama server has (for the model pickers), and what the
+/// model router has sent where. The server is the one asked for, else the
+/// first profile's, else this machine's.
+pub async fn ollama(
+    State(app): State<Arc<App>>,
+    Query(q): Query<OllamaQ>,
+) -> ApiResult<Json<Value>> {
+    let url = q
+        .url
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| {
+            app.settings()
+                .profiles
+                .iter()
+                .find_map(|p| p.ollama_url.clone().filter(|u| !u.trim().is_empty()))
+        })
+        .unwrap_or_else(|| crate::deck::nodes::OLLAMA_URL.to_string());
+    crate::deck::router::check_url(&url).map_err(bad)?;
+    let (models, error) = match crate::deck::router::ollama_models(&url).await {
+        Ok(m) => (m, None),
+        Err(e) => (vec![], Some(e)),
+    };
+    Ok(Json(json!({
+        "url": url, "reachable": error.is_none(), "error": error, "models": models,
+        "router": crate::deck::router::stats(),
+    })))
+}

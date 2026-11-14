@@ -478,10 +478,17 @@ permission_mode = "acceptEdits"
 allowed_tools   = ["Read", "Grep", "Glob", "Edit", "Bash(git diff:*)"]
 
 [[profile]]
-name   = "local"                     # Claude Code on a local model, through Ollama (0.14+)
-runner = "claude"
-model  = "qwen3-coder"
-env    = { ANTHROPIC_BASE_URL = "http://localhost:11434", ANTHROPIC_AUTH_TOKEN = "ollama", ANTHROPIC_API_KEY = "" }
+name     = "local"                   # Claude Code on a local model, through Ollama (0.14+)
+runner   = "claude"
+model    = "qwen3-coder"
+provider = "ollama"                  # ollama_url = "http://gpu-box:11434" for another machine
+
+[[profile]]
+name              = "lead-local"     # Opus on Anthropic, its subagents on the local model
+runner            = "claude"
+model             = "opus"
+subagent_model    = "qwen3-coder"
+subagent_provider = "ollama"         # through indra's model router; no credential reaches Ollama
 
 [[profile]]
 name           = "lead"
@@ -497,7 +504,10 @@ reflect = true                       # propose learnings for review before finis
 ```
 
 For runners other than Claude Code, set `model_args` (e.g. `["--model", "{model}"]`) to let a
-profile choose the model; permission modes and tool rules are Claude Code's.
+profile choose the model (the built-in Codex and Gemini runners have it); permission modes and
+tool rules are Claude Code's. Ollama works with Claude Code and Codex: see
+[Local models with Ollama](../../docs/guides/local-models.md). A workflow task can override its
+profile's `model` and `provider`.
 
 ### Secrets
 
@@ -557,7 +567,8 @@ planner reads the code and answers with a plan of small, self-contained steps; y
 reorder, drop or add steps, then each runs as its own agent on the worker's model (the light
 worker's for mechanical steps), in order, and the reviewer checks the result. Any runner can
 fill any role, so Claude can plan while a local Ollama model builds. Settings has templates for
-the profiles and teams. See [Plan and delegate](../../docs/guides/plan-and-delegate.md).
+the profiles and teams. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). For local models in any role, see
+[Local models with Ollama](../../docs/guides/local-models.md).
 
 ### Knowledge: context, memory and learnings
 
