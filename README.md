@@ -263,6 +263,9 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
   (manual, acceptEdits, auto, plan, ...) and models while it runs, interrupt it, or send it a
   follow-up. **Profiles** bundle runner, model, mode, tools and environment, so a strong model can
   plan and the model you pick (or a local one through Ollama) does the work.
+- **Terminals:** `indra attach` follows and steers an agent from your own terminal, and
+  `indra serve --shell` adds a real terminal in the browser: a shell or Claude Code in a target,
+  or an agent's own session.
 - **Secrets:** tokens agents need live in an encrypted store, are referenced from profiles
   (`JIRA_TOKEN = "secret:jira"`), are scoped to profiles and machines, reach the agent only in
   memory at launch, and are redacted from everything it prints.

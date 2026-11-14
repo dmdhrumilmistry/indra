@@ -32,7 +32,7 @@ pub struct Tracker<'a> {
 }
 
 /// Escape a value for a curl config file (a double-quoted string).
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
     o.push('"');
     for c in s.chars() {

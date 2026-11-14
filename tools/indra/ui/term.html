@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>indra terminal</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="termpage">
+<header class="termbar">
+  <a class="brand" href="/#/terminal"><img src="/favicon.svg" alt="" width="20" height="20"><span>indra</span></a>
+  <span id="what" class="termwhat"></span>
+  <span id="state" class="pill"></span>
+  <button id="again" type="button" hidden>Start again</button>
+</header>
+<div id="term" class="termbox"></div>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/term.js"></script>
+</body>
+</html>

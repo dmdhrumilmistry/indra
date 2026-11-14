@@ -288,6 +288,7 @@ open the browser for you, `--read-only` to turn off launching and editing.
 | **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
 | **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, and the final cost. Stop ends the whole process tree. |
 | **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. See [the board guide](../../docs/guides/board.md). |
+| **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |
 | **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. See [Settings](#settings). |
 
 The same picture without a browser:
@@ -418,10 +419,16 @@ The console can start programs and rewrite prompts, so it is built like a remote
   a program to run, so editing settings needs everything above (token, same origin, loopback
   Host) and is off when indra is `--read-only`, when started with `--lock-config`, and when the
   console listens beyond this machine unless you also pass `--allow-remote-config`.
+- **The browser terminal is opt-in.** It is a shell on the machine, so it exists only when
+  `indra serve` is started with `--shell`, only on a loopback address and never read-only. On
+  top of the token and Host checks, its WebSocket must come from the console's own origin
+  (browsers apply no CORS to WebSockets), at most 8 are open at once, and each one is logged to
+  `logs/terminal.log` in the data directory.
 - **Confined files.** Prompts are read and written only if discovery found them; run files
   resolve only inside their run directory (`..`, absolute paths and escaping symlinks refused).
 - **No injected markup.** The UI renders every string with `textContent`, under a strict
-  `Content-Security-Policy` with nothing third-party.
+  `Content-Security-Policy` with nothing third-party. The terminal page alone allows inline
+  styles, which xterm.js (vendored, MIT, served by indra) needs; scripts stay `'self'`.
 
 Processes are tracked while `indra serve` runs. When it exits (Ctrl-C, SIGTERM, SIGHUP) it
 stops every agent it started first; their logs stay on disk. See
@@ -525,6 +532,45 @@ target and runner, and the two processes link to each other. API:
 `POST /api/procs/{id}/pivot` with `{"prompt": "...", "mode": "continue"|"fresh", "keep_running": false}`.
 A custom runner can continue sessions with `resume_args = ["--resume", "{session}"]` (and
 `fork_args`). See [Pivoting agents](../../docs/guides/pivoting.md).
+
+### Terminals
+
+Two ways to work with agents from a terminal instead of the console's pages.
+
+**`indra attach`, in your own terminal.** It talks to a running console with its token: on
+the same machine it finds the console by itself (`indra serve` writes `console.json`, owner-only,
+to the data directory and removes it on exit); elsewhere pass `--url` and `--token` (or
+`INDRA_URL` and `INDRA_TOKEN`).
+
+```text
+$ indra agents
+  ID  STATUS    NODE        RUNNER        MODE / MODEL       WAIT  LAST
+   7  running   local       claude        manual / sonnet       1  asks to use Bash: npm test
+   6  running   build-box   claude        acceptEdits / o...       reading src/auth/session.ts
+
+$ indra attach 7
+process 7 running  claude on local  in ~/code/my-api  session 5f0c...
+? asks to use Bash: npm test
+  [1] Bash: {"command":"npm test"}
+  /allow [n], /always [n] or /deny [n] [reason]
+/always
+? allowed Bash (always, for this session)
+```
+
+`indra attach` with no id picks an agent that waits for you, else the newest running one. It
+streams the agent's events and takes commands: plain text is a message to the agent; `/allow`,
+`/always` and `/deny [reason]` answer tool requests; `/mode`, `/model` and `/interrupt` steer it;
+`/pivot [--fresh] [--keep] <text>` redirects it and follows the new process; `/switch <id>`,
+`/agents`, `/status`, `/stop`, `/quit`. It works for agents on every node, like the console.
+
+**A terminal in the browser.** Start the console with `indra serve --shell` and the
+**Terminal** page opens a real PTY in a new tab: your shell (`$SHELL`) or Claude Code's
+interactive session in one of the harness's targets, or an agent's own session. The last one
+runs the agent's runner with its `resume_args` (`claude --resume <session>`) in the agent's
+directory; while the agent still runs it adds `fork_args` (`--fork-session`), so you explore a
+branch and the agent carries on undisturbed. Process pages get an **Open in terminal** (or
+**Fork in terminal**) button. Agent sessions open for agents on this machine only. Closing the
+tab hangs up the terminal and ends what it started.
 
 ## Nodes and orchestration
 

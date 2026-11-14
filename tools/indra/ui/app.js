@@ -851,6 +851,53 @@
     load(); every(2000, load);
   }
 
+  function termUrl(params) { return "/term?" + new URLSearchParams(params).toString(); }
+
+  // Terminal: a real shell in the browser (when `indra serve --shell`), and
+  // the terminal client for the user's own terminal.
+  function pageTerminal(m) {
+    m.appendChild(header("Terminal", "Look around and steer agents from a terminal: in this browser, or in your own."));
+    var page = h("div", { class: "stack" }); m.appendChild(page); m = page;
+    var own = h("div", { class: "card" },
+      h("h3", { text: "In your own terminal" }),
+      h("p", { class: "muted", text: "indra attach follows an agent live and steers it: approve tool requests, change its mode or model, send messages, pivot. It finds this console by itself on this machine; elsewhere pass --url and --token." }),
+      h("div", { class: "cmd lines", text: "indra agents            # what runs, and what waits for you\nindra attach 12         # follow process 12; /help lists the commands" }));
+    if (!S.ov.shell) {
+      m.appendChild(h("div", { class: "card" },
+        h("h3", { text: "Browser terminal is off" }),
+        h("p", { class: "muted", text: "It is a shell on this machine, so it is opt-in: start the console with --shell. It is offered only on a loopback address and never in read-only mode, and each session is logged to logs/terminal.log." }),
+        h("div", { class: "cmd", text: "indra serve --shell" })));
+      m.appendChild(own);
+      return;
+    }
+    var hs = harness();
+    var targets = hs ? (hs.targets.length ? hs.targets : [hs.root]) : [];
+    var hasClaude = (S.ov.runners || []).some(function (r) { return r.format === "claude-stream-json" && r.available; });
+    m.appendChild(h("div", { class: "card" },
+      h("h3", { text: "Start a terminal" }),
+      h("p", { class: "muted", text: "Opens in a new tab, in the directory you pick. It ends when you close the tab." }),
+      targets.length ? h("table", null, h("tbody", null, targets.map(function (t, i) {
+        var at = hs.targets.length ? { h: hs.name, target: i } : { h: hs.name };
+        return h("tr", null, h("td", null, h("code", { text: t })), h("td", { class: "row" },
+          h("a", { class: "btn", href: termUrl(Object.assign({ what: "shell" }, at)), target: "_blank", rel: "noopener" }, "Shell"),
+          hasClaude ? h("a", { class: "btn", href: termUrl(Object.assign({ what: "claude" }, at)), target: "_blank", rel: "noopener" }, "Claude Code") : null));
+      }))) : empty("No harness, so no directory to start in.")));
+    var sessions = h("div");
+    m.appendChild(h("div", { class: "card" },
+      h("h3", { text: "Agent sessions" }),
+      h("p", { class: "muted", text: "Open an agent's own Claude Code session interactively, in its directory. While the agent still runs, the terminal gets a branch of the session (--fork-session), so the agent carries on undisturbed." }),
+      sessions));
+    m.appendChild(own);
+    api("/api/procs").then(function (list) {
+      var ok = list.filter(function (p) { return p.node === "local" && p.session; });
+      sessions.appendChild(ok.length ? h("table", null, h("tbody", null, ok.map(function (p) {
+        return h("tr", null, h("td", null, h("a", { href: "#/proc/" + p.id, text: "#" + p.id })), h("td", null, statusPill(p.status)),
+          h("td", { class: "muted", text: (p.prompt || "").slice(0, 80) }),
+          h("td", null, h("a", { class: "btn", href: termUrl({ what: "agent", proc: p.id }), target: "_blank", rel: "noopener" }, p.status === "running" ? "Fork in terminal" : "Open in terminal")));
+      }))) : empty("No local agent has reported a session yet (Claude Code does)."));
+    }).catch(function (e) { sessions.appendChild(empty(e.message)); });
+  }
+
   function pageProc(m, id) {
     var top = h("div"), agentsBox = h("div"), toolsBox = h("div"), feed = h("div", { class: "feed", role: "log", "aria-live": "polite" });
     var follow = h("input", { type: "checkbox", checked: true, id: "follow" });
@@ -967,7 +1014,12 @@
         stop.disabled = true;
         api("/api/procs/" + id + "/stop", { method: "POST" }).then(function () { toast("Stopping"); }).catch(function (e) { toast(e.message, true); });
       } }, "Stop");
-      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null, stop]));
+      var shellBtn = S.ov.shell && p.node === "local" && p.session
+        ? h("a", { class: "btn", href: termUrl({ what: "agent", proc: p.id }), target: "_blank", rel: "noopener",
+            title: p.status === "running" ? "Opens a branch of its session (--fork-session), so the agent is not disturbed" : "Continues its session interactively" },
+            p.status === "running" ? "Fork in terminal" : "Open in terminal")
+        : null;
+      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null, shellBtn, stop]));
       top.appendChild(h("div", { class: "cmd", text: p.prompt }));
       top.appendChild(lineage);
       agentsBox.textContent = "";
@@ -1825,7 +1877,8 @@
         proc: function () { pageProc(m, arg); },
         settings: function () { pageSettings(m, arg); },
         board: function () { pageBoard(m); },
-        wfedit: function () { pageWorkflowEditor(m, arg); }
+        wfedit: function () { pageWorkflowEditor(m, arg); },
+        terminal: function () { pageTerminal(m); }
       };
       (pages[page] || pages.overview)();
     }).catch(function (e) { if (e.message !== "unauthorized") { m.appendChild(empty(e.message)); } });
