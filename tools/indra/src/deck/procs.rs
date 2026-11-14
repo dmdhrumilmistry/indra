@@ -257,7 +257,8 @@ impl Proc {
             node: self.node.clone(),
             runner: self.runner.clone(),
             harness: self.harness.clone(),
-            prompt: self.prompt.clone(),
+            // What was asked; the memory recalled into it is listed apart.
+            prompt: crate::deck::knowledge::without_memory(&self.prompt).to_string(),
             cwd: self.cwd.clone(),
             command: self.command.clone(),
             host: st.host.clone(),

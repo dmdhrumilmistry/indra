@@ -87,8 +87,9 @@ pub fn brief(h: &Harness, prompt: &str) -> (String, Vec<MemRef>) {
     }
     let mut budget = BRIEF_CHARS;
     let mut out = format!(
-        "{}\n\n---\nRelevant memory ({} notes recalled by indra from earlier work; use what applies and verify it before relying on it):\n\n",
+        "{}{}{} notes recalled by indra from earlier work; use what applies and verify it before relying on it):\n\n",
         prompt.trim_end(),
+        MEMORY_MARK,
         found.len()
     );
     let mut refs = Vec::new();
@@ -106,6 +107,17 @@ pub fn brief(h: &Harness, prompt: &str) -> (String, Vec<MemRef>) {
         });
     }
     (out.trim_end().to_string(), refs)
+}
+
+/// Where the recalled memory starts in a prompt.
+const MEMORY_MARK: &str = "\n\n---\nRelevant memory (";
+
+/// A prompt without the memory [`brief`] appended to it.
+pub fn without_memory(prompt: &str) -> &str {
+    match prompt.find(MEMORY_MARK) {
+        Some(i) => &prompt[..i],
+        None => prompt,
+    }
 }
 
 /// What a launch gets from its profile and the request: the prompt (with
@@ -1077,6 +1089,13 @@ pub async fn learning_accept(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shown_prompt_leaves_out_the_memory() {
+        let p = format!("/review it{}2 notes ...):\n\n## A", MEMORY_MARK);
+        assert_eq!(without_memory(&p), "/review it");
+        assert_eq!(without_memory("plain"), "plain");
+    }
 
     #[test]
     fn reflections_become_proposals() {

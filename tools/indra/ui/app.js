@@ -500,15 +500,17 @@
         : ((vaults.find(function (v) { return v.exists && v.notes; }) || vaults.find(function (v) { return v.exists; }) || vaults[0] || { index: 0 }).index);
       var v = vaults.find(function (x) { return x.index === cur; });
       if (vaults.length) {
-        top.appendChild(h("div", { class: "grid" }, vaults.map(function (x) {
-          return h("div", { class: "card click" + (x.index === cur ? " sel" : ""), tabindex: "0", role: "button",
-            onclick: function () { go(tab === "learnings" ? "notes" : tab, x.index); } },
-            h("div", { class: "cmd", text: x.path }),
-            x.exists ? h("div", { class: "stats" },
-              h("div", { class: "stat" }, h("b", { text: String(x.notes) }), h("span", { text: "notes" })),
-              h("div", { class: "stat" }, h("b", { text: String(x.links) }), h("span", { text: "links" })),
-              h("div", { class: "stat" }, h("b", { text: String(x.dangling) }), h("span", { text: "dangling" })))
-              : h("div", null, h("p", { class: "muted", text: "Not created yet." }), ro ? null : h("button", { type: "button", onclick: function (e) {
+        top.appendChild(h("div", { class: "vaults", role: "list", "aria-label": "Memory vaults" }, vaults.map(function (x) {
+          var pick = function () { go(tab === "learnings" ? "notes" : tab, x.index); };
+          return h("div", { class: "vault" + (x.index === cur ? " sel" : ""), role: "listitem", tabindex: "0", title: x.path,
+            onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
+            h("span", { class: "vlabel", text: vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
+            h("code", { class: "vpath", text: x.path }),
+            x.exists ? h("span", { class: "vstats" },
+              h("span", null, h("b", { text: String(x.notes) }), " notes"),
+              h("span", null, h("b", { text: String(x.links) }), " links"),
+              h("span", { class: x.dangling ? "warn" : "" }, h("b", { text: String(x.dangling) }), " dangling"))
+              : h("span", { class: "vstats" }, h("span", { class: "muted", text: "not created yet" }), ro ? null : h("button", { type: "button", onclick: function (e) {
                 e.stopPropagation();
                 api("/api/knowledge/init", { method: "POST", body: { h: S.h, i: x.index } }).then(function () { toast("Vault created"); go("notes", x.index); route(); })
                   .catch(function (err) { toast(err.message, true); });
@@ -723,7 +725,7 @@
         function patch() { return api("/api/learnings/" + l.id, { method: "PATCH", body: { title: title.value, body: text.value, tags: csv(tags.value) } }); }
         return h("div", { class: "card form learning" }, origin(l.origin),
           h("label", null, "Title", title), h("label", null, "What it learned", text), h("label", null, "Tags", tags),
-          ro ? null : h("div", { class: "row" }, h("label", null, "Into", vs), h("label", null, "Links", links)),
+          ro ? null : h("div", { class: "fields" }, h("label", null, "Into vault", vs), h("label", null, "Link to notes", links)),
           ro ? null : h("div", { class: "row" },
             h("button", { type: "button", class: "primary", onclick: function () {
               patch().then(function () { return api("/api/learnings/" + l.id + "/accept", { method: "POST", body: { h: S.h, i: Number(vs.value), links: csv(links.value) } }); })
@@ -953,8 +955,8 @@
       } },
         h("label", null, "Preset", preset),
         h("label", null, "Prompt", h("small", { text: "{target} becomes the target path, {node} the node name." }), prompt),
-        h("div", { class: "row" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", null, "Target", target)),
-        h("div", { class: "row" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+        h("div", { class: "fields" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", { class: "wide" }, "Target", target)),
+        h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
         modelList(),
         h("div", { class: "card knowctl" },
           h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
@@ -1241,12 +1243,12 @@
     m.appendChild(h("div", { class: "card" },
       h("h3", { text: "Start a terminal" }),
       h("p", { class: "muted", text: "Opens in a new tab, in the directory you pick. It ends when you close the tab." }),
-      targets.length ? h("table", null, h("tbody", null, targets.map(function (t, i) {
+      targets.length ? h("div", { class: "rowlist" }, targets.map(function (t, i) {
         var at = hs.targets.length ? { h: hs.name, target: i } : { h: hs.name };
-        return h("tr", null, h("td", null, h("code", { text: t })), h("td", { class: "row" },
+        return h("div", { class: "rowitem" }, h("code", { class: "grow", text: t }), h("span", { class: "row" },
           h("a", { class: "btn", href: termUrl(Object.assign({ what: "shell" }, at)), target: "_blank", rel: "noopener" }, "Shell"),
           hasClaude ? h("a", { class: "btn", href: termUrl(Object.assign({ what: "claude" }, at)), target: "_blank", rel: "noopener" }, "Claude Code") : null));
-      }))) : empty("No harness, so no directory to start in.")));
+      })) : empty("No harness, so no directory to start in.")));
     var sessions = h("div");
     m.appendChild(h("div", { class: "card" },
       h("h3", { text: "Agent sessions" }),
@@ -1255,11 +1257,11 @@
     m.appendChild(own);
     api("/api/procs").then(function (list) {
       var ok = list.filter(function (p) { return p.node === "local" && p.session; });
-      sessions.appendChild(ok.length ? h("table", null, h("tbody", null, ok.map(function (p) {
-        return h("tr", null, h("td", null, h("a", { href: "#/proc/" + p.id, text: "#" + p.id })), h("td", null, statusPill(p.status)),
-          h("td", { class: "muted", text: (p.prompt || "").slice(0, 80) }),
-          h("td", null, h("a", { class: "btn", href: termUrl({ what: "agent", proc: p.id }), target: "_blank", rel: "noopener" }, p.status === "running" ? "Fork in terminal" : "Open in terminal")));
-      }))) : empty("No local agent has reported a session yet (Claude Code does)."));
+      sessions.appendChild(ok.length ? h("div", { class: "rowlist" }, ok.map(function (p) {
+        return h("div", { class: "rowitem" }, h("a", { href: "#/proc/" + p.id, text: "#" + p.id }), statusPill(p.status),
+          h("span", { class: "muted grow clip1", text: p.prompt || "" }),
+          h("a", { class: "btn", href: termUrl({ what: "agent", proc: p.id }), target: "_blank", rel: "noopener" }, p.status === "running" ? "Fork in terminal" : "Open in terminal"));
+      })) : empty("No local agent has reported a session yet (Claude Code does)."));
     }).catch(function (e) { sessions.appendChild(empty(e.message)); });
   }
 
