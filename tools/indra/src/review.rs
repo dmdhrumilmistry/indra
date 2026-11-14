@@ -810,12 +810,11 @@ fn obj(v: Value) -> Map<String, Value> {
 
 /// One metrics command; its JSON answer.
 pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
-    let res: Value;
-    match cmd {
+    let res = match cmd {
         MetricsCmd::Path => {
             let d = metrics_dir();
-            res = json!({ "dir": d.display().to_string(), "runs": d.join("runs.jsonl").display().to_string(),
-                         "events": d.join("events.jsonl").display().to_string(), "exists": d.is_dir(), "local_only": true });
+            json!({ "dir": d.display().to_string(), "runs": d.join("runs.jsonl").display().to_string(),
+                         "events": d.join("events.jsonl").display().to_string(), "exists": d.is_dir(), "local_only": true })
         }
         MetricsCmd::Start {
             run_id,
@@ -834,7 +833,7 @@ pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
                 "tier": tier, "arguments": arguments, "cache": cache, "skill_version": skill_version }),
                 ),
             )?;
-            res = json!({ "recorded": "start", "run_id": run_id, "file": p.display().to_string() });
+            json!({ "recorded": "start", "run_id": run_id, "file": p.display().to_string() })
         }
         MetricsCmd::Event {
             run_id,
@@ -857,7 +856,7 @@ pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
                 "reused": reused, "note": note }),
                 ),
             )?;
-            res = json!({ "recorded": "event", "run_id": run_id, "phase": phase, "file": p.display().to_string() });
+            json!({ "recorded": "event", "run_id": run_id, "phase": phase, "file": p.display().to_string() })
         }
         MetricsCmd::Finish {
             run_id,
@@ -883,8 +882,7 @@ pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
                 "tokens_in": tokens_in, "tokens_out": tokens_out, "cost_usd": cost_usd, "agents_launched": agents_launched }),
                 ),
             )?;
-            res =
-                json!({ "recorded": "finish", "run_id": run_id, "file": p.display().to_string() });
+            json!({ "recorded": "finish", "run_id": run_id, "file": p.display().to_string() })
         }
         MetricsCmd::Report { repo, last } => {
             let (runs, events) = (read_rows("runs.jsonl"), read_rows("events.jsonl"));
@@ -963,7 +961,7 @@ pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
                 "duration_ms": rows.iter().map(|r| num(r, "duration_ms") as i64).sum::<i64>(),
                 "agents": rows.iter().map(|r| num(r, "agents") as i64).sum::<i64>(),
             });
-            res = json!({ "dir": metrics_dir().display().to_string(), "totals": totals, "by_model": by_model, "runs": rows });
+            json!({ "dir": metrics_dir().display().to_string(), "totals": totals, "by_model": by_model, "runs": rows })
         }
         MetricsCmd::Purge { older_than_days } => {
             let d = metrics_dir();
@@ -975,8 +973,7 @@ pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
                         removed.push(p.display().to_string());
                     }
                 }
-                res = json!({ "purged": removed });
-                return Ok(res);
+                return Ok(json!({ "purged": removed }));
             };
             let cutoff = now_secs() - days * 86_400;
             let (mut kept_total, mut dropped_total) = (0, 0);
@@ -1001,9 +998,9 @@ pub(crate) fn metrics_value(cmd: MetricsCmd) -> Result<Value, String> {
                     std::fs::write(&p, text).map_err(|e| e.to_string())?;
                 }
             }
-            res = json!({ "kept": kept_total, "dropped": dropped_total });
+            json!({ "kept": kept_total, "dropped": dropped_total })
         }
-    }
+    };
     Ok(res)
 }
 
