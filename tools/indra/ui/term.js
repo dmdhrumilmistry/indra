@@ -5,7 +5,7 @@
   "use strict";
   var q = new URLSearchParams(location.search);
   var params = new URLSearchParams();
-  ["what", "h", "target", "proc"].forEach(function (k) { if (q.get(k) !== null) params.set(k, q.get(k)); });
+  ["what", "h", "target", "proc", "profile"].forEach(function (k) { if (q.get(k) !== null) params.set(k, q.get(k)); });
   if (!params.get("what")) params.set("what", "shell");
 
   function $(id) { return document.getElementById(id); }

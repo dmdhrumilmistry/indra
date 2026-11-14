@@ -363,3 +363,5 @@ label.rowitem { font-weight: 400; }
 .runactions + div:empty { display: none; }
 .findings .row select[aria-label="Show"] { width: auto; flex: 0 0 auto; min-width: 0; }
 .runactions { max-width: none; }
+.termprof { align-items: center; margin-bottom: 10px; }
+.termprof select { width: auto; max-width: 100%; }

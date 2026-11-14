@@ -332,7 +332,7 @@ async fn connect(host: &str, port: u16, https: bool) -> Result<Box<dyn Io>, Stri
         None => tokio::time::timeout(Duration::from_secs(15), TcpStream::connect((host, port)))
             .await
             .map_err(|_| format!("{}:{}: connection timed out", host, port))?
-            .map_err(|e| format!("{}:{}: {}", host, e, port))?,
+            .map_err(|e| format!("{}:{}: {}", host, port, e))?,
     };
     let _ = tcp.set_nodelay(true);
     if !https {

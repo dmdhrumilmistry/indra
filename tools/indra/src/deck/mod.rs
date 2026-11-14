@@ -3,6 +3,7 @@
 
 pub mod attach;
 pub mod board;
+pub mod claude;
 pub mod cli;
 pub mod confedit;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod knowledge;
 pub mod link;
 pub mod market;
 pub mod nodes;
+pub mod ollama;
 pub mod procs;
 pub mod router;
 pub mod runs;

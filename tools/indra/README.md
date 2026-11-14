@@ -597,6 +597,12 @@ See [Context, memory and learnings](../../docs/guides/context-and-learnings.md).
 
 Two ways to work with agents from a terminal instead of the console's pages.
 
+**`indra claude`, Claude Code on a local model.** `indra claude -m qwen3-coder` checks your
+Ollama server and the model, then starts Claude Code in your terminal with every model call
+going to Ollama (through indra's router, so no credential reaches it); `--subagents MODEL` keeps
+Claude on Anthropic and runs only its subagents locally. See
+[Local models with Ollama](../../docs/guides/local-models.md).
+
 **`indra attach`, in your own terminal.** It talks to a running console with its token: on
 the same machine it finds the console by itself (`indra serve` writes `console.json`, owner-only,
 to the data directory and removes it on exit); elsewhere pass `--url` and `--token` (or

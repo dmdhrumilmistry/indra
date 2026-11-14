@@ -741,7 +741,7 @@ impl AgentOpts {
         o
     }
 
-    fn ollama(&self) -> String {
+    pub(crate) fn ollama(&self) -> String {
         self.ollama_url
             .as_deref()
             .filter(|u| !u.trim().is_empty())
@@ -860,7 +860,7 @@ fn is(p: &Option<String>, name: &str) -> bool {
 
 /// The environment (and for Codex, the flag) that puts an agent, or its
 /// subagents, on Ollama. Variables the profile sets itself win.
-fn provider_env(
+pub(crate) fn provider_env(
     r: &Runner,
     claude: bool,
     o: &AgentOpts,
@@ -875,37 +875,7 @@ fn provider_env(
             );
         };
         if claude {
-            // Through the router, which keeps every credential off Ollama:
-            // Claude Code sends whatever login it has to its base URL.
-            let upstream = env
-                .get("ANTHROPIC_BASE_URL")
-                .filter(|u| !u.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| ollama.clone());
-            let base = crate::deck::router::register(crate::deck::router::Route {
-                ollama: upstream,
-                local: vec![model.clone()],
-                all_local: true,
-                ..Default::default()
-            })?;
-            env.insert("ANTHROPIC_BASE_URL".into(), base);
-            let mut set = |k: &str, v: &str| {
-                env.entry(k.to_string()).or_insert_with(|| v.to_string());
-            };
-            set("ANTHROPIC_AUTH_TOKEN", "ollama");
-            set("ANTHROPIC_API_KEY", "");
-            set("CLAUDE_CODE_OAUTH_TOKEN", "");
-            // Agent files say `model: opus` or `haiku`, and Claude Code makes
-            // background calls with its small model: all of them local too.
-            for k in [
-                "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                "ANTHROPIC_SMALL_FAST_MODEL",
-                "CLAUDE_CODE_SUBAGENT_MODEL",
-            ] {
-                set(k, &model);
-            }
+            crate::deck::ollama::claude_env(&mut env, &model, &ollama, None)?;
         } else if runner_is(r, "codex") {
             args.push("--oss".into());
             env.entry("CODEX_OSS_BASE_URL".into())
