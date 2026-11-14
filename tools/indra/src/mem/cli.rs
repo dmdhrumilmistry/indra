@@ -200,6 +200,16 @@ enum Cmd {
     },
     /// Delete a note (reports the links it leaves dangling)
     Rm { note: String },
+    /// Record a finished security review run (its verified.jsonl) as notes:
+    /// findings, false positives as learnings, class and file hubs
+    RecordRun {
+        /// <TARGET>/.security-harness/<run-id>; the vault defaults to its
+        /// sibling `memory` folder (or --vault)
+        run_dir: PathBuf,
+        /// Print the indra mem commands instead of writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -825,6 +835,19 @@ pub fn recalled_block(n: &Recalled) -> String {
     o
 }
 
+/// Append text to a note (before its Relations section).
+pub fn append_to(root: &std::path::Path, note: &str, text: &str) -> Result<String> {
+    if text.trim().is_empty() {
+        return Err("nothing to append".into());
+    }
+    let _lock = Lock::acquire(root)?;
+    let v = Vault::open(root)?;
+    let n = &v.notes[v.require(note)?];
+    let (doc, crlf) = vault::read_for_edit(&n.path)?;
+    vault::finish_edit(&n.path, &touch(&append_text(&doc, text)), crlf)?;
+    Ok(n.id.clone())
+}
+
 /// Add a typed relation FROM -> TO. False when it was already there.
 pub fn link_notes(root: &std::path::Path, from: &str, to: &str, rel: &str) -> Result<bool> {
     let rel = parse_rel(rel)?;
@@ -891,9 +914,24 @@ pub fn note_detail(v: &Vault, g: &Graph, i: usize) -> serde_json::Value {
 // ---- commands -----------------------------------------------------------
 
 pub fn run(cli: MemArgs) -> Result<ExitCode> {
+    if let Cmd::RecordRun { run_dir, dry_run } = &cli.cmd {
+        let run_dir = std::path::absolute(run_dir).map_err(|e| e.to_string())?;
+        let vault = match &cli.vault {
+            Some(v) => v.clone(),
+            None => run_dir
+                .parent()
+                .map(|p| p.join("memory"))
+                .ok_or("the run directory has no parent")?,
+        };
+        let out = crate::mem::record::record(&run_dir, &vault, *dry_run)
+            .map_err(|e| format!("record-run: {}", e))?;
+        println!("{}", out);
+        return Ok(ExitCode::SUCCESS);
+    }
     let root = vault::locate(cli.vault.clone());
     let json = cli.json;
     match cli.cmd {
+        Cmd::RecordRun { .. } => unreachable!(),
         Cmd::Init { dir } => {
             let dir = dir.unwrap_or(root);
             let created = vault::init(&dir)?;

@@ -119,8 +119,9 @@ skills into a discovery directory. Codex additionally picks up `AGENTS.md` on it
 ```bash
 git clone https://github.com/dmdhrumilmistry/indra
 cd indra
-python3 scripts/sync-agent-skills.py --install agents     # ~/.agents/skills
-python3 scripts/sync-agent-skills.py --install opencode   # ~/.config/opencode/skills
+indra skills install --to agents       # ~/.agents/skills
+indra skills install --to opencode     # ~/.config/opencode/skills
+# without indra: mkdir -p ~/.agents/skills && cp -R skills/* ~/.agents/skills/
 ```
 
 **Graft is installed and set up automatically by the pipeline.** Stage 0 runs `npm install -g
@@ -408,7 +409,7 @@ at the end would mean the most expensive model in the pipeline had already re-co
 conclusion that was written on the PR the whole time. This needs no cache: the state lives
 in the PR, so it works on a cold machine and in CI.
 
-**A local cache makes the rest incremental.** `sh-review-cache` stores each run's file
+**A local cache makes the rest incremental.** `indra review cache` stores each run's file
 hashes, findings and verdicts under your OS cache directory (never in the repo, since a
 cross-repo review runs in a temp clone that gets deleted). The next review re-hunts only
 files whose content actually changed, reuses verdicts for findings that are unchanged, and
@@ -438,9 +439,9 @@ rather than assumed.
 never delivered helped nobody. `--confirm` restores a prompt before posting, `--dry-run`
 sends nothing, `--no-status` posts the review but leaves the commit status alone.
 
-Posting goes through `scripts/sh-pr-post.py` rather than hand-built API calls, because it
+Posting goes through `indra review post` rather than hand-built API calls, because it
 is a multi-step operation with a mandatory tail: review, then status, then receipts, with
-a 422 recovered by moving the comment rather than shifting a line number. The script
+a 422 recovered by moving the comment rather than shifting a line number. It
 **never exits leaving the status at `pending`** - if the review cannot be posted it still
 sets `error`, saying the tooling failed rather than accusing the PR.
 
@@ -454,9 +455,9 @@ Every run records what it cost, so "the cache is working" and "reviews got slowe
 being matters of opinion.
 
 ```bash
-python3 <skill>/scripts/sh-metrics.py path      # where records live
-python3 <skill>/scripts/sh-metrics.py report    # aggregate, by model
-python3 <skill>/scripts/sh-metrics.py purge --older-than-days 30
+indra review metrics path      # where records live
+indra review metrics report    # aggregate, by model
+indra review metrics purge --older-than-days 30
 ```
 
 Two append-only JSONL files - `runs.jsonl` (repo, PR, tier, verdict, totals, the flags you
@@ -474,14 +475,11 @@ Linux follows the XDG Base Directory spec, so both honour `XDG_DATA_HOME` and
 `XDG_CACHE_HOME` when set and fall back to `~/.local/share` and `~/.cache` when they are
 not. Override either directly with `SH_METRICS_DIR` and `SH_REVIEW_CACHE_DIR`.
 
-**On `python` vs `python3`:** most Linux distributions ship `python3` and have no `python`
-at all, so the examples here use `python3`. The bundled scripts carry a
-`#!/usr/bin/env python3` shebang and are executable, so `./scripts/sh-metrics.py report`
-works directly on Linux and macOS. The skill resolves
-`PY="$(command -v python3 || command -v python)"` once per run, which covers all three
-platforms including Git Bash on Windows.
+**One binary, no interpreter.** The cache, the metrics, posting, the memory recorder and
+the publish planner are all `indra` subcommands, so a review needs no Python on any
+platform; install `indra` once (see [the indra CLI](tools/indra/README.md#install)).
 
-**Strictly local.** Neither script contains any network code or reporting endpoint.
+**Strictly local.** Neither the cache nor the metrics contain any network code or reporting endpoint.
 Anything token-shaped is redacted before it is written, because local files get pasted
 into issues.
 
@@ -633,7 +631,7 @@ Each run records what it did in `.github/kb-update/last-run-summary.md`.
 ## Roadmap
 
 - ~~Codex / Cursor mirror wiring.~~
-  ✅ Shipped: `AGENTS.md`, a Gemini CLI extension, and `scripts/sync-agent-skills.py`
+  ✅ Shipped: `AGENTS.md`, a Gemini CLI extension, and `indra skills install`
   for `.agents/skills` and opencode. See [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md).
 - ~~Optional live-fetch augmentation of knowledge bases (PortSwigger/OWASP/CWE) on top of curated references.~~
   ✅ Shipped as the scheduled knowledge-base updater above.

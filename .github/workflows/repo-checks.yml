@@ -1,0 +1,32 @@
+name: repo-checks
+
+# Checks that apply to the whole repository, run with the indra binary itself
+# (no Python): the generated skills/ mirror matches plugins/indra/skills/, and
+# no em or en dashes crept in (see AGENTS.md).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build indra
+        run: cargo build --locked --quiet --no-default-features --manifest-path tools/indra/Cargo.toml
+      - name: Skills mirror is current
+        run: tools/indra/target/debug/indra skills sync --check
+      - name: No em or en dashes
+        run: tools/indra/target/debug/indra dev dashes

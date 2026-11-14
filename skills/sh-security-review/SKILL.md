@@ -208,8 +208,7 @@ Follow the `sh-memory` skill. First the mechanical part, which records every ver
 finding and every false positive into the target vault (no evidence, payloads or secrets are copied):
 
 ```bash
-PY="$(command -v python3 || command -v python)"
-"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/sh-memory/scripts/sh-memory-record.py" "<run_dir>"
+indra mem record-run "<run_dir>"
 ```
 
 Then write **up to five** judged learnings from this run (guards that caused false positives, framework

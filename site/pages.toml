@@ -1,0 +1,173 @@
+# The documentation pages of the website, in menu order (`indra dev site` builds them).
+#
+# sources: the Markdown each page is made of. `sections` picks H2 sections of a file by
+# title ("" is the text before the first H2); without it the whole file is the page.
+
+[[page]]
+group = "Start"
+slug = "index"
+title = "Getting started"
+description = "Install indra for Claude Code, Gemini CLI, Codex or opencode, and run your first review."
+[[page.source]]
+file = "README.md"
+sections = ["Install", "Usage"]
+
+[[page]]
+group = "Start"
+slug = "how-it-works"
+title = "How it works"
+description = "The review pipeline stage by stage, what the plugin contains, and how to add a vulnerability class."
+[[page.source]]
+file = "README.md"
+sections = ["How it works", "What's inside", "Extending"]
+
+[[page]]
+group = "Reviews"
+slug = "pr-review"
+title = "Pull request review"
+description = "Review one pull request, post inline comments, and re-review incrementally."
+[[page.source]]
+file = "README.md"
+sections = ["Pull request review"]
+
+[[page]]
+group = "indra CLI"
+slug = "cli"
+title = "The indra CLI"
+description = "One small binary: graph memory and an agent web console. Install and build it."
+[[page.source]]
+file = "tools/indra/README.md"
+sections = ["", "Install", "Review tooling", "Development"]
+
+[[page]]
+group = "indra CLI"
+slug = "memory"
+title = "Memory"
+description = "indra mem: Markdown notes with typed links, graph-aware recall, and graph views."
+[[page.source]]
+file = "tools/indra/README.md"
+sections = ["Memory: `indra mem`"]
+
+[[page]]
+group = "indra CLI"
+slug = "console"
+title = "Agent console"
+description = "indra serve: view and edit agents, watch runs, launch agents and follow them live."
+[[page.source]]
+file = "tools/indra/README.md"
+sections = ["Console: `indra serve`"]
+
+[[page]]
+group = "indra CLI"
+slug = "orchestration"
+title = "Nodes and orchestration"
+description = "Run agents on this machine and over SSH, and chain them into workflows."
+[[page.source]]
+file = "tools/indra/README.md"
+sections = ["Nodes and orchestration"]
+
+[[page]]
+group = "Guides"
+slug = "processes"
+title = "Handling agent processes"
+description = "Launch, watch, stop and clean up after agents; logs, capacity, permissions, troubleshooting."
+[[page.source]]
+file = "docs/guides/processes.md"
+
+[[page]]
+group = "Guides"
+slug = "pivoting"
+title = "Pivoting agents"
+description = "Redirect an agent: continue its session with a new instruction, or start fresh with a brief."
+[[page.source]]
+file = "docs/guides/pivoting.md"
+
+[[page]]
+group = "Guides"
+slug = "knowledge-base"
+title = "Knowledge base and integrations"
+description = "Import Obsidian, Notion and GitHub wikis; publish findings to Jira, Confluence, GitHub and Notion."
+[[page.source]]
+file = "docs/guides/knowledge-base.md"
+
+[[page]]
+group = "Guides"
+slug = "marketplace"
+title = "Marketplace"
+description = "Browse Claude Code plugin marketplaces and skill repositories; install for Claude Code, Codex or a harness."
+[[page.source]]
+file = "docs/guides/marketplace.md"
+
+[[page]]
+group = "Guides"
+slug = "plan-and-delegate"
+title = "Plan and delegate"
+description = "A strong model plans, cheaper or local models build each step, a reviewer checks; any runner per role."
+[[page.source]]
+file = "docs/guides/plan-and-delegate.md"
+
+[[page]]
+group = "Guides"
+slug = "context-and-learnings"
+title = "Context, memory and learnings"
+description = "Start agents with the relevant memory, collect what they learn, and manage vaults in the console."
+[[page.source]]
+file = "docs/guides/context-and-learnings.md"
+
+[[page]]
+group = "Guides"
+slug = "board"
+title = "The board and trackers"
+description = "Work items run by agents, synced with Jira, GitHub Issues and ClickUp."
+[[page.source]]
+file = "docs/guides/board.md"
+
+[[page]]
+group = "Project"
+slug = "architecture"
+title = "Architecture"
+description = "How indra controls agents across machines: profiles, secrets, transport, the board and graph workflows."
+[[page.source]]
+file = "docs/architecture.md"
+
+[[page]]
+group = "Project"
+slug = "kb-updates"
+title = "Knowledge-base updates"
+description = "The scheduled workflows that keep the vulnerability knowledge bases current."
+[[page.source]]
+file = "README.md"
+sections = ["Automated knowledge-base updates"]
+
+[[page]]
+group = "Project"
+slug = "distribution"
+title = "Distribution"
+description = "How indra is packaged for each agent, and the public listings."
+[[page.source]]
+file = "docs/DISTRIBUTION.md"
+
+# Headings that are not on any page but are linked to: where they live now.
+[[alias]]
+file = "README.md"
+heading = "indra-memory-and-agent-console"
+page = "cli"
+id = ""
+
+[[alias]]
+file = "README.md"
+heading = "long-term-memory-indra-mem"
+page = "memory"
+id = ""
+
+[[alias]]
+file = "README.md"
+heading = "agent-console-indra-serve"
+page = "console"
+id = ""
+
+[[alias]]
+file = "README.md"
+heading = "agents-on-many-machines-indra-nodes-indra-run"
+page = "orchestration"
+id = ""

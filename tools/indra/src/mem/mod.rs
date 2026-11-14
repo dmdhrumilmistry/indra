@@ -8,6 +8,7 @@ pub mod frontmatter;
 pub mod graph;
 pub mod import;
 pub mod note;
+pub mod record;
 pub mod search;
 pub mod time;
 pub mod tree;

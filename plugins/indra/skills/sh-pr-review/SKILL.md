@@ -135,19 +135,18 @@ source. Do not send source or findings to any external service.
 
 ## Phase 0: resolve the PR
 
-1. `TS` from Current state, and **resolve the Python interpreter once**, before anything
-   below needs it:
+1. `TS` from Current state, and **check for `indra` once**, before anything below needs
+   it:
 
 ```
-PY="$(command -v python3 || command -v python)"
+command -v indra >/dev/null || echo "indra is not installed"
 ```
 
-   Most Linux distributions ship `python3` and have no `python` at all, so a bare
-   `python` fails on a default Debian or Ubuntu box. The bundled scripts also carry a
-   `#!/usr/bin/env python3` shebang and are executable, so `./scripts/<name>.py` works
-   directly on Linux and macOS; `$PY` is the one form that works on all three platforms,
-   Git Bash included. If neither interpreter is found, say so and stop: the cache, the
-   metrics and the posting step all need it.
+   The cache, the metrics and the posting step are `indra review` commands (one binary,
+   no interpreter). If it is missing, install it (a prebuilt `indra-<target>` from the
+   latest `indra-v*` release, or `cargo install --locked --git
+   https://github.com/dmdhrumilmistry/indra indra`; see `references/tooling-setup.md`).
+   If that fails, say so and stop.
 2. **Resolve the PR into a repo and a number.** Set `REPO` and `N`, and use both
    everywhere after this. Never call a `gh pr` command without `--repo "$REPO"`: without
    it `gh` silently targets the current directory's remote, which is the wrong repo the
@@ -243,14 +242,13 @@ directory into the worktree. Substitute the literal path into every delegation p
 9. Initialise `run.md` and `audit/orchestrator.jsonl`, and **open a metrics run**:
 
 ```
-METRICS="<skill dir>/scripts/sh-metrics.py"
-"$PY" "$METRICS" start --run-id "pr-$N-$TS" --repo "$REPO" --pr "$N" \
+indra review metrics start --run-id "pr-$N-$TS" --repo "$REPO" --pr "$N" \
   --tier <tier> --cache "<hit | miss: reason>" --arguments "<the flags the user passed>"
 ```
 
-Metrics are **local only**. The script has no network code and no endpoint; records land
-under your own data directory and stay there. `sh-metrics.py path` prints where, and
-`purge` deletes them. Anything token-shaped in the arguments is redacted before it is
+Metrics are **local only**. `indra review metrics` has no network code and no endpoint;
+records land under your own data directory and stay there. `indra review metrics path`
+prints where, and `purge` deletes them. Anything token-shaped in the arguments is redacted before it is
 written, because local files get pasted into issues.
 10. **Set the status to `pending`** (unless `--no-status` or `--dry-run`), against the head
    SHA you just recorded:
@@ -305,18 +303,17 @@ Do this yourself with Bash and Grep. It must cost nothing.
 
    **b. The cached run**, unless `--no-cache` or `--refresh-cache`:
 
-   The cache is a script bundled with this skill, at `scripts/sh-review-cache.py` next
-   to this file. Under Claude Code that is
-   `${CLAUDE_PLUGIN_ROOT}/skills/sh-pr-review/scripts/sh-review-cache.py`; elsewhere
-   resolve it relative to the skill directory. It finds the knowledge bases by walking up
-   from itself, so it works from a plugin, a Gemini extension, or a bare skills tree.
+   The cache is `indra review cache`. Its keys include a hash of the `sh-kb-*` knowledge
+   bases, so give it the folder that holds them: the parent of this skill's directory
+   (under Claude Code, `${CLAUDE_PLUGIN_ROOT}/skills`). That works from a plugin, a Gemini
+   extension, or a bare skills tree.
 
    ```
-   CACHE="<skill dir>/scripts/sh-review-cache.py"
-   "$PY" "$CACHE" get --repo "$REPO" --pr "$N" --model "<the model you are running as>"
+   SKILLS="<the parent of this skill's directory>"
+   indra review cache --skills "$SKILLS" get --repo "$REPO" --pr "$N" --model "<the model you are running as>"
    ```
 
-   Pass the model you are actually running as. The script treats an unspecified model as
+   Pass the model you are actually running as. The cache treats an unspecified model as
    a miss on purpose: a haiku verdict and an opus verdict are not interchangeable, and
    silently reusing the weaker one as the stronger is worse than re-running.
 
@@ -340,7 +337,7 @@ paying a lot to learn nothing.
 1. The cache hit (so knowledge bases, skill version, and model all still match).
 2. The set of PR-changed paths is identical to the cached run's.
 3. Every one of those paths has an identical content hash. Use
-   `"$PY" "$CACHE" changed --repo "$REPO" --pr "$N" --file <current hashes>`; the
+   `indra review cache --skills "$SKILLS" changed --repo "$REPO" --pr "$N" --file <current hashes>`; the
    `changed` and `vanished` lists must both be empty.
 4. The added-line sets in `diff-index.json` are identical to the cached run's.
 5. **The base moved under the PR without touching anything the findings depend on.**
@@ -395,7 +392,7 @@ and the round-trip is not worth it.
 **Reuse the cached map when it is still valid.** On a cache hit, copy the cached
 `codebase-map.json` into `<LOG_DIR>` and skip this phase entirely when every path the map
 covers still has the content hash it had when the map was built (the `reusable` list from
-`sh-review-cache changed`). The structure of a repository does not change because someone
+`indra review cache changed`). The structure of a repository does not change because someone
 pushed a fix to one file, and re-mapping it every push is the second most expensive thing
 this skill can do after re-verifying.
 
@@ -425,7 +422,7 @@ files only, and have it report which added or bumped packages carry known CVEs.
 not launch all fifteen out of habit.
 
 **Narrow each hunter to what actually changed since the last review.** On a cache hit,
-split the PR's changed paths with `sh-review-cache changed` and give the hunter only the
+split the PR's changed paths with `indra review cache changed` and give the hunter only the
 `changed` list. Findings on `reusable` paths are carried forward verbatim from the cached
 run, because the file is byte-identical and the knowledge base that judged it has not
 moved. A push that fixes a typo in one file then re-hunts one file, not ten.
@@ -440,7 +437,7 @@ Two rules that keep this honest:
 **Record every agent you launch**, as it finishes:
 
 ```
-"$PY" "$METRICS" event --run-id "pr-$N-$TS" --phase hunt --agent sh-hunter \
+indra review metrics event --run-id "pr-$N-$TS" --phase hunt --agent sh-hunter \
   --vuln-class <class> --model <model> --duration-ms <ms> --status <ok|failed>
 ```
 
@@ -580,10 +577,10 @@ restores the prompt; `--dry-run` still sends nothing.
    summary body, the counts (posted, deduped, aggravated, pre-existing, unanchorable),
    and, stated plainly, **the verdict and what it will do to the check**.
 
-2. **Post with the script**, not by hand:
+2. **Post with `indra review post`**, not by hand:
 
 ```
-"$PY" "<skill dir>/scripts/sh-pr-post.py" post \
+indra review post \
   --repo "$REPO" --pr "$N" \
   --payload <LOG_DIR>/review/review-payload.json \
   --verdict <LOG_DIR>/review/verdict.json \
@@ -593,7 +590,7 @@ restores the prompt; `--dry-run` still sends nothing.
 Posting is a multi-step operation with a mandatory tail: the review goes up, the status
 must follow, receipts must be written, and a 422 must be recovered from by moving a
 comment rather than shifting a line number. Done by hand the step that gets skipped is
-usually the status, which is the one a branch protection rule depends on. The script does
+usually the status, which is the one a branch protection rule depends on. It does
 all of it or reports exactly which part failed, and **never exits leaving the status at
 `pending`**: if the review cannot be posted it still sets `error`, with a description
 saying the tooling failed rather than accusing the PR of a finding it never made.
@@ -626,7 +623,7 @@ still analysed the code.
 Build the entry and store it:
 
 ```
-"$PY" "$CACHE" put --repo "$REPO" --pr "$N" --model "<model>" --file <LOG_DIR>/review/cache-entry.json
+indra review cache --skills "$SKILLS" put --repo "$REPO" --pr "$N" --model "<model>" --file <LOG_DIR>/review/cache-entry.json
 ```
 
 `cache-entry.json` holds:
@@ -640,7 +637,7 @@ Build the entry and store it:
 - `posted_fingerprints`: what actually landed on the PR.
 - The recon neighbourhood, if a map was built.
 
-The key fields (knowledge base hash, skill version, model) are added by the script. Do not
+The key fields (knowledge base hash, skill version, model) are added by `indra review cache`. Do not
 write them by hand: the point of computing them there is that they cannot drift from what
 the next `get` checks.
 
@@ -650,7 +647,7 @@ the next `get` checks.
    at Tier 0: a run that never finishes is exactly the one worth being able to count.
 
 ```
-"$PY" "$METRICS" finish --run-id "pr-$N-$TS" --verdict <verdict> --status-state <state> \
+indra review metrics finish --run-id "pr-$N-$TS" --verdict <verdict> --status-state <state> \
   --findings <n> --posted <n> --deduped <n> --reused-files <n> --reused-verdicts <n> \
   --agents-launched <n> --duration-ms <ms>
 ```

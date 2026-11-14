@@ -20,6 +20,8 @@ and Indra, king of the devas, is a fitting name for the thing that commands the 
 | `indra ls`, `indra check` | The console's picture in the terminal, and a config check. |
 | `indra nodes`, `indra run` | Agents on this machine and on remote ones over SSH: node health, and multi-step workflows run in dependency order across them. |
 | `indra init` | A commented `indra.toml` for custom harnesses, runners and presets. |
+| `indra review`, `indra publish`, `indra mem record-run` | The deterministic parts of a review: the PR review cache, local metrics, posting to GitHub, publish plans, recording a run into memory. See [Review tooling](#review-tooling). |
+| `indra skills` | Sync the skills mirror, or install the skills for Claude Code, Codex or opencode. |
 
 The [security harness](../../README.md) is the default profile, any Claude Code project is
 picked up automatically, and any other harness is a few lines of TOML.
@@ -792,6 +794,24 @@ spread over three machines.
 
 Remote nodes need a POSIX shell (Linux, macOS, BSD). `local` works everywhere.
 
+## Review tooling
+
+The deterministic parts of a review are subcommands of the same binary, so the indra plugin's
+skills need no interpreter on any platform:
+
+| Command | What it does |
+|---|---|
+| `indra mem record-run <run_dir>` | Record a finished run's `verified.jsonl` into memory: findings, false positives as learnings, class and file hubs, `chains-with` links. A finding seen again (by fingerprint) gets a "seen again" line. Never copies evidence, payloads or secrets. `--dry-run` prints the `indra mem` commands instead. |
+| `indra publish plan <run_dir> --to jira\|github\|confluence\|notion` | The exact records to publish, with `indra-fingerprint:` markers for de-duplication; refuses if evidence or a payload would leak into one. |
+| `indra review cache --skills <dir> get\|put\|changed\|stat\|prune\|clear\|key\|kb-version` | The PR review cache. Keys hash every `sh-kb-*` knowledge base, the skill version and the model, and it fails closed: a stale "clean" never suppresses a finding. |
+| `indra review metrics start\|event\|finish\|report\|path\|purge` | Local-only run metrics (tokens, duration, model, cache reuse) in append-only JSONL; credentials are redacted before they are written. |
+| `indra review post --repo R --pr N --payload P --verdict V` | Post the review and set the commit status through `gh`, recovering a 422 by moving comments into the body, and never leaving the status at `pending`. |
+| `indra skills sync [--check]`, `indra skills install --to agents\|claude\|opencode` | Keep the repository's `skills/` mirror current, or install the skills where an agent looks for them. |
+
+Maintainer commands: `indra dev site` builds the website (`site/` plus the docs pages listed in
+`site/pages.toml`, rendered from the Markdown, with a broken-link check), and `indra dev dashes
+[--fix]` finds em and en dashes.
+
 ## Development
 
 ```bash
@@ -804,7 +824,10 @@ cargo run -- serve --target /path/to/project
 ```
 
 `src/mem/` is the memory engine, `src/deck/` the console, `ui/` its front end (plain
-JavaScript, embedded at build time). Dependencies: `axum`, `tokio`, `clap`, `serde`,
+JavaScript, embedded at build time), `src/review.rs`, `src/publish.rs` and
+`src/mem/record.rs` the review tooling, `src/skills.rs` and `src/site.rs` the maintainer
+tools. The tests start stand-in agents written in Python, so `cargo test` needs `python3` on
+Unix; nothing that ships does. Dependencies: `axum`, `tokio`, `clap`, `serde`,
 `serde_json`, `toml`, `getrandom` (and `libc` on Unix).
 
 MIT licensed, like the rest of this repository.

@@ -45,9 +45,8 @@ fails, check the provider's current documentation.
 ## Step 2 - Build the plan
 
 ```bash
-PY="$(command -v python3 || command -v python)"
 RUN="<TARGET>/.security-harness/$(cat <TARGET>/.security-harness/latest)"
-"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/sh-publish/scripts/sh-publish-plan.py" "$RUN" --to jira
+indra publish plan "$RUN" --to jira
 #   --to jira|github|confluence|notion
 #   --min-severity medium     (default; info|low|medium|high|critical)
 #   --status verified         (default; add needs-runtime to include those)

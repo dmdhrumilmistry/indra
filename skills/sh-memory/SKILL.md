@@ -76,15 +76,15 @@ indra mem recall "<class> <framework>" -n 5 --max-chars 2500          # global v
 
 ### Mechanical part: the run's findings
 
-The bundled script turns `verified.jsonl` into notes: one per verified / needs-runtime finding, one
+`indra mem record-run` turns `verified.jsonl` into notes: one per verified / needs-runtime finding, one
 `false-positive` learning per refuted candidate, hubs per class and per affected file, and `chains-with`
 edges. Findings seen in an earlier run are matched by fingerprint and marked "seen again" instead of
 duplicated. It never copies `evidence`, `payload`, `poc` or `data_flow`.
 
 ```bash
-PY="$(command -v python3 || command -v python)"
-"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/sh-memory/scripts/sh-memory-record.py" "<run_dir>"
-# --vault DIR to override, --dry-run to preview the indra commands
+indra mem record-run "<run_dir>"
+# the vault defaults to <run_dir>/../memory; `indra mem --vault DIR record-run ...` to override,
+# --dry-run to preview the indra mem commands it would run
 ```
 
 ### Judgement part: a few real learnings

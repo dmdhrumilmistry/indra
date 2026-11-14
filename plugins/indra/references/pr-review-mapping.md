@@ -349,7 +349,7 @@ because the state lives in the PR.
 
 ### The local cache
 
-`scripts/sh-review-cache.py`, bundled with the skill. Deterministic get/put, so the model
+`indra review cache`. Deterministic get/put, so the model
 never hand-manages cache state: a cache is exact bookkeeping, and a model asked to keep it
 will eventually report a hit it cannot justify.
 
@@ -427,7 +427,7 @@ Without it the cache is unfalsifiable: a quick run looks like a working cache, a
 notices when it stops hitting. A second review of an unchanged PR that reports zero reuse
 is a bug, and only this table surfaces it.
 
-`sh-review-cache stat` shows what is cached and flags entries whose KB hash has gone
+`indra review cache stat` shows what is cached and flags entries whose KB hash has gone
 stale. `prune` drops expired ones; `clear` drops everything.
 
 ## Verdict and commit status

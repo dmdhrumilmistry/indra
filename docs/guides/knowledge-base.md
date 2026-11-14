@@ -138,13 +138,12 @@ What the skill does:
    second ticket.
 4. **Never leaks.** Records hold location, severity, CWE, impact, why it was confirmed, and the
    fix. Evidence, payloads, proofs of concept and data-flow traces stay in the local run
-   directory, and the plan script refuses to run if one of them shows up in a finding's text.
+   directory, and the planner refuses to run if one of them shows up in a finding's text.
 5. **Remembers** each ticket's link on the finding's memory note, so the next review knows it is
    tracked.
 
 To preview a plan yourself:
 
 ```bash
-python3 plugins/indra/skills/sh-publish/scripts/sh-publish-plan.py \
-  <target>/.security-harness/<run> --to jira --min-severity high
+indra publish plan <target>/.security-harness/<run> --to jira --min-severity high
 ```
