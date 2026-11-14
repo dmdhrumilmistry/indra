@@ -164,9 +164,11 @@ The CLI is released on its own tags, `indra-v<version>`, separate from the plugi
    `git tag indra-v0.2.0 && git push origin indra-v0.2.0`.
 3. CI tests on Linux, macOS and Windows, builds the five binaries (Linux x86_64 and arm64
    static, macOS Apple silicon and Intel, Windows x86_64), uploads each with its `.sha256`, then
-   adds `SHA256SUMS`, `install.sh` and `install.ps1` to the release. It is not marked "latest",
-   so the plugin's releases keep that spot; the installers and `indra update` look for the
-   newest `indra-v*` release themselves.
+   adds `SHA256SUMS`, `install.sh` and `install.ps1` to the release, and only then marks it the
+   repository's **Latest** release (it is created as not-latest, so a half-uploaded release never
+   is). The installers and `indra update` look for the newest `indra-v*` release themselves.
+   To mark an existing release Latest without building, run the workflow with **latest** set to
+   its version (`0.5.0`).
 4. Check the one-liners against it:
    `curl -fsSL https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh | sh`
    and, on Windows, `irm https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1 | iex`.
