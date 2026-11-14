@@ -63,7 +63,7 @@ indra skills install --to agents
 
 opencode discovers `SKILL.md` from `.agents/skills/`, `~/.agents/skills/`,
 `.claude/skills/`, `~/.claude/skills/`, `.opencode/skills/`, and
-`~/.config/opencode/skills/`. The `--install` flag writes to whichever you want:
+`~/.config/opencode/skills/`. `indra skills install` writes to whichever you want:
 
 ```bash
 indra skills install --to agents                       # ~/.agents/skills

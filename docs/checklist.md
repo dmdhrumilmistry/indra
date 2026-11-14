@@ -28,23 +28,26 @@ their section; nothing is deleted, items are checked off with the change that di
 ## Review loop
 
 - [x] Start a PR review from the console, triage findings, compare runs (#33)
+- [x] Claude Code on Ollama end to end: `indra claude`, terminal profiles, checks, pulls (#34)
 
 ## Partly implemented (from the audit)
 
-- [ ] Settings > General save drops `[server] webrtc` and `ice_servers`; no UI for them
-- [ ] Runner form drops `model_args` (Customize or Edit on codex or gemini breaks `model`)
-- [ ] Workflow "Edit as form" drops `component`, `workflow` and `pos` on tasks
-- [ ] Settings forms in general: keep keys a form does not show instead of dropping them
-- [ ] Nodes that dial in (no `ssh`): the form requires ssh, the summary prints "undefined",
-      `/api/nodes/runs` and `indra nodes` only work over SSH
-- [ ] TURN servers cannot carry a username and credential
-- [ ] Linear is named in the architecture docs but there is no Linear connector
-- [ ] A fresh pivot cannot switch runner, profile or model (the guide says it can)
-- [ ] Tracker import stops at 50 items (no paging)
-- [ ] Leftover "bundled script" wording and a stale `scripts/` folder after the Python removal
-- [ ] Dead `/api/memory` endpoint
-- [ ] Board: the Run form cannot pick a runner; runs on remote nodes cannot be opened
-- [ ] tools/indra/README.md Settings table lists 7 of the 13 tabs
+- [x] Settings > General save drops `[server] webrtc` and `ice_servers`; no UI for them
+- [x] Runner form drops `model_args` (Customize or Edit on codex or gemini breaks `model`)
+- [x] Workflow "Edit as form" drops `component`, `workflow` and `pos` on tasks
+- [x] Settings forms in general: keep keys a form does not show instead of dropping them
+- [x] Nodes that dial in (no `ssh`): the form requires ssh, the summary prints "undefined",
+      `/api/nodes/runs` and `indra nodes` only work over SSH (runs now come over the link)
+- [x] TURN servers cannot carry a username and credential
+- [x] Linear is named in the architecture docs but there is no Linear connector
+- [x] A fresh pivot cannot switch runner, profile or model (the guide says it can)
+- [x] Tracker import stops at 50 items (no paging)
+- [x] Leftover "bundled script" wording and a stale `scripts/` folder after the Python removal
+- [x] Dead `/api/memory` endpoint
+- [x] Board: the Run form cannot pick a runner
+- [ ] Runs on remote nodes are listed but cannot be opened, triaged or posted (needs the run's
+      files from the node, over SSH or the link)
+- [x] tools/indra/README.md Settings table lists 7 of the 13 tabs
 
 ## Not planned yet (the docs say so)
 

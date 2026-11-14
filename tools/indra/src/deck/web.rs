@@ -556,26 +556,6 @@ async fn graph(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Js
     Ok(Json(json!(discover::graph(h, &defs))))
 }
 
-async fn memory(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
-    let h = &app.harness(q.h.as_deref())?;
-    let list: Vec<Value> = h
-        .memory_paths()
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let (notes, links) = match crate::mem::vault::Vault::open(p) {
-                Ok(v) if p.is_dir() => {
-                    let g = crate::mem::graph::Graph::build(&v);
-                    (v.notes.len(), g.edge_count())
-                }
-                _ => (0, 0),
-            };
-            json!({ "index": i, "path": p.display().to_string(), "exists": p.is_dir(), "notes": notes, "links": links })
-        })
-        .collect();
-    Ok(Json(json!(list)))
-}
-
 #[derive(Deserialize)]
 struct MemQ {
     h: Option<String>,
@@ -704,7 +684,28 @@ fn apply_link_settings(procs: &Procs, s: &Settings) {
         s.webrtc && cfg!(feature = "webrtc"),
         std::sync::atomic::Ordering::SeqCst,
     );
-    *l.ice_servers.lock().unwrap() = s.ice_servers.clone();
+    // A TURN credential may be a secret reference: resolved here, on the hub,
+    // and sent to nodes over their authenticated link.
+    let ice = s
+        .ice_servers
+        .iter()
+        .map(|x| {
+            let mut x = x.clone();
+            if crate::deck::secrets::reference(&x.credential).is_some() {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("TURN".to_string(), x.credential.clone());
+                match procs.vault().resolve(&m, None, LOCAL) {
+                    Ok((v, _)) => x.credential = v.get("TURN").cloned().unwrap_or_default(),
+                    Err(e) => {
+                        eprintln!("indra: TURN server {}: {}", x.urls.join(" "), e);
+                        x.credential.clear();
+                    }
+                }
+            }
+            x
+        })
+        .collect();
+    *l.ice_servers.lock().unwrap() = ice;
 }
 
 fn check_prompt(p: &str) -> ApiResult<&str> {
@@ -857,11 +858,19 @@ struct PivotReq {
     /// Leave the current agent running; a continue pivot then branches the session.
     #[serde(default)]
     keep_running: bool,
+    /// A fresh start may switch profile and runner; either may change the
+    /// model, permission mode and the rest (`opts`).
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    runner: Option<String>,
+    #[serde(default)]
+    opts: nodes::AgentOpts,
 }
 
-/// Give an agent a new direction. It runs on the same node, in the same
-/// target, with the same runner: an agent session lives on the machine where
-/// it ran.
+/// Give an agent a new direction. It runs on the same node and target. A
+/// continued session keeps its runner (it lives in that runner's history);
+/// a fresh start may take another profile, runner or model.
 async fn proc_pivot(
     State(app): State<Arc<App>>,
     UrlPath(id): UrlPath<u64>,
@@ -881,6 +890,42 @@ async fn proc_pivot(
         _ => return Err(bad("mode must be 'continue' or 'fresh'")),
     };
     let view = p.view();
+    let settings = app.settings();
+    let profile = r.profile.clone().filter(|x| !x.is_empty());
+    let runner = r.runner.clone().filter(|x| !x.is_empty());
+    if cont
+        && (runner.as_deref().is_some_and(|x| x != p.runner_name())
+            || profile.as_deref().is_some_and(|x| Some(x) != p.profile()))
+    {
+        return Err(bad(
+            "a continued session stays with its runner and profile; pivot with a fresh start to switch",
+        ));
+    }
+    // The runner and options it runs with: the original's, or a new profile's,
+    // with this pivot's changes on top.
+    let (runner_name, agent) = match (&profile, cont) {
+        (Some(pf), false) => resolve_agent(
+            &settings,
+            Some(pf),
+            runner.as_deref().unwrap_or(""),
+            &r.opts,
+        )?,
+        _ => {
+            let a = p.opts().with(&r.opts);
+            a.validate().map_err(bad)?;
+            (
+                runner
+                    .clone()
+                    .unwrap_or_else(|| p.runner_name().to_string()),
+                a,
+            )
+        }
+    };
+    let new_profile = if cont {
+        p.profile().map(String::from)
+    } else {
+        profile.clone().or_else(|| p.profile().map(String::from))
+    };
     // Check everything that can fail before touching the running agent.
     if cont && !p.can_resume() {
         return Err(bad(format!(
@@ -894,15 +939,10 @@ async fn proc_pivot(
         ));
     }
     if p.node_name() == LOCAL {
-        if !app
-            .settings()
-            .runners
-            .iter()
-            .any(|x| x.name == p.runner_name())
-        {
-            return Err(bad("its runner is no longer configured"));
+        if !settings.runners.iter().any(|x| x.name == runner_name) {
+            return Err(bad(format!("runner '{}' is not configured", runner_name)));
         }
-    } else if app.settings().node(p.node_name()).is_none() {
+    } else if settings.node(p.node_name()).is_none() {
         return Err(bad("its node is no longer configured"));
     }
     let was_running = p.is_running();
@@ -935,9 +975,10 @@ async fn proc_pivot(
             None
         },
         parent: Some(id),
-        // The same model, mode and environment as the agent it continues.
-        agent: p.opts().clone(),
-        profile: p.profile().map(String::from),
+        // The same model, mode and environment as the agent it continues,
+        // unless this pivot changes them.
+        agent,
+        profile: new_profile,
         // A continuation already has the memory it was given; it reflects
         // at the end if the original would have.
         memory: vec![],
@@ -945,11 +986,10 @@ async fn proc_pivot(
     };
     let harness = p.harness_name().to_string();
     let new = if p.node_name() == LOCAL {
-        let settings = app.settings();
         let runner = settings
             .runners
             .iter()
-            .find(|x| x.name == p.runner_name())
+            .find(|x| x.name == runner_name)
             .ok_or_else(|| bad("its runner is no longer configured"))?;
         let target = std::path::PathBuf::from(p.target());
         app.procs.start_with(
@@ -962,14 +1002,14 @@ async fn proc_pivot(
             opts,
         )
     } else {
-        let settings = app.settings();
         let node = settings
             .node(p.node_name())
             .ok_or_else(|| bad("its node is no longer configured"))?;
+        nodes::validate_name(&runner_name).map_err(bad)?;
         app.procs.start_with(
             Launch::Remote {
                 node,
-                runner: p.runner_name(),
+                runner: &runner_name,
                 harness: &harness,
                 prompt: &new_prompt,
                 target: p.target(),
@@ -1089,12 +1129,28 @@ async fn node_runs(
     let n = settings
         .node(&q.node)
         .ok_or_else(|| not_found("unknown node"))?;
-    let Some(spec) = RunsSpec::for_node(h, &n.targets) else {
+    // A node that dials in reports its own targets when the config lists none.
+    let link = app.procs.links().get(&q.node).filter(|l| l.connected());
+    let targets = match (&link, n.targets.is_empty()) {
+        (Some(l), true) => l.targets(),
+        _ => n.targets.clone(),
+    };
+    let Some(spec) = RunsSpec::for_node(h, &targets) else {
         return Ok(Json(json!([])));
     };
-    let v = nodes::remote_runs(n, &spec)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    // Over its link when it is connected (the only way for a node without
+    // SSH), else over SSH.
+    let v = if let Some(l) = link {
+        l.request("runs", json!(spec), 30).await
+    } else if n.ssh.is_empty() {
+        Err(format!(
+            "node '{}' dials in and is not connected now",
+            n.name
+        ))
+    } else {
+        nodes::remote_runs(n, &spec).await
+    }
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
     Ok(Json(v))
 }
 
@@ -2254,7 +2310,6 @@ pub fn router(app: Arc<App>) -> Router {
                 .delete(def_delete),
         )
         .route("/api/graph", get(graph))
-        .route("/api/memory", get(memory))
         .route("/api/memory/graph", get(memory_graph))
         .route("/api/runs", get(runs_list))
         .route("/api/run", get(run_get))
@@ -3738,6 +3793,46 @@ while True:
             last
         );
         assert!(!last.contains("--resume"));
+
+        // Fresh with another profile and model: the new agent runs with them.
+        let mut st = (*app.settings()).clone();
+        st.profiles.push(
+            serde_json::from_value(json!({ "name": "sharp", "runner": "fake", "model": "opus", "permission_mode": "plan" }))
+                .unwrap(),
+        );
+        app.settings.set(st);
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", first),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "check it again", "mode": "fresh", "profile": "sharp", "opts": { "model": "haiku" } })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let fourth = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let v = wait_done(&app, fourth).await;
+        assert_eq!(v["opts"]["permission_mode"], "plan", "{}", v);
+        let log = std::fs::read_to_string(&argv).unwrap();
+        let last = log.rsplit("--call--").next().unwrap();
+        assert!(
+            last.contains("--model\nhaiku\n") && last.contains("--permission-mode\nplan\n"),
+            "{}",
+            last
+        );
+        // A continued session keeps its runner and profile.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            &format!("/api/procs/{}/pivot", first),
+            &[AUTH, origin],
+            Some(json!({ "prompt": "x", "profile": "sharp" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(body.contains("fresh start"), "{}", body);
 
         // Refusals.
         let (s, _, _) = call(

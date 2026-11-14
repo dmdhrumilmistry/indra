@@ -379,12 +379,18 @@ Everything the config file holds can be changed from the console, without a rest
 
 | Tab | What you set |
 |---|---|
-| **General** | whether the built-in profiles load, how many agents run at once on this machine, and (for the next start) the listen address and read-only mode |
-| **Runners** | add, edit, duplicate or delete runners; **Customize** a built-in one (`claude`, `codex`, `gemini`) to change its arguments |
-| **Nodes** | remote machines: SSH destination, port, key, capacity, targets |
-| **Workflows** | workflows and their tasks: node, runner, target, prompt, what each runs after, retries |
+| **General** | whether the built-in profiles load, how many agents run at once on this machine, WebRTC for nodes that dial in and its STUN servers, and (for the next start) the listen address and read-only mode |
+| **Profiles** | runner, model, where it runs (Anthropic or Ollama, or its subagents on Ollama), permission mode, tool rules, environment and secrets, memory and reflection; templates included |
+| **Runners** | add, edit, duplicate or delete runners; **Customize** a built-in one (`claude`, `codex`, `gemini`) to change its arguments, including how it picks a model (`model_args`) |
+| **Nodes** | remote machines: SSH destination (or none, for a node that dials in), port, key, capacity, targets |
+| **Workflows** | workflows and their tasks: node, runner, profile, model and provider, component or sub-workflow, target, prompt, what each runs after, retries (the graph editor draws the same) |
+| **Components** | reusable tasks a workflow task can start from |
 | **Presets** | saved prompts for Launch (Launch also has **Save as preset**) |
+| **Teams** | plan and delegate: the planner, worker and reviewer profiles |
+| **Marketplaces** | Claude Code plugin marketplaces and skill repositories to install from |
 | **Harnesses** | custom harnesses, or **Customize** a built-in profile |
+| **Connectors** | Jira, GitHub Issues, ClickUp and Linear boards to import work items from and report back to (imports follow pages, up to 500 items) |
+| **Secrets** | tokens agents and connectors use, encrypted, scoped to profiles and machines |
 | **File** | the whole `indra.toml` as text, with **Check** before **Save** |
 
 How a save works:
@@ -689,7 +695,16 @@ indra node connect https://hub.example:7878 --name build-box --code ABCDE-FGHJK 
   `agent.json` in the node's config folder.
 - **Direct when possible.** The WebSocket carries signaling; hub and node then open a WebRTC data
   channel (DTLS-encrypted) and job traffic moves onto it. On the same network that needs nothing;
-  across NATs add STUN/TURN servers (`[server] ice_servers = ["stun:stun.example.org:3478"]`).
+  across NATs add STUN servers (`[server] ice_servers = ["stun:stun.example.org:3478"]`, or
+  Settings > General) and TURN servers with their credentials:
+
+  ```toml
+  [[server.ice]]
+  urls       = ["turn:turn.example.org:3478", "turns:turn.example.org:5349"]
+  username   = "indra"
+  credential = "secret:turn"   # resolved on the hub, sent to nodes over their link
+  ```
+
   When there is no direct path, traffic is relayed over the WebSocket. `[server] webrtc = false`,
   or `indra node connect --no-webrtc`, keeps everything on the relay. The Nodes page shows which
   path each node uses.

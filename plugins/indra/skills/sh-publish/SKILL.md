@@ -1,6 +1,6 @@
 ---
 name: sh-publish
-description: "Publish an indra review's findings to the team's tools: Jira issues, Confluence pages, GitHub issues or Notion pages, through their official MCP servers. Use when the user asks to 'file these in Jira', 'open GitHub issues for the findings', 'put the report in Confluence/Notion', 'track these findings', or 'sync findings to <tool>'. Builds a de-duplicated, secret-free plan with a bundled script and creates nothing without the user's confirmation. For bringing Obsidian, Notion or GitHub-wiki knowledge INTO indra memory, use `indra mem import` instead (see the sh-memory skill)."
+description: "Publish an indra review's findings to the team's tools: Jira issues, Confluence pages, GitHub issues or Notion pages, through their official MCP servers. Use when the user asks to 'file these in Jira', 'open GitHub issues for the findings', 'put the report in Confluence/Notion', 'track these findings', or 'sync findings to <tool>'. Builds a de-duplicated, secret-free plan with `indra publish plan` and creates nothing without the user's confirmation. For bringing Obsidian, Notion or GitHub-wiki knowledge INTO indra memory, use `indra mem import` instead (see the sh-memory skill)."
 argument-hint: "[jira|github|confluence|notion] [run dir, default: the latest run] [min severity, default: medium]"
 allowed-tools: Read, Bash
 ---
@@ -18,7 +18,7 @@ should stay on the machine.
   people and hard to undo.
 - **Publish only what the plan contains.** Never add `evidence`, `payload`, `poc` or
   `data_flow` from the run, never paste code from the target, and never include secret
-  values, tokens, internal hostnames or customer data. The plan script already leaves these
+  values, tokens, internal hostnames or customer data. `indra publish plan` already leaves these
   out and refuses to run if one leaked into a finding's text: fix that finding's text in
   `verified.jsonl` (or skip it), never work around the refusal.
 - **De-duplicate by fingerprint.** Every record ends with `indra-fingerprint: <id>`. Search the

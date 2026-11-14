@@ -24,7 +24,7 @@ works for security reviews, fixes, research or anything else an agent can do.
 
 ## Connect a tracker
 
-**Settings > Connectors** adds Jira, GitHub Issues or ClickUp. A connector imports matching items
+**Settings > Connectors** adds Jira, GitHub Issues, ClickUp or Linear. A connector imports matching items
 into To do, and reports each move back to the tracker: a comment when an agent starts, a comment
 with the agent's result when it finishes, and the tracker state you map to each column.
 
@@ -73,6 +73,7 @@ states       = { running = "in progress", review = "review", done = "complete" }
 | Jira Cloud | an API token from your Atlassian account, with the account's email | workflow status names; indra picks the transition that leads there |
 | GitHub Issues | a fine-grained token with Issues: read and write on the repository | a label, or `open` / `closed` |
 | ClickUp | a personal API token (`pk_...`) | status names of the list |
+| Linear | a personal API key (`lin_api_...`); project is the team key (ENG), the filter a label | workflow state names of the team (Todo, In Review, Done) |
 
 Requests go through the system `curl` with the token passed on its stdin, never on the command
 line. indra only lists open items, comments, and changes state (on GitHub, by adding the label

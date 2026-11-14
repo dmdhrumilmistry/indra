@@ -320,6 +320,15 @@ fn expand_target(t: &str) -> PathBuf {
 pub fn cmd_runs() -> Result<ExitCode, String> {
     let spec: RunsSpec = serde_json::from_str(read_stdin_line()?.trim())
         .map_err(|e| format!("bad runs request: {}", e))?;
+    println!(
+        "{}",
+        serde_json::to_string(&runs_for(spec)).map_err(|e| e.to_string())?
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The runs a hub asked about, on this machine (over SSH or the link).
+pub fn runs_for(spec: RunsSpec) -> Value {
     let h = Harness {
         name: "remote".into(),
         description: String::new(),
@@ -335,11 +344,7 @@ pub fn cmd_runs() -> Result<ExitCode, String> {
         stages: spec.stages,
         builtin: false,
     };
-    println!(
-        "{}",
-        serde_json::to_string(&crate::deck::runs::list(&h, 100)).map_err(|e| e.to_string())?
-    );
-    Ok(ExitCode::SUCCESS)
+    serde_json::to_value(crate::deck::runs::list(&h, 100)).unwrap_or(Value::Null)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

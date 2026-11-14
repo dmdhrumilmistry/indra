@@ -86,7 +86,7 @@ fn hub(name: &str, webrtc: bool) -> Hub {
     std::fs::create_dir_all(dir.join("node-work")).unwrap();
     std::fs::write(
         dir.join("hub.toml"),
-        format!("builtins = false\n[server]\nwebrtc = {}\n[[harness]]\nname = \"h\"\nroot = \".\"\ntargets = [\"work\"]\n", webrtc),
+        format!("builtins = false\n[server]\nwebrtc = {}\n[[harness]]\nname = \"h\"\nroot = \".\"\ntargets = [\"work\"]\nruns = \"runs/*\"\nfindings = [\"results.jsonl\"]\n", webrtc),
     )
     .unwrap();
     // The node's own runners: what it is willing to run.
@@ -238,6 +238,20 @@ fn a_node_dials_in_runs_jobs_and_goes_direct() {
     let feed = texts(&h, id);
     let ticks: Vec<&String> = feed.iter().filter(|t| t.starts_with("tick-")).collect();
     assert_eq!(ticks.len(), 40, "{:?}", feed);
+
+    // The node's runs come back over the link: it has no SSH.
+    let run = h.dir.join("node-work/runs/r1");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(
+        run.join("results.jsonl"),
+        "{\"status\":\"ok\"}\n{\"status\":\"ok\"}\n",
+    )
+    .unwrap();
+    let (s, body) = http(h.port, "GET", "/api/nodes/runs?node=box", "");
+    assert_eq!(s, 200, "{}", body);
+    let runs = json(&body);
+    assert_eq!(runs[0]["name"], "r1", "{}", body);
+    assert_eq!(runs[0]["counts"]["total"], 2, "{}", body);
 
     // Stop reaches the node, which stops the agent's whole tree.
     let pidfile = h.dir.join("held.pid");
