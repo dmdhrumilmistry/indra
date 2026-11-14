@@ -344,3 +344,22 @@ label.rowitem { font-weight: 400; }
 .toolspage select { width: auto; max-width: 100%; }
 .runactions .row > b:first-child { min-width: 96px; }
 .toolspage .row select { flex: 0 1 auto; }
+
+/* findings, triage and comparison */
+.findings h3 { margin: 0; }
+.findings td .row { flex-wrap: nowrap; }
+.findings td input[type=text] { min-width: 180px; }
+.findings .compare { margin-top: 14px; align-items: center; }
+.findings .compare select { width: auto; max-width: 100%; }
+.cmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.cmpgroup h4 { margin: 6px 0; }
+.cmpgroup.new h4 { color: var(--bad); }
+.cmpgroup.fixed h4 { color: var(--ok); }
+.sev { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 12px; background: color-mix(in srgb, var(--fg, currentColor) 10%, transparent); }
+.sev-critical, .sev-high { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+.sev-medium { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.prreview summary { cursor: pointer; font-weight: 600; }
+.prreview form { margin-top: 10px; }
+.runactions + div:empty { display: none; }
+.findings .row select[aria-label="Show"] { width: auto; flex: 0 0 auto; min-width: 0; }
+.runactions { max-width: none; }

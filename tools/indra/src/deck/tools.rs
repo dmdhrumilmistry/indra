@@ -425,3 +425,258 @@ pub async fn ollama(
         "router": crate::deck::router::stats(),
     })))
 }
+
+// ---- triage and comparison ----------------------------------------------------------
+
+/// The statuses a person can give a finding.
+const TRIAGE: [&str; 3] = ["verified", "needs-runtime", "false-positive"];
+
+/// One finding as the run page lists it.
+fn brief(i: usize, f: &Value) -> Value {
+    use crate::findings::field;
+    json!({
+        "index": i,
+        "id": field(f, "id"),
+        "title": field(f, "title"),
+        "severity": field(f, "severity").to_lowercase(),
+        "status": field(f, "status"),
+        "class": field(f, "class"),
+        "file": field(f, "file"),
+        "line": f.get("line").cloned().unwrap_or(Value::Null),
+        "fingerprint": crate::findings::fingerprint(f),
+        "triage": f.get("triage").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// A run's verified.jsonl, line by line, keeping lines that do not parse
+/// so a rewrite never drops them.
+fn lines_of(dir: &Path) -> ApiResult<Vec<Result<Value, String>>> {
+    let p = dir.join("verified.jsonl");
+    let text =
+        std::fs::read_to_string(&p).map_err(|_| not_found("this run has no verified.jsonl"))?;
+    Ok(text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).map_err(|_| l.to_string()))
+        .collect())
+}
+
+/// The run's findings (verified.jsonl), for the triage table.
+pub async fn findings(
+    State(app): State<Arc<App>>,
+    Query(q): Query<RunQ>,
+) -> ApiResult<Json<Value>> {
+    let dir = run_dir(&app, q.h.as_deref(), &q.key)?;
+    let list: Vec<Value> = lines_of(&dir)?
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| l.as_ref().ok().map(|f| brief(i, f)))
+        .collect();
+    Ok(Json(json!({ "findings": list })))
+}
+
+#[derive(Deserialize)]
+pub struct TriageReq {
+    h: Option<String>,
+    key: String,
+    /// The finding's line in verified.jsonl, and its fingerprint (so a file
+    /// that changed underneath is noticed rather than edited blindly).
+    index: usize,
+    fingerprint: String,
+    status: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Change a finding's status, keeping what it was and why it changed.
+pub async fn triage(
+    State(app): State<Arc<App>>,
+    Json(r): Json<TriageReq>,
+) -> ApiResult<Json<Value>> {
+    writable(&app)?;
+    if !TRIAGE.contains(&r.status.as_str()) {
+        return Err(bad(
+            "status must be verified, needs-runtime or false-positive",
+        ));
+    }
+    let reason = r.reason.trim().to_string();
+    if r.status == "false-positive" && reason.is_empty() {
+        return Err(bad("say why it is a false positive: the reason becomes the learning that stops it coming back"));
+    }
+    if reason.len() > 2000 || reason.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(bad("the reason is too long or has control characters"));
+    }
+    let dir = run_dir(&app, r.h.as_deref(), &r.key)?;
+    let mut lines = lines_of(&dir)?;
+    let f = match lines.get_mut(r.index) {
+        Some(Ok(f)) if crate::findings::fingerprint(f) == r.fingerprint => f,
+        _ => return Err(bad("that finding changed or moved; reload the run")),
+    };
+    let from = crate::findings::field(f, "status");
+    if let Some(o) = f.as_object_mut() {
+        o.insert("status".into(), json!(r.status));
+        o.insert(
+            "triage".into(),
+            json!({ "from": from, "to": r.status, "reason": reason, "at": crate::mem::time::now_iso(), "by": "console" }),
+        );
+    }
+    let out = brief(r.index, f);
+    let text: String = lines
+        .iter()
+        .map(|l| match l {
+            Ok(v) => v.to_string(),
+            Err(raw) => raw.clone(),
+        })
+        .map(|l| l + "\n")
+        .collect();
+    let p = dir.join("verified.jsonl");
+    let tmp = dir.join(".verified.jsonl.tmp");
+    std::fs::write(&tmp, text).map_err(|e| internal(e.to_string()))?;
+    std::fs::rename(&tmp, &p).map_err(|e| internal(e.to_string()))?;
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+pub struct CompareQ {
+    h: Option<String>,
+    /// The newer run, and the one to compare it with.
+    key: String,
+    with: String,
+}
+
+/// Two runs' findings, matched by fingerprint: what is new in `key`, what
+/// was fixed since `with`, what is still open, and what changed status.
+/// False positives count as closed.
+pub async fn compare(
+    State(app): State<Arc<App>>,
+    Query(q): Query<CompareQ>,
+) -> ApiResult<Json<Value>> {
+    let head = run_dir(&app, q.h.as_deref(), &q.key)?;
+    let base = run_dir(&app, q.h.as_deref(), &q.with)?;
+    let load = |d: &Path| -> ApiResult<std::collections::BTreeMap<String, Value>> {
+        Ok(lines_of(d)?
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.as_ref().ok().map(|f| brief(i, f)))
+            .map(|b| (b["fingerprint"].as_str().unwrap_or("").to_string(), b))
+            .collect())
+    };
+    let (a, b) = (load(&base)?, load(&head)?);
+    let open = |v: &Value| v["status"] != "false-positive";
+    let (mut new, mut fixed, mut still, mut changed) = (vec![], vec![], vec![], vec![]);
+    for (fp, f) in &b {
+        match a.get(fp) {
+            Some(old) => {
+                if old["status"] != f["status"] {
+                    changed.push(json!({ "finding": f, "from": old["status"], "to": f["status"] }));
+                }
+                if open(f) && open(old) {
+                    still.push(f.clone());
+                } else if open(f) {
+                    new.push(f.clone());
+                }
+            }
+            None if open(f) => new.push(f.clone()),
+            None => {}
+        }
+    }
+    for (fp, f) in &a {
+        if open(f) && b.get(fp).map(|x| !open(x)).unwrap_or(true) {
+            fixed.push(f.clone());
+        }
+    }
+    let name = |d: &Path| crate::findings::run_id(d);
+    Ok(Json(json!({
+        "head": name(&head), "base": name(&base),
+        "new": new, "fixed": fixed, "still_open": still, "changed": changed,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct PrReviewReq {
+    h: Option<String>,
+    /// A pull request URL, or a number for the target's own repository.
+    pr: String,
+    target: usize,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    runner: String,
+    /// 0..3; empty lets the review pick from the diff.
+    #[serde(default)]
+    tier: Option<u8>,
+    #[serde(default)]
+    deep: bool,
+    /// Leave the posting to the run page (the default).
+    #[serde(default = "yes")]
+    dry_run: bool,
+    #[serde(default)]
+    fail_on: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The `/sh-pr-review` prompt for a request, refusing anything that is not
+/// a plain PR reference or a known flag.
+pub(crate) fn pr_review_prompt(r: &PrReviewReq) -> ApiResult<String> {
+    let pr = r.pr.trim();
+    let url_ok = pr
+        .strip_prefix("https://github.com/")
+        .map(|rest| {
+            let p: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+            p.len() == 4
+                && crate::review::valid_repo(&format!("{}/{}", p[0], p[1]))
+                && p[2] == "pull"
+                && !p[3].is_empty()
+                && p[3].chars().all(|c| c.is_ascii_digit())
+        })
+        .unwrap_or(false);
+    let num_ok = !pr.is_empty() && pr.len() <= 9 && pr.chars().all(|c| c.is_ascii_digit());
+    if !url_ok && !num_ok {
+        return Err(bad(
+            "give a pull request URL (https://github.com/owner/repo/pull/N) or a number",
+        ));
+    }
+    let mut p = format!("/sh-pr-review {}", pr.trim_end_matches('/'));
+    if let Some(t) = r.tier {
+        if t > 3 {
+            return Err(bad("tier is 0 to 3"));
+        }
+        p.push_str(&format!(" --tier={}", t));
+    }
+    if r.deep {
+        p.push_str(" --deep");
+    }
+    if let Some(f) = r.fail_on.as_deref().filter(|f| !f.is_empty()) {
+        if !["critical", "high", "medium", "low"].contains(&f) {
+            return Err(bad("fail-on is critical, high, medium or low"));
+        }
+        p.push_str(&format!(" --fail-on={}", f));
+    }
+    if r.dry_run {
+        p.push_str(" --dry-run");
+    }
+    Ok(p)
+}
+
+/// Start a PR review: `/sh-pr-review` in a target, with a profile.
+pub async fn pr_review(
+    State(app): State<Arc<App>>,
+    Json(r): Json<PrReviewReq>,
+) -> ApiResult<Json<Value>> {
+    writable(&app)?;
+    let prompt = pr_review_prompt(&r)?;
+    // The same path as Launch: read-only, prompt, profile and node checks.
+    let req: crate::deck::web::LaunchReq = serde_json::from_value(json!({
+        "h": r.h, "node": r.node, "runner": r.runner, "prompt": prompt,
+        "target": r.target, "profile": r.profile,
+    }))
+    .map_err(|e| internal(e.to_string()))?;
+    let Json(started) = crate::deck::web::proc_start(State(app), Json(req)).await?;
+    let id = started.get("id").cloned().unwrap_or(Value::Null);
+    Ok(Json(json!({ "id": id, "prompt": prompt })))
+}

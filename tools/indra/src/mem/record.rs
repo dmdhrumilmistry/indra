@@ -253,6 +253,21 @@ fn go(run_dir: &Path, vault: &Path, dry_run: bool) -> Result<(Value, Vec<String>
                 clip(&field(&ver, "rationale"), MAX_TEXT)
             ));
         }
+        // A person's call in the console: what it was, and why it changed.
+        let tri = f.get("triage").cloned().unwrap_or(Value::Null);
+        if truthy(&tri, "to") {
+            let why = if truthy(&tri, "reason") {
+                format!(": {}", clip(&field(&tri, "reason"), MAX_TEXT))
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "- triaged: {} -> {}{}",
+                field(&tri, "from"),
+                field(&tri, "to"),
+                why
+            ));
+        }
         let what = if truthy(f, "title") {
             field(f, "title")
         } else {

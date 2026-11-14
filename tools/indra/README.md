@@ -287,7 +287,7 @@ open the browser for you, `--read-only` to turn off launching and editing.
 | **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read, edit, download or delete it, and see what it uses and is used by; create a new one from a template or import `.md` files (they go where the harness's first simple pattern points, like `agents/*.md`). A save is refused if the file changed since you loaded it. |
 | **Graph map** | Pipeline stages run agents, agents spawn agents and invoke skills (a family reference such as `sh-kb-*` loads every member), and everything reads its prompts. |
 | **Knowledge** | The `indra mem` vaults the harness reads and writes: search, read, edit, link and delete notes, the graph, and its health (dangling links, orphans). Also the **learnings inbox**: what agents proposed they learned, to accept into memory or discard. See [Context, memory and learnings](../../docs/guides/context-and-learnings.md). |
-| **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
+| **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. Start a pull request review from here; on a run, triage its findings, compare it with an earlier run, record it into memory, publish it or post it. See [Reviewing pull requests from the console](../../docs/guides/review-loop.md). |
 | **Marketplace** | Plugins, skills and agents from Claude Code plugin marketplaces (Anthropic's built in, add your own) and skill repositories: look inside, install for Claude Code, Codex or a harness, or as a Claude Code plugin; update and remove. See [Marketplace](../../docs/guides/marketplace.md). |
 | **Plan and delegate** | Under Launch: a planner profile writes a plan, you review and edit it, worker profiles (cheaper or local models) carry out each step, a reviewer checks the result; cost per role. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). |
 | **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
@@ -847,6 +847,8 @@ Writes are refused when the console is read-only; previews and dry runs are not.
 | `POST /api/run/record` `{key, dry_run}` | `indra mem record-run` |
 | `POST /api/run/publish` `{key, to, min_severity, statuses, max}` | `indra publish plan` |
 | `POST /api/run/post` `{key, repo, pr, dry_run, no_status}` | `indra review post` |
+| `POST /api/pr-review` `{pr, target, profile, tier, deep, fail_on, dry_run}` | starts `/sh-pr-review` |
+| `GET /api/run/findings`, `POST /api/run/triage`, `GET /api/run/compare` | triage and comparison (see the [guide](../../docs/guides/review-loop.md)) |
 | `GET /api/tools` | `indra review cache stat`, `indra review metrics report`, `indra skills sync --check` |
 | `POST /api/tools/cache` `{action: prune\|clear, max_age_days, repo}` | `indra review cache prune\|clear` |
 | `POST /api/tools/metrics/purge` `{older_than_days}` | `indra review metrics purge` |

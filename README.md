@@ -258,6 +258,8 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 - **Runs:** each `.security-harness/run-*` and `pr-*` with stage progress, findings per class,
   severity and status counts, and every file it wrote, live. From a finished run, record it into
   memory, build the publish plan for Jira, GitHub, Confluence or Notion, or post a PR review.
+  Start a pull request review from the console, triage each finding (a false positive's reason
+  becomes a learning), and compare a review with the last one: new, fixed and still open.
 - **Tools:** the PR review cache, local run metrics, the skills mirror and install, and the
   site build: everything `indra review`, `indra skills` and `indra dev` do, from the browser.
 - **Launch:** start a review through Claude Code (or Codex, Gemini CLI, your own runner) and
@@ -331,7 +333,8 @@ how remote execution stays safe.
 **Design:** [architecture](docs/architecture.md) (agent control, profiles, secrets, transport,
 the board, graph workflows). **Guides:** [handling agent processes](docs/guides/processes.md) (watching, stopping, logs,
 capacity, troubleshooting), [pivoting agents](docs/guides/pivoting.md),
-[local models with Ollama](docs/guides/local-models.md), and
+[local models with Ollama](docs/guides/local-models.md),
+[reviewing pull requests from the console](docs/guides/review-loop.md), and
 [knowledge base and integrations](docs/guides/knowledge-base.md).
 
 <p align="center"><img src="assets/screenshots/pivot.png" alt="Pivoting an agent: continue its session with a new instruction" width="720"></p>
