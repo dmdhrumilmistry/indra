@@ -448,6 +448,100 @@ async fn def_put(State(app): State<Arc<App>>, Json(r): Json<SaveReq>) -> ApiResu
     ))
 }
 
+#[derive(Deserialize)]
+struct NewDef {
+    h: Option<String>,
+    /// agent | skill | prompt
+    kind: String,
+    name: String,
+    content: String,
+}
+
+/// Where a new definition of `kind` named `name` goes: the harness's first
+/// pattern for that kind with exactly one `*`, e.g. `agents/*.md` or
+/// `skills/*/SKILL.md`.
+fn new_def_path(h: &Harness, kind: &str, name: &str) -> ApiResult<std::path::PathBuf> {
+    let globs = match kind {
+        "agent" => &h.agents,
+        "skill" => &h.skills,
+        "prompt" => &h.prompts,
+        _ => return Err(bad("kind must be agent, skill or prompt")),
+    };
+    let pat = globs
+        .iter()
+        .find(|g| g.matches('*').count() == 1 && !g.contains('?') && !g.contains('['))
+        .ok_or_else(|| {
+            bad(format!(
+                "harness '{}' has no simple pattern for {}s (like {}/*.md) to put a new one in",
+                h.name, kind, kind
+            ))
+        })?;
+    Ok(config::expand(&h.root, &pat.replacen('*', name, 1)))
+}
+
+/// Create an agent, skill or prompt file (for example an imported one).
+async fn def_create(State(app): State<Arc<App>>, Json(r): Json<NewDef>) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let name = r.name.trim();
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || name.starts_with('.')
+    {
+        return Err(bad(
+            "name: letters, digits, '-', '_' and '.', up to 64, not starting with '.'",
+        ));
+    }
+    if r.content.trim().is_empty() || r.content.len() > 1_000_000 {
+        return Err(bad("content must be between 1 byte and 1 MB"));
+    }
+    let h = &app.harness(r.h.as_deref())?;
+    let path = new_def_path(h, &r.kind, name)?;
+    if path.exists() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("{} exists already; open it to edit", path.display()),
+        ));
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| internal(e.to_string()))?;
+    }
+    crate::mem::vault::write_atomic(&path, &r.content).map_err(internal)?;
+    let found = discover::discover(h).into_iter().find(|d| d.abs == path);
+    Ok(Json(json!({
+        "id": found.map(|d| d.id),
+        "path": path.display().to_string(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct DefQ2 {
+    h: Option<String>,
+    id: String,
+}
+
+/// Delete an agent, skill or prompt file. A skill's folder goes too when
+/// nothing else is left in it.
+async fn def_delete(State(app): State<Arc<App>>, Query(q): Query<DefQ2>) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let h = &app.harness(q.h.as_deref())?;
+    let d = def_by_id(h, &q.id)?;
+    std::fs::remove_file(&d.abs)
+        .map_err(|e| internal(format!("cannot delete {}: {}", d.abs.display(), e)))?;
+    if d.kind == discover::Kind::Skill {
+        if let Some(dir) = d.abs.parent() {
+            let _ = std::fs::remove_dir(dir); // only when empty
+        }
+    }
+    Ok(Json(json!({ "deleted": d.path })))
+}
+
 async fn graph(State(app): State<Arc<App>>, Query(q): Query<HQ>) -> ApiResult<Json<Value>> {
     let h = &app.harness(q.h.as_deref())?;
     let defs = discover::discover(h);
@@ -1822,6 +1916,17 @@ pub fn router(app: Arc<App>) -> Router {
             get(crate::deck::knowledge::recall_preview),
         )
         .route("/api/knowledge/health", get(crate::deck::knowledge::health))
+        .route("/api/knowledge/export", get(crate::deck::knowledge::export))
+        .route(
+            "/api/knowledge/import",
+            post(crate::deck::knowledge::import)
+                .layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
+        .route(
+            "/api/learnings/import",
+            post(crate::deck::knowledge::learnings_import)
+                .layer(axum::extract::DefaultBodyLimit::max(16 << 20)),
+        )
         .route(
             "/api/learnings",
             get(crate::deck::knowledge::learnings_list)
@@ -1855,7 +1960,13 @@ pub fn router(app: Arc<App>) -> Router {
             axum::routing::put(secret_put).delete(secret_delete),
         )
         .route("/api/defs", get(defs))
-        .route("/api/def", get(def_get).put(def_put))
+        .route(
+            "/api/def",
+            get(def_get)
+                .put(def_put)
+                .post(def_create)
+                .delete(def_delete),
+        )
         .route("/api/graph", get(graph))
         .route("/api/memory", get(memory))
         .route("/api/memory/graph", get(memory_graph))
@@ -3892,5 +4003,150 @@ while True:
         assert_eq!(l[0].origin.session.as_deref(), Some("s-9"));
         assert_eq!(l[0].origin.by, "agent");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn vaults_learnings_and_definitions_move_in_and_out() {
+        let (app, dir) = fixture_with_memory("transfer", false);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let send = |method: &'static str, uri: String, body: Option<Value>| {
+            let app = app.clone();
+            async move {
+                let (s, h, b) = call(&app, method, &uri, &[AUTH, origin], body).await;
+                (s, h, b)
+            }
+        };
+        // Import a small Markdown folder, previewing first.
+        let files = json!([
+            { "path": "kb/Auth.md", "text": "# Auth\n\nSee [Sessions](Sessions.md).\n" },
+            { "path": "kb/Sessions.md", "text": "# Sessions\n\nRotate on login.\n" },
+            { "path": "../escape.md", "text": "x" }
+        ]);
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files, "dry_run": true })),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "a path outside the upload is refused: {}",
+            b
+        );
+        let files = json!([
+            { "path": "kb/Auth.md", "text": "# Auth\n\nSee [Sessions](Sessions.md).\n" },
+            { "path": "kb/Sessions.md", "text": "# Sessions\n\nRotate on login.\n" }
+        ]);
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files.clone(), "dry_run": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let r: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(r["imported"].as_array().unwrap().len(), 2);
+        assert!(
+            !dir.join("vault").join(".indra").exists()
+                || std::fs::read_dir(dir.join("vault")).unwrap().count() <= 1
+        );
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files.clone(), "tags": ["kb"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        assert_eq!(
+            serde_json::from_str::<Value>(&b).unwrap()["links_converted"],
+            1
+        );
+        let (s, _, b) = send(
+            "POST",
+            "/api/knowledge/import".into(),
+            Some(json!({ "files": files })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&b).unwrap()["skipped_existing"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // Export as a bundle, then import that bundle's notes into another vault.
+        let (s, h, b) = send("GET", "/api/knowledge/export?format=bundle".into(), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(h["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("attachment"));
+        let bundle: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(bundle["format"], crate::deck::knowledge::BUNDLE);
+        assert_eq!(bundle["notes"].as_array().unwrap().len(), 2);
+        for f in ["html", "json", "mermaid", "dot"] {
+            assert_eq!(
+                send("GET", format!("/api/knowledge/export?format={}", f), None)
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        let (other, dir2) = fixture_with_memory("transfer-2", false);
+        let (s, _, b) = call(
+            &other,
+            "POST",
+            "/api/knowledge/import",
+            &[AUTH, origin],
+            Some(json!({ "files": bundle["notes"], "from": "obsidian" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let (_, _, b) = call(&other, "GET", "/api/knowledge/notes", &[AUTH], None).await;
+        assert_eq!(serde_json::from_str::<Value>(&b).unwrap()["total"], 2);
+        // Learnings in bulk.
+        let (s, _, b) = send(
+            "POST",
+            "/api/learnings/import".into(),
+            Some(json!({ "items": [{ "title": "One", "body": "a" }, { "title": "", "body": "skipped" }, { "title": "Two", "tags": ["x"] }] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(serde_json::from_str::<Value>(&b).unwrap()["added"], 2);
+        assert_eq!(app.learnings.list()[0].origin.by, "import");
+        // Agents: create, refuse a duplicate or a bad name, delete.
+        let new = json!({ "kind": "agent", "name": "gamma", "content": "---\nname: gamma\ndescription: New one\n---\nHi\n" });
+        let (s, _, b) = send("POST", "/api/def".into(), Some(new.clone())).await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(dir.join("agents/gamma.md").is_file());
+        assert_eq!(
+            send("POST", "/api/def".into(), Some(new)).await.0,
+            StatusCode::CONFLICT
+        );
+        let bad_name = json!({ "kind": "agent", "name": "../x", "content": "x" });
+        assert_eq!(
+            send("POST", "/api/def".into(), Some(bad_name)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let skill = json!({ "kind": "skill", "name": "kb-two", "content": "---\nname: kb-two\ndescription: d\n---\nbody\n" });
+        assert_eq!(
+            send("POST", "/api/def".into(), Some(skill)).await.0,
+            StatusCode::OK
+        );
+        assert!(dir.join("skills/kb-two/SKILL.md").is_file());
+        let (s, _, _) = send("DELETE", format!("/api/def?id={}", id), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(!dir.join("agents/gamma.md").exists());
+        let (s, _, _) = send("DELETE", "/api/def?id=skill:kb-two".into(), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(!dir.join("skills/kb-two").exists());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
     }
 }

@@ -33,6 +33,21 @@ created from there.
 The notes are the same files `indra mem` and Obsidian use, so the CLI, the console and your
 editor all see the same memory.
 
+**Import and export.** On the Notes tab:
+
+- **Import** takes Markdown files or a whole folder: an Obsidian vault, an unzipped Notion
+  export, a cloned GitHub wiki, any folder of Markdown, or an indra bundle exported from another
+  vault. Pick the source (or let indra detect it), optionally a folder to put the notes in and
+  tags to add, then **Preview** to see what would be imported, skipped (notes that exist already,
+  unless you tick **Replace**) and left unresolved, and **Import**. Links are converted to
+  `[[wikilinks]]`, as `indra mem import` does.
+- **Export** downloads the vault as an **indra bundle** (every note's file, to import into another
+  vault or console), an offline **HTML** graph, the graph as **JSON**, **Mermaid** or **DOT**.
+- A note's **Download .md** saves that one file.
+
+The learnings inbox exports to JSON and imports from it too, and **Clear accepted** tidies the
+list (the notes stay in memory).
+
 ## Start an agent with memory
 
 On **Launch**, tick **Give it relevant memory**. indra recalls the notes that best match the
@@ -101,6 +116,9 @@ header.
 | `POST /api/knowledge/link` `{h, i, from, to, rel}` | add a typed relation |
 | `GET /api/knowledge/recall?h=&q=` | what an agent launched with prompt `q` would be given |
 | `GET /api/knowledge/health?h=&i=` | dangling links and orphans |
+| `GET /api/knowledge/export?h=&i=&format=` | download: `bundle`, `html`, `json`, `mermaid` or `dot` |
+| `POST /api/knowledge/import` `{h, i, files: [{path, text}], from, folder, tags, overwrite, dry_run}` | import uploaded files (`dry_run` previews) |
+| `POST /api/learnings/import` `{items: [{title, body, tags}]}` | add learnings to the inbox |
 | `GET /api/learnings`, `POST /api/learnings` `{title, body, tags, proc}` | the inbox; propose one |
 | `PATCH /api/learnings/{id}`, `DELETE /api/learnings/{id}` | edit or discard |
 | `POST /api/learnings/{id}/accept` `{h, i, links}` | write it into vault `i` |

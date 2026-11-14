@@ -17,6 +17,10 @@ works for security reviews, fixes, research or anything else an agent can do.
 - Items can be dragged between any columns except Running, which only Run can enter.
 - The agent's process page has everything else: its live feed, its tool requests waiting for
   approval, and controls to change its mode or model.
+- **Edit** changes an item's title, details, labels, profile and target (an item from a tracker
+  keeps its link; the tracker itself is not edited). **Remove from board** deletes it here only.
+- **Export** downloads the board's items as JSON; **Import file** adds items from such a file
+  (a list of objects with at least a `title`), for example to move work between consoles.
 
 ## Connect a tracker
 

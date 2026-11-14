@@ -282,14 +282,14 @@ open the browser for you, `--read-only` to turn off launching and editing.
 
 | Page | What it shows |
 |---|---|
-| **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read or edit it, and see what it uses and is used by. A save is refused if the file changed since you loaded it. |
+| **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read, edit, download or delete it, and see what it uses and is used by; create a new one from a template or import `.md` files (they go where the harness's first simple pattern points, like `agents/*.md`). A save is refused if the file changed since you loaded it. |
 | **Graph map** | Pipeline stages run agents, agents spawn agents and invoke skills (a family reference such as `sh-kb-*` loads every member), and everything reads its prompts. |
 | **Knowledge** | The `indra mem` vaults the harness reads and writes: search, read, edit, link and delete notes, the graph, and its health (dangling links, orphans). Also the **learnings inbox**: what agents proposed they learned, to accept into memory or discard. See [Context, memory and learnings](../../docs/guides/context-and-learnings.md). |
 | **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. |
 | **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
-| **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. See [the board guide](../../docs/guides/board.md). |
+| **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. Items can be edited and removed, and the board exported to or imported from JSON. See [the board guide](../../docs/guides/board.md). |
 | **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |
-| **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. See [Settings](#settings). |
+| **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. Each section exports to and imports from JSON (same names are replaced after you confirm); the File tab downloads `indra.toml` or loads one to check and save. Secret values never leave. See [Settings](#settings). |
 
 The same picture without a browser:
 
@@ -554,8 +554,11 @@ Agents can start with what earlier agents learned, and finish by proposing what 
   `learning` note, or discard it.
 - **Context meter.** Each process page shows the tokens in the agent's context against its
   model's window, so you can pivot before it fills up.
-- **Manage memory** on **Knowledge**: search, read, edit, link, create and delete notes, see the
-  graph, and fix dangling links and orphans.
+- **Manage memory** on **Knowledge**: search, read, edit, link, create, download and delete
+  notes, see the graph, and fix dangling links and orphans. **Import** Markdown files or a whole
+  folder (an Obsidian vault, an unzipped Notion export, a cloned GitHub wiki, or an indra bundle),
+  previewing first; **export** a vault as a re-importable bundle, an offline HTML graph, JSON,
+  Mermaid or DOT. Learnings export and import as JSON.
 
 See [Context, memory and learnings](../../docs/guides/context-and-learnings.md).
 

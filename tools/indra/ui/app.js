@@ -55,6 +55,42 @@
 
   var S = { ov: null, h: store("indra.h") || "", cleanup: [] };
 
+  // Save text as a file the browser downloads.
+  function saveFile(name, text, type) {
+    var url = URL.createObjectURL(new Blob([text], { type: type || "application/octet-stream" }));
+    var a = h("a", { href: url, download: name, hidden: true });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+  function jsonFile(name, data) { saveFile(name, JSON.stringify(data, null, 2) + "\n", "application/json"); }
+  // Ask for files, or a whole folder. Resolves with [{path, name, text}] for
+  // the files `keep` accepts (by name and size), plus how many were skipped.
+  function pickFiles(o) {
+    return new Promise(function (resolve) {
+      var inp = h("input", { type: "file", hidden: true, accept: o.accept || null });
+      if (o.multiple || o.folder) inp.multiple = true;
+      if (o.folder) inp.setAttribute("webkitdirectory", "");
+      inp.addEventListener("change", function () {
+        var all = Array.prototype.slice.call(inp.files || []); inp.remove();
+        var keep = all.filter(function (f) { return f.size <= 5 * 1048576 && (!o.keep || o.keep(f.name)); });
+        Promise.all(keep.map(function (f) { return f.text().then(function (t) { return { path: f.webkitRelativePath || f.name, name: f.name, text: t }; }); }))
+          .then(function (files) {
+            files.skipped = all.length - keep.length;
+            files.all = all.map(function (f) { return f.webkitRelativePath || f.name; });
+            resolve(files);
+          });
+      });
+      document.body.appendChild(inp); inp.click();
+    });
+  }
+  // A JSON file holding a list: [ ... ] or { items: [ ... ] }.
+  function listFrom(text) {
+    var v = JSON.parse(text);
+    if (Array.isArray(v)) return v;
+    if (v && Array.isArray(v.items)) return v.items;
+    throw new Error("expected a JSON list");
+  }
+
   function api(path, opts) {
     opts = opts || {};
     var init = { method: opts.method || "GET", credentials: "same-origin", headers: {} };
@@ -312,7 +348,49 @@
     var titles = { agent: "Agents", skill: "Skills", prompt: "Prompts" };
     var subs = { agent: "Agent definitions: who does what, on which model, with which tools.",
       skill: "Skills the agents load. Click one to read or edit it.", prompt: "Reference documents and prompt files the harness uses." };
-    m.appendChild(header(titles[kind], subs[kind]));
+    var ro = S.ov.read_only;
+    m.appendChild(header(titles[kind], subs[kind], ro ? null : [
+      h("button", { type: "button", onclick: function () { importDefs(); } }, "Import .md"),
+      h("button", { type: "button", class: "primary", onclick: function () { newDef(); } }, "New " + kind)]));
+    var formBox = h("div"); m.appendChild(formBox);
+    function template(name) {
+      return kind === "agent" ? "---\nname: " + name + "\ndescription: What it does, and when to use it\ntools: Read, Grep, Glob\n---\n\nYou are " + name + ".\n"
+        : kind === "skill" ? "---\nname: " + name + "\ndescription: When an agent should load this skill\n---\n\n# " + name + "\n\n"
+        : "# " + name + "\n\n";
+    }
+    function create(name, content) {
+      return api("/api/def", { method: "POST", body: { h: S.h, kind: kind, name: name, content: content } });
+    }
+    function newDef() {
+      var name = h("input", { type: "text", required: true, placeholder: "my-" + kind, pattern: "[A-Za-z0-9_.\\-]+" });
+      var ta = h("textarea", { class: "code", spellcheck: "false", "aria-label": "Content" }); ta.value = template("my-" + kind);
+      var touched = false; ta.addEventListener("input", function () { touched = true; });
+      name.addEventListener("input", function () { if (!touched) ta.value = template(name.value.trim() || "my-" + kind); });
+      formBox.textContent = "";
+      formBox.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+        e.preventDefault();
+        create(name.value.trim(), ta.value).then(function (r) { toast("Created " + r.path); if (r.id) location.hash = "#/def/" + encodeURIComponent(r.id); else route(); })
+          .catch(function (err) { toast(err.message, true); });
+      } }, h("h3", { text: "New " + kind }), h("label", null, "Name", h("small", { text: "Letters, digits, - and _. It becomes the file (or folder) name." }), name),
+        h("label", null, "Content", ta), h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Create"), h("button", { type: "button", onclick: function () { formBox.textContent = ""; } }, "Cancel"))));
+      name.focus();
+    }
+    function importDefs() {
+      pickFiles({ multiple: true, accept: ".md,.markdown,text/markdown", keep: function (n) { return /\.(md|markdown)$/i.test(n); } }).then(function (fs) {
+        if (!fs.length) return;
+        var done = 0, failed = [];
+        fs.reduce(function (p, f) {
+          return p.then(function () {
+            var parts = f.path.split("/"), stem = f.name.replace(/\.(md|markdown)$/i, "");
+            var name = /^skill$/i.test(stem) && parts.length > 1 ? parts[parts.length - 2] : stem;
+            return create(name, f.text).then(function () { done++; }).catch(function (e) { failed.push(f.name + ": " + e.message); });
+          });
+        }, Promise.resolve()).then(function () {
+          toast("Imported " + done + " file(s)" + (failed.length ? "; " + failed.length + " failed: " + failed[0] : ""), failed.length > 0);
+          route();
+        });
+      });
+    }
     var filter = h("input", { type: "search", placeholder: "Filter by name or description", "aria-label": "Filter" });
     m.appendChild(h("div", { class: "row" }, filter));
     var holder = h("div");
@@ -346,7 +424,14 @@
     api("/api/def" + hq({ id: id })).then(function (r) {
       var d = r.def, hash = r.hash, original = r.content;
       m.appendChild(header(d.name, d.description, [
-        h("span", { class: "pill", text: d.kind }), d.model ? h("span", { class: "pill", text: d.model }) : null]));
+        h("span", { class: "pill", text: d.kind }), d.model ? h("span", { class: "pill", text: d.model }) : null,
+        h("button", { type: "button", onclick: function () { saveFile(d.abs.split(/[\\/]/).pop(), ta.value, "text/markdown"); } }, "Download"),
+        S.ov.read_only ? null : h("button", { type: "button", class: "danger", onclick: function () {
+          if (!window.confirm("Delete " + d.path + "? This removes the file.")) return;
+          api("/api/def" + hq({ id: d.id }), { method: "DELETE" }).then(function () {
+            toast("Deleted " + d.path); location.hash = "#/" + ({ agent: "agents", skill: "skills", prompt: "prompts" }[d.kind] || "overview");
+          }).catch(function (e) { toast(e.message, true); });
+        } }, "Delete")]));
       var ta = h("textarea", { class: "code", spellcheck: "false", "aria-label": "File content", value: original });
       var save = h("button", { class: "primary", type: "button", disabled: true }, "Save");
       var revert = h("button", { type: "button", disabled: true }, "Revert");
@@ -434,7 +519,7 @@
       }
       tabsBox.appendChild(h("nav", { class: "tabs", "aria-label": "Knowledge sections" }, KTABS.map(function (t) {
         return h("a", { href: "#/knowledge/" + t[0] + "/" + cur, class: t[0] === tab ? "on" : "", "aria-current": t[0] === tab ? "page" : null },
-          t[1], t[0] === "learnings" && k.learnings ? h("b", { class: "badge warn", text: " " + k.learnings }) : null);
+          t[1], t[0] === "learnings" && k.learnings ? h("b", { class: "badge warn", text: String(k.learnings) }) : null);
       })));
       if (tab === "learnings") return learnings(vaults, cur);
       if (!v || !v.exists) { body.appendChild(empty(vaults.length ? "Create this vault first." : "No vault to show.")); return; }
@@ -447,7 +532,15 @@
       var search = h("input", { type: "search", placeholder: "Search notes", "aria-label": "Search notes", value: store("indra.kq") || "" });
       var kind = h("select", { "aria-label": "Type" }, h("option", { value: "", text: "Any type" }));
       var list = h("div", { class: "klist" }), detail = h("div");
-      var bar = h("div", { class: "row" }, search, kind, ro ? null : h("button", { type: "button", class: "primary", onclick: function () { newNote(); } }, "New note"));
+      var exp = function (fmt) { return "/api/knowledge/export" + hq({ i: i, format: fmt }); };
+      var bar = h("div", { class: "row" }, search, kind, ro ? null : h("button", { type: "button", class: "primary", onclick: function () { newNote(); } }, "New note"),
+        ro ? null : h("button", { type: "button", onclick: function () { importNotes(); } }, "Import"),
+        h("details", { class: "menu" }, h("summary", { class: "btn" }, "Export"), h("div", { class: "menubox" },
+          h("a", { href: exp("bundle"), download: "" }, "indra bundle (.json, to import elsewhere)"),
+          h("a", { href: exp("html"), download: "" }, "Graph as an offline page (.html)"),
+          h("a", { href: exp("json"), download: "" }, "Graph as JSON"),
+          h("a", { href: exp("mermaid"), download: "" }, "Mermaid diagram"),
+          h("a", { href: exp("dot"), download: "" }, "Graphviz DOT"))));
       body.appendChild(bar);
       body.appendChild(h("div", { class: "kgrid" }, list, detail));
       var titles = h("datalist", { id: "note-titles" }); body.appendChild(titles);
@@ -497,17 +590,62 @@
             } }, h("span", { class: "muted", text: "Link to" }), to, h("span", { class: "muted", text: "as" }), rel, h("button", { type: "submit" }, "Link")),
             h("h3", { text: "Text" }), ta,
             h("p", { class: "muted small", text: d.path }),
-            ro ? null : h("div", { class: "row" },
-              h("button", { type: "button", class: "primary", onclick: function () {
+            h("div", { class: "row" },
+              ro ? null : h("button", { type: "button", class: "primary", onclick: function () {
                 api("/api/knowledge/note", { method: "PUT", body: { h: S.h, i: i, id: d.id, text: ta.value, hash: hash } })
                   .then(function (r) { hash = r.hash; toast("Saved"); show(d.id); load(); }).catch(function (err) { toast(err.message, true); });
               } }, "Save"),
-              h("button", { type: "button", class: "danger", onclick: function () {
+              h("button", { type: "button", onclick: function () { saveFile(d.id.split("/").pop() + ".md", ta.value, "text/markdown"); } }, "Download .md"),
+              ro ? null : h("button", { type: "button", class: "danger", onclick: function () {
                 if (!window.confirm("Delete the note \"" + d.title + "\"? Links to it become unresolved.")) return;
                 api("/api/knowledge/note" + hq({ i: i, id: d.id }), { method: "DELETE" }).then(function () { toast("Deleted"); go("notes", i); })
                   .catch(function (err) { toast(err.message, true); });
               } }, "Delete"))));
         }).catch(function (e) { detail.textContent = ""; detail.appendChild(empty(e.message)); });
+      }
+      function importNotes() {
+        var files = [], from = h("select", { "aria-label": "Source" }, [["auto", "Detect"], ["markdown", "Markdown folder"], ["obsidian", "Obsidian vault"], ["notion", "Notion export (unzipped)"], ["github-wiki", "GitHub wiki (cloned)"]]
+          .map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+        var folder = h("input", { type: "text", placeholder: "optional, e.g. imported/notion" }), tags = h("input", { type: "text", placeholder: "optional, comma separated" });
+        var overwrite = h("input", { type: "checkbox" });
+        var picked = h("p", { class: "picked muted", text: "Nothing picked yet." }), out = h("div");
+        var md = function (n) { return /\.(md|markdown|json)$/i.test(n); };
+        function take(list) {
+          files = []; var bundles = 0;
+          list.forEach(function (f) {
+            if (/\.json$/i.test(f.name)) {
+              try { var b = JSON.parse(f.text); if (b && b.format === "indra-vault") { bundles++; b.notes.forEach(function (n) { files.push({ path: n.path, text: n.text }); }); } } catch (e) { /* not a bundle */ }
+            } else files.push({ path: f.path, text: f.text });
+          });
+          if (bundles || (from.value === "auto" && (list.all || []).some(function (p) { return /(^|\/)\.obsidian\//.test(p); }))) from.value = "obsidian";
+          picked.textContent = files.length + " note file(s)" + (bundles ? " from " + bundles + " bundle(s)" : "") + (list.skipped ? ", " + list.skipped + " other file(s) left out" : "") + ".";
+          go.disabled = preview.disabled = !files.length;
+        }
+        function run(dry) {
+          go.disabled = preview.disabled = true; out.textContent = dry ? "Checking..." : "Importing...";
+          api("/api/knowledge/import", { method: "POST", body: { h: S.h, i: i, files: files, from: from.value, folder: folder.value.trim() || null, tags: csv(tags.value), overwrite: overwrite.checked, dry_run: dry } })
+            .then(function (r) {
+              out.textContent = "";
+              out.appendChild(h("div", { class: "note " + (dry ? "" : "ok") },
+                h("b", { text: (dry ? "Would import " : "Imported ") + r.imported.length + " note(s)" + (r.from ? " as " + r.from : "") + "." }),
+                h("div", { text: "Links converted: " + r.links_converted + ". Skipped (exist already): " + r.skipped_existing.length + ". Unresolved links: " + r.unresolved.length + "." }),
+                r.skipped_existing.length ? h("div", { class: "muted small", text: "Existing: " + r.skipped_existing.slice(0, 12).join(", ") + (r.skipped_existing.length > 12 ? "..." : "") + " (tick Replace to overwrite them)" }) : null));
+              if (!dry) { toast("Imported " + r.imported.length + " note(s)"); load(); } else { go.disabled = preview.disabled = false; }
+            }).catch(function (e) { out.textContent = ""; out.appendChild(h("div", { class: "note bad", text: e.message })); go.disabled = preview.disabled = false; });
+        }
+        var preview = h("button", { type: "button", disabled: true, onclick: function () { run(true); } }, "Preview");
+        var go = h("button", { type: "button", class: "primary", disabled: true, onclick: function () { run(false); } }, "Import");
+        detail.textContent = "";
+        detail.appendChild(h("div", { class: "card form importbox" }, h("h3", { text: "Import notes" }),
+          h("p", { class: "muted small", text: "Pick Markdown files, a whole folder (an Obsidian vault, an unzipped Notion export, a cloned GitHub wiki), or an indra bundle exported from another vault. Links are converted to [[wikilinks]]; existing notes are kept unless you tick Replace." }),
+          h("div", { class: "row" },
+            h("button", { type: "button", onclick: function () { pickFiles({ multiple: true, accept: ".md,.markdown,.json", keep: md }).then(take); } }, "Choose files"),
+            h("button", { type: "button", onclick: function () { pickFiles({ folder: true, keep: md }).then(take); } }, "Choose a folder")),
+          picked,
+          h("div", { class: "row" }, h("label", null, "Source", from), h("label", null, "Into folder", folder), h("label", null, "Add tags", tags)),
+          h("label", { class: "check" }, overwrite, h("span", { text: "Replace notes that exist already" })),
+          h("div", { class: "row" }, preview, go, h("button", { type: "button", onclick: function () { go_back(); } }, "Close")), out));
+        function go_back() { detail.textContent = ""; if (noteId) show(noteId); else detail.appendChild(empty("Pick a note to read or edit it.")); }
       }
       function newNote() {
         var f = { title: h("input", { type: "text", required: true }), type: h("input", { type: "text", list: "note-types", placeholder: "learning, pattern, finding, decision..." }),
@@ -540,6 +678,22 @@
         api("/api/learnings").then(function (list) {
           holder.textContent = "";
           var open = list.filter(function (l) { return l.status === "proposed"; }), done = list.filter(function (l) { return l.status !== "proposed"; });
+          holder.appendChild(h("div", { class: "row" },
+            h("button", { type: "button", disabled: !list.length, onclick: function () {
+              jsonFile("learnings.json", list.map(function (l) { return { title: l.title, body: l.body, tags: l.tags, status: l.status, origin: l.origin, note: l.note || null }; }));
+            } }, "Export"),
+            ro ? null : h("button", { type: "button", onclick: function () {
+              pickFiles({ accept: ".json,application/json" }).then(function (fs) {
+                if (!fs.length) return;
+                var items; try { items = listFrom(fs[0].text); } catch (e) { toast(fs[0].name + ": " + e.message, true); return; }
+                api("/api/learnings/import", { method: "POST", body: { items: items.map(function (x) { return { title: String(x.title || ""), body: String(x.body || ""), tags: x.tags || [] }; }) } })
+                  .then(function (r) { toast("Added " + r.added + " learning(s) to the inbox"); load(); refreshOverview(); }).catch(function (e) { toast(e.message, true); });
+              });
+            } }, "Import"),
+            done.length && !ro ? h("button", { type: "button", onclick: function () {
+              if (!window.confirm("Remove the " + done.length + " accepted learning(s) from this list? Their notes stay in memory.")) return;
+              Promise.all(done.map(function (l) { return api("/api/learnings/" + l.id, { method: "DELETE" }); })).then(load).catch(function (e) { toast(e.message, true); });
+            } }, "Clear accepted") : null));
           if (!ro) holder.appendChild(addForm());
           if (!open.length) holder.appendChild(empty("Nothing waiting for review."));
           open.forEach(function (l) { holder.appendChild(card(l)); });
@@ -547,7 +701,10 @@
             h("ul", { class: "links" }, done.map(function (l) {
               var vi = vaults.findIndex(function (v) { return l.note && v.path === l.note[0]; });
               return h("li", null, h("span", { class: "rel", text: ago(l.created) }),
-                vi >= 0 ? h("a", { href: "#/knowledge/notes/" + vaults[vi].index + "/" + encodeURIComponent(l.note[1]), text: l.title }) : h("span", { text: l.title }));
+                vi >= 0 ? h("a", { href: "#/knowledge/notes/" + vaults[vi].index + "/" + encodeURIComponent(l.note[1]), text: l.title }) : h("span", { text: l.title }),
+                ro ? null : h("button", { type: "button", class: "ghost small", title: "Remove from this list (the note stays)", onclick: function () {
+                  api("/api/learnings/" + l.id, { method: "DELETE" }).then(load).catch(function (e) { toast(e.message, true); });
+                } }, "Remove"));
             }))));
         }).catch(function (e) { holder.textContent = ""; holder.appendChild(empty(e.message)); });
       }
@@ -1320,7 +1477,24 @@
     var ov = S.ov, ro = ov.read_only;
     var importBox = h("div", { class: "row" });
     var add = h("button", { class: "primary", type: "button", disabled: ro }, "New item");
-    m.appendChild(header("Board", "Work for agents. Run an item with a profile; when the agent finishes it moves to Review (or Failed), and you move it to Done. Items from Jira, ClickUp or GitHub report every move back.", [importBox, add]));
+    var exportBtn = h("button", { type: "button", onclick: function () {
+      if (!data) return;
+      jsonFile("board.json", data.items.map(function (it) { return { title: it.title, body: it.body, labels: it.labels, column: it.column, profile: it.profile, runner: it.runner, node: it.node, target: it.target, source: it.source, result: it.result }; }));
+    } }, "Export");
+    var importFile = h("button", { type: "button", disabled: ro, onclick: function () {
+      pickFiles({ accept: ".json,application/json" }).then(function (fs) {
+        if (!fs.length) return;
+        var got; try { got = listFrom(fs[0].text); } catch (e) { toast(fs[0].name + ": " + e.message, true); return; }
+        got = got.filter(function (x) { return x && x.title; });
+        Promise.all(got.map(function (x) {
+          var b = { title: String(x.title), body: x.body || "", labels: x.labels || [] };
+          ["profile", "runner", "node", "target"].forEach(function (k) { if (x[k]) b[k] = x[k]; });
+          if (x.column && ["todo", "review", "done"].indexOf(x.column) >= 0) b.column = x.column;
+          return api("/api/board/items", { method: "POST", body: b });
+        })).then(function () { toast("Imported " + got.length + " item(s)"); load(); }).catch(function (e) { toast(e.message, true); load(); });
+      });
+    } }, "Import file");
+    m.appendChild(header("Board", "Work for agents. Run an item with a profile; when the agent finishes it moves to Review (or Failed), and you move it to Done. Items from Jira, ClickUp or GitHub report every move back.", [importBox, exportBtn, importFile, add]));
     var lanes = h("div", { class: "lanes" }), detail = h("div");
     m.appendChild(lanes); m.appendChild(detail);
     var data = null, open = null;
@@ -1340,6 +1514,22 @@
           .then(function (r) { toast("Agent process #" + r.proc + " started"); load(); }).catch(function (err) { toast(err.message, true); go.disabled = false; });
       } }, prof, node, target, go);
     }
+    function editItem(it) {
+      var f = { title: h("input", { type: "text", value: it.title, required: true }), body: h("textarea", null),
+        labels: h("input", { type: "text", value: (it.labels || []).join(", "), placeholder: "comma separated" }),
+        profile: h("select", null, h("option", { value: "", text: "none" }), (ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name }); })),
+        target: h("input", { type: "text", value: it.target || "", placeholder: "the harness's first target" }) };
+      f.body.value = it.body || ""; f.profile.value = it.profile || "";
+      detail.textContent = "";
+      detail.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+        e.preventDefault();
+        api("/api/board/items/" + it.id, { method: "PATCH", body: { title: f.title.value, body: f.body.value, labels: csv(f.labels.value), profile: f.profile.value, target: f.target.value.trim() } })
+          .then(function (x) { toast("Saved #" + it.id); load(); showDetail(x); }).catch(function (err) { toast(err.message, true); });
+      } }, h("h3", { text: "Edit #" + it.id }), h("label", null, "Title", f.title), h("label", null, "Description", f.body), h("label", null, "Labels", f.labels),
+        h("div", { class: "row" }, h("label", null, "Profile", f.profile), h("label", null, "Target", f.target)),
+        it.source ? h("p", { class: "muted small", text: "Changes stay on the board; the item in " + it.source.connector + " is not edited." }) : null,
+        h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Save"), h("button", { type: "button", onclick: function () { showDetail(it); } }, "Cancel"))));
+    }
     function showDetail(it) {
       open = it ? it.id : null; detail.textContent = "";
       if (!it) return;
@@ -1352,7 +1542,7 @@
         it.proc_id ? h("p", null, h("a", { href: "#/proc/" + it.proc_id, text: "Open agent process #" + it.proc_id })) : null,
         it.result ? [h("h3", { text: "Result" }), h("pre", { class: "view small", text: it.result })] : null,
         it.notes.length ? [h("h3", { text: "History" }), h("ul", { class: "links" }, it.notes.slice().reverse().map(function (n) { return h("li", null, h("span", { class: "muted", text: ago(n.ts) + "  " }), n.text); }))] : null,
-        ro || it.column === "running" ? null : h("div", { class: "row" }, h("button", { type: "button", class: "danger", onclick: function () {
+        ro || it.column === "running" ? null : h("div", { class: "row" }, h("button", { type: "button", onclick: function () { editItem(it); } }, "Edit"), h("button", { type: "button", class: "danger", onclick: function () {
           if (!window.confirm("Remove #" + it.id + " from the board? (Its tracker item is not touched.)")) return;
           api("/api/board/items/" + it.id, { method: "DELETE" }).then(function () { showDetail(null); load(); }).catch(function (e) { toast(e.message, true); });
         } }, "Remove from board"))));
@@ -1944,9 +2134,23 @@
         var first = body.querySelector("input,textarea,select"); if (first) first.focus();
       }
       var add = h("button", { class: "primary", type: "button", disabled: !c.editable, onclick: function () { edit(null, {}, "New " + d.noun); } }, "Add " + d.noun);
+      var exportBtn = h("button", { type: "button", disabled: !items.length, onclick: function () { jsonFile(section + "s.json", items); } }, "Export");
+      var importBtn = h("button", { type: "button", disabled: !c.editable, onclick: function () {
+        pickFiles({ accept: ".json,application/json" }).then(function (fs) {
+          if (!fs.length) return;
+          var got; try { got = listFrom(fs[0].text); } catch (e) { toast(fs[0].name + ": " + e.message, true); return; }
+          got = got.filter(function (x) { return x && typeof x === "object" && x.name; });
+          if (!got.length) { toast("No " + d.noun + " with a name in " + fs[0].name, true); return; }
+          var clash = got.filter(function (x) { return names.indexOf(x.name) >= 0; }).map(function (x) { return x.name; });
+          if (clash.length && !window.confirm("Replace " + clash.length + " existing " + d.noun + "(s) with the same name (" + clash.join(", ") + ")?")) return;
+          var next = items.slice();
+          got.forEach(function (x) { var j = names.indexOf(x.name); if (j >= 0) next[j] = x; else next.push(x); });
+          saveSection(section, next, "Imported " + got.length + " " + d.noun + "(s)").catch(function (e) { toast(e.message, true); });
+        });
+      } }, "Import");
       body.appendChild(h("div", { class: "row cfgbar" }, add, section === "profile" ? PROFILE_TEMPLATES.map(function (t) {
         return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New profile: " + t.label); } }, "+ " + t.label);
-      }) : null));
+      }) : null, exportBtn, importBtn));
       if (section === "profile") body.appendChild(h("p", { class: "muted", text: "A profile is how an agent runs: plan with a strong model, do the work with the one you choose, or try it on a local model. Launch, presets, workflow tasks and fan-outs can pick one; model and mode can still change while the agent runs." }));
       body.appendChild(modelList() || h("span"));
       var grid = h("div", { class: "grid" });
@@ -2054,7 +2258,14 @@
       if (!c.editable) ta.readOnly = true;
       body.appendChild(h("p", { class: "muted", text: "The whole file. Comments and layout are yours; the forms keep them too, except inside the section they rewrite. `indra init` writes a starter with every option explained." }));
       body.appendChild(ta); body.appendChild(out);
-      body.appendChild(h("div", { class: "row" }, check, saveBtn));
+      body.appendChild(h("div", { class: "row" }, check, saveBtn,
+        h("button", { type: "button", onclick: function () { saveFile("indra.toml", ta.value, "application/toml"); } }, "Download indra.toml"),
+        h("button", { type: "button", disabled: !c.editable, onclick: function () {
+          pickFiles({ accept: ".toml,text/plain" }).then(function (fs) {
+            if (!fs.length) return;
+            ta.value = fs[0].text; show("Loaded " + fs[0].name + " into the editor. Check it, then Save to apply it.");
+          });
+        } }, "Load a file")));
     }
 
     load().catch(function (e) { body.textContent = ""; body.appendChild(empty(e.status === 404 ? "This console was started without access to a config file." : e.message)); });

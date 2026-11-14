@@ -678,6 +678,211 @@ pub async fn health(
     Ok(Json(json!({ "dangling": dangling, "orphans": orphans })))
 }
 
+// ---- import and export -------------------------------------------------------------
+
+fn download(name: &str, content_type: &'static str, body: String) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", name),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ExportQ {
+    h: Option<String>,
+    #[serde(default)]
+    i: usize,
+    /// bundle (re-importable) | html | json | mermaid | dot
+    format: Option<String>,
+}
+
+/// A vault as a file: an indra bundle (every note's file, to import
+/// elsewhere), an offline HTML graph, the graph as JSON, Mermaid or DOT.
+pub async fn export(
+    State(app): State<Arc<App>>,
+    Query(q): Query<ExportQ>,
+) -> ApiResult<axum::response::Response> {
+    use crate::mem::export as ex;
+    let p = vault_path(&app, q.h.as_deref(), q.i)?;
+    let v = open_vault(&p)?;
+    let g = Graph::build(&v);
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().trim_start_matches('.').to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "vault".into());
+    let fmt = q.format.as_deref().unwrap_or("bundle");
+    Ok(match fmt {
+        "bundle" => {
+            let notes: Vec<Value> = v
+                .notes
+                .iter()
+                .filter_map(|n| {
+                    let rel = n
+                        .path
+                        .strip_prefix(&v.root)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let text = std::fs::read_to_string(&n.path).ok()?;
+                    Some(json!({ "path": rel, "text": text }))
+                })
+                .collect();
+            let b = json!({ "format": BUNDLE, "version": 1, "exported": now(), "vault": p.display().to_string(), "notes": notes });
+            download(
+                &format!("{}.indra.json", name),
+                "application/json",
+                serde_json::to_string_pretty(&b).unwrap_or_default(),
+            )
+        }
+        "html" => download(
+            &format!("{}.html", name),
+            "text/html; charset=utf-8",
+            ex::html(&ex::data(&v, &g, true), &format!("indra - {}", name)),
+        ),
+        "json" => download(
+            &format!("{}.graph.json", name),
+            "application/json",
+            serde_json::to_string_pretty(&ex::data(&v, &g, true)).unwrap_or_default(),
+        ),
+        "mermaid" => download(
+            &format!("{}.mmd", name),
+            "text/plain; charset=utf-8",
+            ex::mermaid(&ex::data(&v, &g, false)),
+        ),
+        "dot" => download(
+            &format!("{}.dot", name),
+            "text/plain; charset=utf-8",
+            ex::dot(&ex::data(&v, &g, false)),
+        ),
+        _ => return Err(bad("format must be bundle, html, json, mermaid or dot")),
+    })
+}
+
+/// The `format` of a vault bundle.
+pub const BUNDLE: &str = "indra-vault";
+
+#[derive(Deserialize)]
+pub struct ImportFile {
+    /// Relative path inside what was picked (a folder upload keeps them).
+    path: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+pub struct ImportReq {
+    h: Option<String>,
+    #[serde(default)]
+    i: usize,
+    files: Vec<ImportFile>,
+    /// obsidian | notion | github-wiki | markdown (default: detected)
+    from: Option<String>,
+    folder: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    overwrite: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// A relative path that stays inside the folder it is written to.
+fn safe_rel(p: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for part in p.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." || part.contains(':') || part.contains('\0') {
+            return None;
+        }
+        out.push(part);
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+/// Import uploaded files (a folder of Markdown, an Obsidian vault, a Notion
+/// export, a GitHub wiki, or the notes of a bundle) with `indra mem import`.
+pub async fn import(
+    State(app): State<Arc<App>>,
+    Json(r): Json<ImportReq>,
+) -> ApiResult<Json<Value>> {
+    writable(&app)?;
+    if r.files.is_empty() {
+        return Err(bad("no files to import"));
+    }
+    if r.files.len() > 20_000 {
+        return Err(bad("too many files (20000 at most)"));
+    }
+    let from = r
+        .from
+        .as_deref()
+        .filter(|f| !f.is_empty() && *f != "auto")
+        .map(crate::mem::import::Source::parse)
+        .transpose()
+        .map_err(bad)?;
+    let p = vault_path(&app, r.h.as_deref(), r.i)?;
+    if !p.is_dir() && !r.dry_run {
+        vault::init(&p).map_err(internal)?;
+    }
+    let mut rnd = [0u8; 8];
+    getrandom::fill(&mut rnd).map_err(|e| internal(e.to_string()))?;
+    let tmp = app.settings().data_dir.join("tmp").join(format!(
+        "import-{}",
+        rnd.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    ));
+    let result = (|| -> Result<crate::mem::import::Report, String> {
+        for f in &r.files {
+            let rel = safe_rel(&f.path).ok_or_else(|| format!("refused path: {}", f.path))?;
+            let dest = tmp.join(rel);
+            if let Some(d) = dest.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&dest, &f.text).map_err(|e| e.to_string())?;
+        }
+        if !p.is_dir() {
+            // A preview into a vault that does not exist yet: nothing to clash with.
+            let empty = tmp.with_extension("vault");
+            vault::init(&empty)?;
+            let r2 = crate::mem::import::import(
+                &empty,
+                &tmp,
+                &crate::mem::import::Options {
+                    from,
+                    folder: r.folder.clone(),
+                    tags: r.tags.clone(),
+                    overwrite: r.overwrite,
+                    dry_run: true,
+                },
+            );
+            let _ = std::fs::remove_dir_all(&empty);
+            return r2;
+        }
+        crate::mem::import::import(
+            &p,
+            &tmp,
+            &crate::mem::import::Options {
+                from,
+                folder: r.folder.clone().filter(|f| !f.trim().is_empty()),
+                tags: r.tags.clone(),
+                overwrite: r.overwrite,
+                dry_run: r.dry_run,
+            },
+        )
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(Json(json!(result.map_err(bad)?)))
+}
+
 // ---- handlers: learnings ---------------------------------------------------------
 
 pub async fn learnings_list(State(app): State<Arc<App>>) -> Json<Value> {
@@ -733,6 +938,36 @@ pub struct LearningEdit {
     title: Option<String>,
     body: Option<String>,
     tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct LearningsImport {
+    items: Vec<LearningNew>,
+}
+
+/// Learnings exported from another console (or written by hand), into the inbox.
+pub async fn learnings_import(
+    State(app): State<Arc<App>>,
+    Json(r): Json<LearningsImport>,
+) -> ApiResult<Json<Value>> {
+    writable(&app)?;
+    if r.items.len() > 2000 {
+        return Err(bad("too many learnings (2000 at most)"));
+    }
+    let mut added = 0;
+    for l in r.items {
+        if l.title.trim().is_empty() {
+            continue;
+        }
+        let origin = Origin {
+            by: "import".into(),
+            ..Default::default()
+        };
+        app.learnings
+            .add(&l.title, &l.body, clean_tags(l.tags), origin);
+        added += 1;
+    }
+    Ok(Json(json!({ "added": added })))
 }
 
 pub async fn learning_update(
@@ -852,9 +1087,9 @@ mod tests {
         assert_eq!(v[0].2, vec!["tests".to_string()]);
         assert!(parse_reflection("[]").is_empty());
         assert!(parse_reflection("  ").is_empty());
-        let free = parse_reflection("The build uses pnpm, not npm.");
+        let free = parse_reflection("The build needs make before cargo.");
         assert_eq!(free.len(), 1);
-        assert!(free[0].1.contains("pnpm"));
+        assert!(free[0].1.contains("make"));
     }
 
     #[test]
