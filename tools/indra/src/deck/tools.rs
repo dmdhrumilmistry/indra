@@ -3,7 +3,6 @@
 //! line, as API calls for the run pages and the Tools page. Both call the same
 //! functions, so the CLI and the console always agree.
 
-use crate::deck::runs;
 use crate::deck::web::{bad, forbidden, internal, not_found, ApiResult, App};
 use axum::extract::{Query, State};
 use axum::Json;
@@ -52,7 +51,7 @@ pub struct RunQ {
 
 fn run_dir(app: &App, h: Option<&str>, key: &str) -> ApiResult<PathBuf> {
     let h = app.harness(h)?;
-    runs::find(&h, key).ok_or_else(|| not_found("no such run"))
+    crate::deck::web::find_run(app, &h, key)
 }
 
 /// A PR review's repository and number, from its run.json.

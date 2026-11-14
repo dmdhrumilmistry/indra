@@ -1354,7 +1354,14 @@
         box.appendChild(h("table", null, h("thead", null, h("tr", null, ["Run", "Progress", "Results", "By agent", "Updated"].map(function (t) { return h("th", { text: t }); }))),
           h("tbody", null, runs.map(function (r) {
             var groups = Object.keys(r.counts.by_group).map(function (g) { return g + " " + r.counts.by_group[g]; }).join(", ");
-            var go = n.name === "local" ? function () { location.hash = "#/run/" + encodeURIComponent(r.key); } : null;
+            // A remote run opens as a copy fetched to the hub.
+            var go = n.name === "local" ? function () { location.hash = "#/run/" + encodeURIComponent(r.key); } : function () {
+              toast("Copying " + r.name + " from " + n.name + "...");
+              api("/api/nodes/runs/fetch", { method: "POST", body: { h: S.h, node: n.name, name: r.name } }).then(function (f) {
+                toast("Copied " + f.files + " file(s)" + (f.skipped.length ? ", " + f.skipped.length + " skipped (binary or large)" : "") + ". Changes stay in the copy.");
+                location.hash = "#/run/" + encodeURIComponent(f.key);
+              }).catch(function (e) { toast(e.message, true); });
+            };
             return h("tr", { class: go ? "click" : "", onclick: go },
               h("td", null, h("b", { text: r.name }), " ", r.active ? h("span", { class: "pill run live", text: "live" }) : null, h("div", { class: "muted", text: r.target })),
               h("td", null, segs(r.stages)), h("td", { text: String(r.counts.total) }), h("td", { class: "desc", text: groups || "-" }), h("td", { class: "muted", text: ago(r.modified) }));

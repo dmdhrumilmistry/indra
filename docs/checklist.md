@@ -45,8 +45,8 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] Leftover "bundled script" wording and a stale `scripts/` folder after the Python removal
 - [x] Dead `/api/memory` endpoint
 - [x] Board: the Run form cannot pick a runner
-- [ ] Runs on remote nodes are listed but cannot be opened, triaged or posted (needs the run's
-      files from the node, over SSH or the link)
+- [x] Runs on remote nodes are listed but cannot be opened, triaged or posted: the Nodes page
+      now copies a run to the hub (over SSH or the link) and opens the copy
 - [x] tools/indra/README.md Settings table lists 7 of the 13 tabs
 
 ## Not planned yet (the docs say so)

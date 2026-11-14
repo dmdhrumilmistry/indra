@@ -1030,6 +1030,9 @@ async fn node_frame(
                     .map(crate::deck::nodes::runs_for),
                 "info" => serde_json::to_value(crate::deck::nodes::local_info(settings))
                     .map_err(|e| e.to_string()),
+                "run_files" => serde_json::from_value::<crate::deck::nodes::RunFilesReq>(args)
+                    .map_err(|e| format!("bad run_files request: {}", e))
+                    .and_then(crate::deck::nodes::run_files),
                 other => Err(format!("unknown request {:?}", other)),
             };
             let f = match r {

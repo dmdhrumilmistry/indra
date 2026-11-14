@@ -252,6 +252,32 @@ fn a_node_dials_in_runs_jobs_and_goes_direct() {
     let runs = json(&body);
     assert_eq!(runs[0]["name"], "r1", "{}", body);
     assert_eq!(runs[0]["counts"]["total"], 2, "{}", body);
+    // And open as a copy on the hub: the run page, its files, its findings.
+    std::fs::write(run.join("plan.md"), "the plan").unwrap();
+    let (s, body) = http(
+        h.port,
+        "POST",
+        "/api/nodes/runs/fetch",
+        r#"{"node":"box","name":"r1"}"#,
+    );
+    assert_eq!(s, 200, "{}", body);
+    let f = json(&body);
+    assert_eq!(f["key"], "n:box:r1");
+    assert_eq!(f["files"], 2, "{}", body);
+    let (s, body) = http(h.port, "GET", "/api/run?key=n:box:r1", "");
+    assert_eq!(s, 200, "{}", body);
+    assert_eq!(json(&body)["counts"]["total"], 2, "{}", body);
+    let (s, body) = http(h.port, "GET", "/api/run/file?key=n:box:r1&rel=plan.md", "");
+    assert_eq!(s, 200, "{}", body);
+    assert_eq!(json(&body)["text"], "the plan");
+    for bad in [
+        r#"{"node":"box","name":"../x"}"#,
+        r#"{"node":"box","name":"nope"}"#,
+        r#"{"node":"ghost","name":"r1"}"#,
+    ] {
+        let (s, _) = http(h.port, "POST", "/api/nodes/runs/fetch", bad);
+        assert!(s >= 400, "{}", bad);
+    }
 
     // Stop reaches the node, which stops the agent's whole tree.
     let pidfile = h.dir.join("held.pid");

@@ -590,15 +590,22 @@ struct RunQ {
     max: Option<u64>,
 }
 
+/// A run of the harness, or a copy fetched from a node (`n:<node>:<run>`).
+pub(crate) fn find_run(app: &App, h: &Harness, key: &str) -> ApiResult<std::path::PathBuf> {
+    runs::find(h, key)
+        .or_else(|| runs::fetched_dir(&app.settings().data_dir, key))
+        .ok_or_else(|| not_found("no such run"))
+}
+
 async fn run_get(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResult<Json<Value>> {
     let h = &app.harness(q.h.as_deref())?;
-    let dir = runs::find(h, &q.key).ok_or_else(|| not_found("no such run"))?;
+    let dir = find_run(&app, h, &q.key)?;
     Ok(Json(json!(runs::summarize(h, &q.key, &dir, true))))
 }
 
 async fn run_file(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResult<Json<Value>> {
     let h = &app.harness(q.h.as_deref())?;
-    let dir = runs::find(h, &q.key).ok_or_else(|| not_found("no such run"))?;
+    let dir = find_run(&app, h, &q.key)?;
     let rel = q.rel.ok_or_else(|| bad("rel is required"))?;
     let p = runs::confined(&dir, &rel)
         .ok_or_else(|| forbidden("that path is not a file inside this run"))?;
@@ -1152,6 +1159,94 @@ async fn node_runs(
     }
     .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct FetchRunReq {
+    h: Option<String>,
+    node: String,
+    name: String,
+}
+
+/// Copy a run from a node to the hub, so its page (findings, triage,
+/// comparison, next steps) works on it. Key: `n:<node>:<run>`. The copy is a
+/// copy: triage changes stay in it.
+async fn node_run_fetch(
+    State(app): State<Arc<App>>,
+    Json(r): Json<FetchRunReq>,
+) -> ApiResult<Json<Value>> {
+    let h = &app.harness(r.h.as_deref())?;
+    let settings = app.settings();
+    let n = settings
+        .node(&r.node)
+        .ok_or_else(|| not_found("unknown node"))?;
+    nodes::validate_name(&n.name).map_err(bad)?;
+    if r.name.is_empty()
+        || r.name.starts_with('.')
+        || !r
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.+@".contains(c))
+    {
+        return Err(bad("bad run name"));
+    }
+    let link = app.procs.links().get(&r.node).filter(|l| l.connected());
+    let targets = match (&link, n.targets.is_empty()) {
+        (Some(l), true) => l.targets(),
+        _ => n.targets.clone(),
+    };
+    let spec = RunsSpec::for_node(h, &targets).ok_or_else(|| bad("this harness has no runs"))?;
+    let req = nodes::RunFilesReq {
+        spec,
+        name: r.name.clone(),
+    };
+    let v = if let Some(l) = link {
+        l.request("run_files", json!(req), 120).await
+    } else if n.ssh.is_empty() {
+        Err(format!(
+            "node '{}' dials in and is not connected now",
+            n.name
+        ))
+    } else {
+        nodes::remote_run_files(n, &req).await
+    }
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    let dir = settings
+        .data_dir
+        .join("fetched")
+        .join(&n.name)
+        .join(&r.name);
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut written = 0usize;
+    for f in v
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let rel = f.get("rel").and_then(Value::as_str).unwrap_or("");
+        let p = std::path::Path::new(rel);
+        // Only plain relative paths: nothing absolute, no `..`.
+        if rel.is_empty()
+            || !p
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let out = dir.join(p);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
+        }
+        std::fs::write(&out, f.get("text").and_then(Value::as_str).unwrap_or(""))
+            .map_err(|e| internal(e.to_string()))?;
+        written += 1;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| internal(e.to_string()))?;
+    Ok(Json(json!({
+        "key": format!("n:{}:{}", n.name, r.name), "files": written,
+        "skipped": v.get("skipped").cloned().unwrap_or(json!([])),
+    })))
 }
 
 // ---- workflows -------------------------------------------------------------------
@@ -2319,6 +2414,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/nodes/enrol", post(node_enrol))
         .route("/agent/connect", get(agent_connect))
         .route("/api/nodes/runs", get(node_runs))
+        .route("/api/nodes/runs/fetch", post(node_run_fetch))
         .route("/api/workflows", get(workflows_list).post(workflow_run))
         .route("/api/workflows/fanout", post(workflow_fanout))
         .route("/api/workflows/{id}", get(workflow_get))

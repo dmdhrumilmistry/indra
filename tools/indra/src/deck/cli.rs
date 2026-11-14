@@ -719,6 +719,8 @@ pub enum NodeCmd {
     Info,
     /// List run directories described by a JSON spec on stdin
     Runs,
+    /// One run's text files as JSON (the hub opens a copy of a remote run)
+    Runfiles,
     /// Run one agent job given as JSON on stdin; stops it when stdin closes
     Exec,
     /// Dial in to a hub and run its jobs here, reconnecting as needed (no SSH)
@@ -758,6 +760,7 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
     match a.cmd {
         NodeCmd::Info => nodes::cmd_info(&load(opts, None, false)?),
         NodeCmd::Runs => nodes::cmd_runs(),
+        NodeCmd::Runfiles => nodes::cmd_run_files(),
         NodeCmd::Exec => nodes::cmd_exec(&load(opts, None, false)?),
         NodeCmd::Connect {
             hub,

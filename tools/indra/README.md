@@ -673,7 +673,10 @@ gpu-box        DOWN  me@gpu-box  ssh: Could not resolve hostname gpu-box: Name o
 ```
 
 In the console, **Nodes** shows each machine, its runners, its capacity and the review runs on
-its disk, and **Launch** can start an agent on any node. A remote agent streams into the same
+its disk (over SSH, or over the link for a machine that dials in). Click a remote run to copy its
+text files to the hub (`<data dir>/fetched/<node>/<run>`) and open it like a local one: findings,
+triage, comparison, memory, publish and post work on the copy, and changes stay in the copy.
+**Launch** can start an agent on any node. A remote agent streams into the same
 live view as a local one, with its subagents and tool calls, and Stop stops it on the remote.
 
 ### Machines that dial in (no SSH)
