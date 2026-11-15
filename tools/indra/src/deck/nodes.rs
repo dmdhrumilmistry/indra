@@ -420,6 +420,73 @@ pub fn list_dirs(path: Option<&str>) -> Result<Value, String> {
     }))
 }
 
+/// `rel` inside `root`, refusing anything that leaves it (`..`, links out).
+fn inside(root: &str, rel: &str) -> Result<(PathBuf, PathBuf), String> {
+    let base = std::fs::canonicalize(root).map_err(|e| format!("{}: {}", root, e))?;
+    let rel = rel.trim().trim_start_matches(['/', '\\']);
+    let p = if rel.is_empty() {
+        base.clone()
+    } else {
+        base.join(rel)
+    };
+    let p = std::fs::canonicalize(&p).map_err(|_| format!("{}: not found", rel))?;
+    if !p.starts_with(&base) {
+        return Err("outside the agent's folder".into());
+    }
+    Ok((base, p))
+}
+
+/// The entries of a folder inside `root` (the agent's folder): names,
+/// kinds and sizes, folders first. `.git` is left out.
+pub fn list_files(root: &str, rel: &str) -> Result<Value, String> {
+    let (base, dir) = inside(root, rel)?;
+    let mut out: Vec<(bool, String, u64)> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name() != ".git")
+        .map(|e| {
+            let m = e.metadata().ok();
+            (
+                m.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                e.file_name().to_string_lossy().to_string(),
+                m.map(|m| m.len()).unwrap_or(0),
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+    let more = out.len() > 1000;
+    out.truncate(1000);
+    let rel = dir
+        .strip_prefix(&base)
+        .unwrap_or(&dir)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(json!({
+        "path": rel, "more": more,
+        "entries": out.iter().map(|(d, n, sz)| json!({ "name": n, "dir": d, "size": sz })).collect::<Vec<_>>(),
+    }))
+}
+
+/// A text file inside `root`, up to 1 MB; binary files are not returned.
+pub fn read_file(root: &str, rel: &str) -> Result<Value, String> {
+    let (_, p) = inside(root, rel)?;
+    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".into());
+    }
+    if meta.len() > 1 << 20 {
+        return Ok(json!({ "path": rel, "size": meta.len(), "too_big": true }));
+    }
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    if bytes.iter().take(8000).any(|b| *b == 0) {
+        return Ok(json!({ "path": rel, "size": meta.len(), "binary": true }));
+    }
+    Ok(json!({ "path": rel, "size": meta.len(), "text": String::from_utf8_lossy(&bytes) }))
+}
+
 pub fn run_files(r: RunFilesReq) -> Result<Value, String> {
     if r.name.is_empty() || r.name.contains(['/', '\\']) || r.name.starts_with('.') {
         return Err("bad run name".into());
@@ -1483,6 +1550,42 @@ mod folder_tests {
         assert_eq!(v["dirs"], json!(["A-app", "b-app"]), "{}", v);
         assert!(v["parent"].is_string());
         assert_eq!(v["roots"][0]["label"], "Home");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_stay_inside_the_agents_folder() {
+        let dir = std::env::temp_dir().join(format!("indra-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("w/src")).unwrap();
+        std::fs::create_dir_all(dir.join("w/.git")).unwrap();
+        std::fs::write(dir.join("w/src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("w/b.bin"), [0u8, 1, 2]).unwrap();
+        std::fs::write(dir.join("secret.txt"), "no").unwrap();
+        let root = dir.join("w").to_string_lossy().to_string();
+        let l = list_files(&root, "").unwrap();
+        let names: Vec<&str> = l["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["src", "b.bin"], "folders first, no .git");
+        assert_eq!(read_file(&root, "src/a.rs").unwrap()["text"], "fn a() {}\n");
+        assert_eq!(
+            read_file(&root, "/src/a.rs").unwrap()["text"],
+            "fn a() {}\n"
+        );
+        assert_eq!(read_file(&root, "b.bin").unwrap()["binary"], true);
+        for bad in ["../secret.txt", "src/../../secret.txt"] {
+            assert!(read_file(&root, bad).is_err(), "{}", bad);
+            assert!(list_files(&root, bad).is_err(), "{}", bad);
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("secret.txt"), dir.join("w/link")).unwrap();
+            assert!(read_file(&root, "link").is_err(), "a link out is refused");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1295,6 +1295,20 @@ async fn node_frame(
                     .and_then(crate::deck::nodes::run_files),
                 // The console's folder browser: folder names only, never files.
                 "dirs" => crate::deck::nodes::list_dirs(args.get("path").and_then(Value::as_str)),
+                // The console's file viewer: only inside a folder agents may
+                // work in here, so the hub cannot read anything else.
+                "ls" | "cat" => {
+                    let root = args.get("root").and_then(Value::as_str).unwrap_or("");
+                    let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+                    let allowed = state.targets.lock().unwrap().iter().any(|t| t == root);
+                    if !allowed {
+                        Err("not a folder agents work in on this machine".to_string())
+                    } else if v.get("what").and_then(Value::as_str) == Some("ls") {
+                        crate::deck::nodes::list_files(root, path)
+                    } else {
+                        crate::deck::nodes::read_file(root, path)
+                    }
+                }
                 // The console sets the folders agents may work in here.
                 "set_folders" => {
                     let want: Vec<String> = args

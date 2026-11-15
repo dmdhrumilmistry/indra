@@ -330,7 +330,7 @@ Open the printed URL once. It exchanges the token for a cookie and you are in. A
 open the browser for you, `--read-only` to turn off launching and editing.
 
 The menu keeps what you use every day at the top: **Home** (a short *Get started* checklist that
-ticks itself off), **Run an agent**, **Running**, **Workflows**, **Board**, **Results**,
+ticks itself off), **Run an agent**, **Sessions**, **Workflows**, **Board**, **Results**,
 **Machines** and **Knowledge**. **More** opens the rest: Accounts, the harness's Agents, Skills
 and Prompts, the Graph map, the Marketplace, the Terminal and Tools. **Run an agent** asks for
 four things (what to do, the machine, the agent and the folder); profile, model, permissions and
@@ -345,6 +345,7 @@ memory are under **More options**.
 | **Results** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. Start a pull request review from here; on a run, triage its findings, compare it with an earlier run, record it into memory, publish it or post it. See [Reviewing pull requests from the console](../../docs/guides/review-loop.md). |
 | **Marketplace** | Plugins, skills and agents from Claude Code plugin marketplaces (Anthropic's built in, add your own) and skill repositories: look inside, install for Claude Code, Codex or a harness, or as a Claude Code plugin; update and remove. See [Marketplace](../../docs/guides/marketplace.md). |
 | **Plan and delegate** | Under Run an agent: a planner profile writes a plan, you review and edit it, worker profiles (cheaper or local models) carry out each step, a reviewer checks the result; cost per role. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). |
+| **Sessions** | Your agents as conversations, like Claude Code online: the sessions on the left (search, **+ New**, live status; kept across restarts of the console), the selected one in the middle (your messages, its replies, its tool steps folded to one line each, what it asks you with Allow and Deny, and a box to reply, queued while it works, or to continue it once it ended), and on the right where it works and what it did (machine, folder, git branch, agent and model, context used, its task list, the files it changed with their diffs, every other file in its folder to browse, and the pull requests it linked). Code shows with line numbers, in replies too. **Table view** is the older list of every process. |
 | **Run an agent, Running** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
 | **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. Items can be edited and removed, and the board exported to or imported from JSON. See [the board guide](../../docs/guides/board.md). |
 | **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |

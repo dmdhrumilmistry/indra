@@ -9,7 +9,7 @@
 
 use crate::deck::config::Runner;
 use crate::deck::nodes::{AgentOpts, Node, Resume};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
@@ -23,7 +23,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 const MAX_EVENTS: usize = 5000;
 const MAX_TEXT: usize = 4000;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub seq: u64,
     pub ts: u64,
@@ -103,6 +103,14 @@ pub struct ProcView {
     /// MCP servers Claude Code reported at start: name and status
     /// (connected, failed, needs-auth, pending).
     pub mcp: Vec<(String, String)>,
+    /// Files it wrote or edited (as its tools named them).
+    pub files: Vec<String>,
+    /// Its task list, as it last wrote it (Claude Code's TodoWrite).
+    pub todos: Value,
+    /// Pull requests and issues it linked to.
+    pub links: Vec<String>,
+    /// From an earlier run of the console (kept on disk; read-only).
+    pub archived: bool,
 }
 
 /// A tool request the agent is waiting on.
@@ -150,6 +158,9 @@ struct State {
     context_tokens: Option<u64>,
     context_window: Option<u64>,
     mcp: Vec<(String, String)>,
+    files: Vec<String>,
+    todos: Value,
+    links: Vec<String>,
 }
 
 impl State {
@@ -179,6 +190,9 @@ impl State {
             context_tokens: None,
             context_window: None,
             mcp: Vec::new(),
+            files: Vec::new(),
+            todos: Value::Null,
+            links: Vec::new(),
         }
     }
 }
@@ -211,10 +225,21 @@ pub struct Proc {
     reflect: bool,
     /// The account it runs with (`login:<agent>@<node>`: the machine's own).
     account: Option<String>,
+    /// Restored from disk: it ran under an earlier console.
+    archived: bool,
 }
 
 fn now() -> u64 {
     crate::deck::runs::now()
+}
+
+/// GitHub pull request and issue links in a text.
+fn links_in(text: &str) -> Vec<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"https://github\.com/[\w.-]+/[\w.-]+/(?:pull|issues)/\d+").unwrap()
+    });
+    re.find_iter(text).map(|m| m.as_str().to_string()).collect()
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -228,7 +253,189 @@ fn clip(s: &str, n: usize) -> String {
     }
 }
 
+/// What is kept of a finished session, so it is still there after the
+/// console restarts (events are already redacted).
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    id: u64,
+    node: String,
+    parent: Option<u64>,
+    resumed: Option<String>,
+    can_resume: bool,
+    runner: String,
+    harness: String,
+    prompt: String,
+    cwd: String,
+    command: Vec<String>,
+    started: u64,
+    log: PathBuf,
+    opts: AgentOpts,
+    profile: Option<String>,
+    account: Option<String>,
+    status: String,
+    exit_code: Option<i32>,
+    ended: Option<u64>,
+    events: Vec<Event>,
+    tools: BTreeMap<String, usize>,
+    agents: Vec<Value>,
+    cost_usd: Option<f64>,
+    format: String,
+    host: Option<String>,
+    session: Option<String>,
+    mode: Option<String>,
+    model: Option<String>,
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
+    mcp: Vec<(String, String)>,
+    files: Vec<String>,
+    todos: Value,
+    links: Vec<String>,
+}
+
+/// Sessions kept on disk: the newest this many come back at start.
+const KEEP_SESSIONS: usize = 300;
+
+fn sessions_dir(log_dir: &Path) -> PathBuf {
+    log_dir.join("sessions")
+}
+
 impl Proc {
+    /// Keep this finished session on disk (owner-only), next to its log.
+    fn save(&self) {
+        let Some(dir) = self.log.parent().map(sessions_dir) else {
+            return;
+        };
+        let saved = {
+            let st = self.state.lock().unwrap();
+            Saved {
+                id: self.id,
+                node: self.node.clone(),
+                parent: self.parent,
+                resumed: self.resumed.clone(),
+                can_resume: self.can_resume,
+                runner: self.runner.clone(),
+                harness: self.harness.clone(),
+                prompt: self.redacted(&self.prompt),
+                cwd: self.cwd.clone(),
+                command: self.command.clone(),
+                started: self.started,
+                log: self.log.clone(),
+                opts: self.opts.clone(),
+                profile: self.profile.clone(),
+                account: self.account.clone(),
+                status: st.status.clone(),
+                exit_code: st.exit_code,
+                ended: st.ended,
+                events: st.events.iter().cloned().collect(),
+                tools: st.tools.clone(),
+                agents: st
+                    .agents
+                    .iter()
+                    .filter_map(|a| serde_json::to_value(a).ok())
+                    .collect(),
+                cost_usd: st.cost_usd,
+                format: st.format.clone(),
+                host: st.host.clone(),
+                session: st.session.clone(),
+                mode: st.mode.clone(),
+                model: st.model.clone(),
+                context_tokens: st.context_tokens,
+                context_window: st.context_window,
+                mcp: st.mcp.clone(),
+                files: st.files.clone(),
+                todos: st.todos.clone(),
+                links: st.links.clone(),
+            }
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{}-{}.json", self.started, self.id));
+        let tmp = path.with_extension("json.tmp");
+        let Ok(text) = serde_json::to_string(&saved) else {
+            return;
+        };
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        if o.open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    /// A session saved by an earlier console, read-only.
+    fn restore(sv: Saved) -> Proc {
+        let (tx, _) = broadcast::channel(16);
+        let mut st = State::new(&sv.format, false, &sv.opts);
+        st.status = sv.status;
+        st.exit_code = sv.exit_code;
+        st.ended = sv.ended.or(Some(sv.started));
+        st.seq = sv.events.last().map(|e| e.seq).unwrap_or(0);
+        st.events = sv.events.into();
+        st.tools = sv.tools;
+        st.agents = sv
+            .agents
+            .into_iter()
+            .filter_map(|a| {
+                Some(SubAgent {
+                    id: a.get("id")?.as_str()?.into(),
+                    kind: a.get("type")?.as_str()?.into(),
+                    description: a
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    state: match a.get("state").and_then(Value::as_str) {
+                        Some("error") => "error",
+                        _ => "done",
+                    },
+                    started: a.get("started").and_then(Value::as_u64).unwrap_or(0),
+                    tools: a.get("tools").and_then(Value::as_u64).unwrap_or(0) as usize,
+                })
+            })
+            .collect();
+        st.cost_usd = sv.cost_usd;
+        st.host = sv.host;
+        st.session = sv.session;
+        st.mode = sv.mode;
+        st.model = sv.model;
+        st.context_tokens = sv.context_tokens;
+        st.context_window = sv.context_window;
+        st.mcp = sv.mcp;
+        st.files = sv.files;
+        st.todos = sv.todos;
+        st.links = sv.links;
+        st.open = false;
+        st.turns = 0;
+        Proc {
+            id: sv.id,
+            node: sv.node,
+            parent: sv.parent,
+            resumed: sv.resumed,
+            can_resume: sv.can_resume,
+            runner: sv.runner,
+            harness: sv.harness,
+            prompt: sv.prompt,
+            cwd: sv.cwd,
+            command: sv.command,
+            started: sv.started,
+            log: sv.log,
+            state: Mutex::new(st),
+            tx,
+            stop: Mutex::new(None),
+            opts: sv.opts,
+            profile: sv.profile,
+            redact: Vec::new(),
+            ctl: Mutex::new(None),
+            memory: Vec::new(),
+            reflect: false,
+            account: sv.account,
+            archived: true,
+        }
+    }
+
     /// `text` with the secret values this agent was given replaced by names.
     fn redacted(&self, text: &str) -> String {
         if self.redact.is_empty() {
@@ -242,6 +449,14 @@ impl Proc {
         let text = self.redacted(&text);
         let ev = {
             let mut st = self.state.lock().unwrap();
+            // Pull requests and issues it mentions, for the side panel.
+            if text.contains("github.com/") {
+                for u in links_in(&text) {
+                    if !st.links.contains(&u) && st.links.len() < 50 {
+                        st.links.push(u);
+                    }
+                }
+            }
             st.seq += 1;
             let ev = Event {
                 seq: st.seq,
@@ -307,6 +522,10 @@ impl Proc {
             context_tokens: st.context_tokens,
             context_window: st.context_window,
             mcp: st.mcp.clone(),
+            files: st.files.clone(),
+            todos: st.todos.clone(),
+            links: st.links.clone(),
+            archived: self.archived,
         }
     }
 
@@ -876,6 +1095,22 @@ impl Proc {
             .to_string();
         let input = c.get("input").cloned().unwrap_or(Value::Null);
         let field = |k: &str| input.get(k).and_then(Value::as_str).map(String::from);
+        // What the side panel shows: its task list, and the files it touched.
+        if agent.is_none() {
+            let mut st = self.state.lock().unwrap();
+            if name == "TodoWrite" {
+                if let Some(t) = input.get("todos") {
+                    st.todos = t.clone();
+                }
+            }
+            if ["Edit", "Write", "MultiEdit", "NotebookEdit"].contains(&name.as_str()) {
+                if let Some(f) = field("file_path").or_else(|| field("notebook_path")) {
+                    if !st.files.contains(&f) && st.files.len() < 500 {
+                        st.files.push(f);
+                    }
+                }
+            }
+        }
         if name == "Task" || name == "Agent" {
             let kind = field("subagent_type").unwrap_or_else(|| "general-purpose".into());
             let desc = field("description").unwrap_or_default();
@@ -994,9 +1229,34 @@ impl Procs {
             .parent()
             .map(|d| d.join("secrets"))
             .unwrap_or_else(|| log_dir.join("secrets"));
+        // Sessions from earlier runs of the console, newest first.
+        let mut saved: Vec<(u64, PathBuf)> = std::fs::read_dir(sessions_dir(&log_dir))
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                    .filter_map(|p| {
+                        let started = p.file_stem()?.to_str()?.split('-').next()?.parse().ok()?;
+                        Some((started, p))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        saved.sort_by_key(|x| std::cmp::Reverse(x.0));
+        let mut restored = BTreeMap::new();
+        for (_, p) in saved.into_iter().take(KEEP_SESSIONS) {
+            if let Some(sv) = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Saved>(&t).ok())
+            {
+                let proc = Proc::restore(sv);
+                restored.insert(proc.id, Arc::new(proc));
+            }
+        }
+        let next = restored.keys().max().map(|m| m + 1).unwrap_or(1);
         Arc::new(Procs {
-            procs: Mutex::new(BTreeMap::new()),
-            next: AtomicU64::new(1),
+            procs: Mutex::new(restored),
+            next: AtomicU64::new(next),
             log_dir,
             vault: Arc::new(crate::deck::secrets::Vault::open(secrets)),
             links: Arc::new(crate::deck::link::Links::default()),
@@ -1089,6 +1349,7 @@ impl Procs {
             };
             *proc.stop.lock().unwrap() = None;
             proc.push("exit", text, None);
+            proc.save();
         });
     }
 
@@ -1388,6 +1649,7 @@ impl Procs {
                 memory: opts.memory.clone(),
                 reflect: opts.reflect,
                 account: account.clone(),
+                archived: false,
             });
             let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
             self.vault
@@ -1458,6 +1720,7 @@ impl Procs {
             memory: opts.memory.clone(),
             reflect: opts.reflect,
             account: account.clone(),
+            archived: false,
         });
         let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
         self.vault
@@ -1633,6 +1896,7 @@ impl Procs {
                 ("exit", text)
             };
             p3.push(kind, text, None);
+            p3.save();
         });
         Ok(id)
     }
@@ -1901,6 +2165,9 @@ mod tests {
                 context_tokens: None,
                 context_window: None,
                 mcp: Vec::new(),
+                files: Vec::new(),
+                todos: Value::Null,
+                links: Vec::new(),
             }),
             tx,
             stop: Mutex::new(None),
@@ -1911,6 +2178,7 @@ mod tests {
             memory: vec![],
             reflect: false,
             account: None,
+            archived: false,
         };
         for l in [
             r#"{"type":"system","subtype":"init","model":"m1","tools":[],"session_id":"4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"}"#,
@@ -1960,5 +2228,68 @@ mod tests {
             "the result is the outcome"
         );
         assert!(p.state.lock().unwrap().events[7].text.contains("$0.0123"));
+    }
+
+    /// A finished session is kept on disk and comes back, read-only, with
+    /// its conversation, tasks, files and links, after the console restarts.
+    #[test]
+    fn sessions_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("indra-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let logs = dir.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let procs = Procs::new(logs.clone());
+        let (tx, _) = broadcast::channel(16);
+        let p = Proc {
+            id: 7,
+            node: "local".into(),
+            parent: None,
+            resumed: None,
+            can_resume: true,
+            runner: "claude".into(),
+            harness: "h".into(),
+            prompt: "fix it".into(),
+            cwd: "/t".into(),
+            command: vec![],
+            started: 1000,
+            log: logs.join("1000-7-local-claude.log"),
+            state: Mutex::new(State::new(
+                "claude-stream-json",
+                false,
+                &AgentOpts::default(),
+            )),
+            tx,
+            stop: Mutex::new(None),
+            opts: AgentOpts::default(),
+            profile: None,
+            redact: vec![],
+            ctl: Mutex::new(None),
+            memory: vec![],
+            reflect: false,
+            account: None,
+            archived: false,
+        };
+        for l in [
+            r#"{"type":"system","subtype":"init","model":"m1","session_id":"s-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a","name":"TodoWrite","input":{"todos":[{"content":"one","status":"completed"}]}},{"type":"tool_use","id":"b","name":"Edit","input":{"file_path":"src/x.rs"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"see https://github.com/o/r/pull/3 and https://github.com/o/r/pull/3"}]}}"#,
+        ] {
+            p.claude_line(l);
+        }
+        p.state.lock().unwrap().status = "exited".into();
+        p.save();
+        drop(procs);
+        let again = Procs::new(logs);
+        let v = again.get(7).expect("restored").view();
+        assert!(v.archived && !v.open);
+        assert_eq!(v.status, "exited");
+        assert_eq!(v.session.as_deref(), Some("s-1"));
+        assert_eq!(v.files, vec!["src/x.rs"]);
+        assert_eq!(v.links, vec!["https://github.com/o/r/pull/3"], "once each");
+        assert_eq!(v.todos[0]["content"], "one");
+        assert!(v.events > 0);
+        // New processes do not reuse its id.
+        assert_eq!(again.next.load(Ordering::SeqCst), 8);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
