@@ -160,7 +160,7 @@ The CLI is released as `v<version>` (releases up to 0.6.0 were `indra-v<version>
 installers and `indra update` understand both):
 
 1. Set `version` in `tools/indra/Cargo.toml` (CI refuses a release that does not match it).
-2. Merge, then either run **Actions > indra > Run workflow** on `main` with the version
+2. Merge, then either run **Actions > release > Run workflow** on `main` with the version
    (`0.7.0`), which creates the tag and the release on that commit, or push a tag yourself:
    `git tag v0.7.0 && git push origin v0.7.0`.
 3. CI tests on Linux, macOS and Windows, builds the five binaries (Linux x86_64 and arm64
@@ -173,6 +173,9 @@ installers and `indra update` understand both):
    crates.io is left alone.
    To mark an existing release Latest without building, run the workflow with **latest** set to
    its version (`0.6.0`); an old `indra-v<version>` release is renamed to `v<version>` on the way.
+   Releasing lives in `release.yml`, apart from the tests in `indra.yml`, so pull requests show
+   only the checks that apply to them (the site likewise: `pages-check.yml` builds it on pull
+   requests, `pages.yml` deploys it from main).
 4. Check the one-liners against it:
    `curl -fsSL https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh | sh`
    and, on Windows, `irm https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1 | iex`.
