@@ -16,7 +16,8 @@ flourish: every published finding carries its payload, PoC, verification verdict
   and `capabilities.json` for PDF/doc tool availability.
 
 ## Inputs data
-- `verified.jsonl` (all findings + verdicts), `chains.md`, `recon.md`, `codebase-map.json`.
+- `verified.jsonl` (all findings + verdicts), `chains.md`, `recon.md`, `codebase-map.json`, and
+  `threat-model.md` / `threat-model.json` when the run has a threat model.
 
 ## Publishing policy
 - **Published set** = findings with `status` in {`verified`, `needs-runtime`}. `false-positive` findings go
@@ -31,6 +32,9 @@ flourish: every published finding carries its payload, PoC, verification verdict
    - **Per-finding detail** (one section each): what/where, data-flow (source->sink hops), CWE/OWASP,
      the **payload**, the **PoC**, the verification verdict + rationale, and the **mitigation** (code-level).
    - **Attack chains**: each chain with its steps, preconditions, and combined impact.
+   - **Threat model** (when present): the data flow diagram (copy the Mermaid block), the trust boundaries
+     table, the open threats no finding covers (they are still risks: say what to check), and the design
+     gaps. Link each finding to its threats by the `threats` field.
    - **Appendix**: SBOM/CVE summary from recon; false-positives with reasons; methodology + limitations.
 2. **`findings.json`** - a JSON array of every finding object (full schema, all statuses). Machine-consumable.
    **Generate this by script, not by hand** (saves tokens and avoids transcription drift): `verified.jsonl`

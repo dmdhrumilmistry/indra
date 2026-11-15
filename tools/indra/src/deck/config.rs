@@ -266,8 +266,8 @@ fn is_false(b: &bool) -> bool {
 
 pub const INPUT_KINDS: [&str; 5] = ["text", "choice", "bool", "target", "profile"];
 
-/// The workflows indra brings for its own harness: a pull request review and
-/// a full security review. A configured workflow with the same name wins.
+/// The workflows indra brings for its own harness: a pull request review, a
+/// full security review and a threat model. A configured workflow with the same name wins.
 pub fn builtin_workflows() -> Vec<WorkflowCfg> {
     #[derive(Deserialize)]
     struct W {
@@ -367,9 +367,9 @@ required = true
 name = "focus"
 label = "Focus"
 kind = "text"
-placeholder = "optional: classes:sqli,ssrf or stage:recon"
-pattern = '[A-Za-z0-9 :,._/-]{0,200}'
-help = "Leave empty for everything."
+placeholder = "optional: classes:sqli,ssrf, stage:recon or since:main"
+pattern = '[A-Za-z0-9 :,._/~^-]{0,200}'
+help = "Leave empty for everything. since:<git ref> reviews only what changed, reusing the earlier map and threat model."
 [[workflow.input]]
 name = "profile"
 label = "Profile"
@@ -379,6 +379,32 @@ id = "review"
 target = "{input.target}"
 profile = "{input.profile}"
 prompt = "/sh-security-review {target} {input.focus}"
+
+[[workflow]]
+name = "threat-model"
+description = "A threat model: data flows, trust boundaries and the controls at each, STRIDE threats ranked by risk, and where to hunt"
+harness = "indra"
+[[workflow.input]]
+name = "target"
+label = "Codebase"
+kind = "target"
+required = true
+[[workflow.input]]
+name = "focus"
+label = "Focus"
+kind = "text"
+placeholder = "optional: since:main or design:docs/design.md"
+pattern = '[A-Za-z0-9 :,._/~^-]{0,200}'
+help = "Leave empty for the whole codebase. since:<git ref> models only what changed; design:<file> models a design document."
+[[workflow.input]]
+name = "profile"
+label = "Profile"
+kind = "profile"
+[[workflow.task]]
+id = "model"
+target = "{input.target}"
+profile = "{input.profile}"
+prompt = "/sh-threat-model {target} {input.focus}"
 "##;
 
 /// `{input.NAME}` references in a task.
@@ -1677,6 +1703,7 @@ pub fn security_harness_profile(plugin: &Path, targets: &[PathBuf]) -> Harness {
         group_by: Some("class".into()),
         stages: vec![
             stage("recon", Some("sh-recon"), "recon.md"),
+            stage("threat model", Some("sh-threat-modeler"), "threat-model.md"),
             stage("hunt", Some("sh-hunter"), "findings.jsonl"),
             stage("chain", Some("sh-chainer"), "chains.md"),
             stage("verify", Some("sh-verifier"), "verified.jsonl"),
@@ -1841,6 +1868,14 @@ pub fn default_presets() -> Vec<PresetCfg> {
         p(
             "Recon only (map the codebase)",
             "/sh-security-review {target} stage:recon",
+        ),
+        p(
+            "Threat model (trust boundaries, STRIDE)",
+            "/sh-threat-model {target}",
+        ),
+        p(
+            "Review what changed since main",
+            "/sh-security-review {target} since:main",
         ),
         p(
             "Hunt SQLi and access control",
@@ -2802,7 +2837,7 @@ needs = ["sub"]
         let b = builtin_workflows();
         assert_eq!(
             b.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
-            vec!["pr-review", "security-review"]
+            vec!["pr-review", "security-review", "threat-model"]
         );
         for w in &b {
             validate_inputs(w).unwrap();

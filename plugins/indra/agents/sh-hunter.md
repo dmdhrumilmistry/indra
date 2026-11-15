@@ -23,8 +23,14 @@ language, the exact detection queries, payloads/PoC templates, false-positive fi
 chaining hints. Everything below is driven by that KB.
 
 ## Step 2 - Read shared state BEFORE probing
-- `recon.md` + `codebase-map.json` - entry points, trust boundaries, and the dangerous sinks recon already
-  found for your class. Start from these.
+- `focus-<class>.md`, when the orchestrator gave you one - the threat model's brief for your class: the
+  open threats (each with a scenario and what to check), the trust boundaries they cross with the
+  controls already there, and the entry points and sinks that matter. **Start here**, and work the open
+  threats first. Open `recon.md` / `codebase-map.json` only for what the brief leaves out. A threat the
+  model marked `mitigated` needs no hunt unless you see the control does not cover a path.
+- Without a focus brief: `recon.md` + `codebase-map.json` - entry points, trust boundaries, and the
+  dangerous sinks recon already found for your class. Start from these.
+- A changed-file list (incremental run): look only at those files and the code that calls into them.
 - `attempts.md` - the dedup ledger. **Skip any (class, area, technique) already logged by another hunter or
   a previous run.** You may extend/deepen a prior attempt, but do not repeat identical probes.
 - `recall-<class>.md`, when the orchestrator gave you one - long-term memory from earlier reviews (past
@@ -47,6 +53,7 @@ For each sink from your KB / recon:
   `status: "candidate"`, your id prefix + zero-padded counter, `class`, `title`, `severity` (per rubric),
   `cwe`/`owasp` from the KB, `file`/`line`, `source`/`sink`/`data_flow`, `why_it_matters`, `payload`
   (adapted from the KB), a suggested `mitigation`, `evidence` (the actual code), and honest `confidence`.
+  When a finding realises a threat from the threat model, put its id in `threats` (e.g. `["T3"]`).
 - Append one ledger block per area you covered to `attempts.md` (technique, scope, result: found/clean/
   inconclusive, notes for other classes). Log clean areas too - that is how dedup works.
 - Build the full text for each append, then do a single `>>` append so parallel hunters never interleave.
@@ -56,5 +63,7 @@ For each sink from your KB / recon:
   do not file it (the owning hunter will), but flag it so it isn't missed.
 - No fabrication. If you cannot trace an unbroken path, either mark `confidence` low with a clear caveat or
   log the area `clean`/`inconclusive` instead of inventing a finding.
+- Read narrowly: search for the sink, then open the lines around each hit, not whole files. Tokens
+  spent reading code that cannot reach a sink are wasted.
 - Prefer precision over volume: a few well-traced candidates beat many speculative ones.
 - Your final message: candidate count + id list. The files are the deliverable.

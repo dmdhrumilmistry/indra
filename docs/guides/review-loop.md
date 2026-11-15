@@ -5,7 +5,7 @@ found, compare it with the last review, remember what was dismissed, and post it
 
 ## 1. Start the review
 
-**Runs > Run a workflow**, then **pr-review** (a built-in workflow; **security-review** and the
+**Runs > Run a workflow**, then **pr-review** (a built-in workflow; **security-review**, **threat-model** and the
 workflows you configure are in the same list). Give the PR (a URL, or a number for the
 checkout's own repository), the checkout to run in (a clone of the PR's repository, one of the
 harness's targets), and a profile: any runner and model, a local one through Ollama included

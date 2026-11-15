@@ -1,13 +1,13 @@
 ---
 name: sh-security-review
-description: "Run the full multi-agent security review pipeline on a codebase - recon/mapping (Graft + SBOM/CVE), parallel vulnerability hunting backed by ~15 per-class knowledge bases, escalation chaining, impact verification, and reporting to README/JSON/SARIF/doc/PDF. Use when the user asks to security-review, audit, pentest, or find vulnerabilities in a codebase. Usually invoked via the indra skill."
-argument-hint: "[target path, default: cwd] [classes:sqli,xss,...] [stage:recon|hunt|chain|verify|report|remember] [depth:quick|deep] [memory:off]"
+description: "Run the full multi-agent security review pipeline on a codebase - recon/mapping (Graft + SBOM/CVE), a threat model with trust boundaries that decides where to hunt, parallel vulnerability hunting backed by ~15 per-class knowledge bases, escalation chaining, impact verification, and reporting to README/JSON/SARIF/doc/PDF. Use when the user asks to security-review, audit, pentest, or find vulnerabilities in a codebase. Usually invoked via the indra skill."
+argument-hint: "[target path, default: cwd] [classes:sqli,xss,...] [stage:recon|threat|hunt|chain|verify|report|remember] [depth:quick|deep] [since:<git ref>] [threats:off] [reuse:off] [memory:off]"
 ---
 
 # Security Review Pipeline
 
-You are the **orchestrator**. You own the run; the heavy work is done by five subagents
-(`sh-recon`, `sh-hunter`, `sh-chainer`, `sh-verifier`, `sh-reporter`) coordinating exclusively through
+You are the **orchestrator**. You own the run; the heavy work is done by six subagents
+(`sh-recon`, `sh-threat-modeler`, `sh-hunter`, `sh-chainer`, `sh-verifier`, `sh-reporter`) coordinating exclusively through
 shared state files. You spawn them, enforce the contract, and keep the run on track. You do **not**
 hunt or verify yourself.
 
@@ -24,6 +24,7 @@ live portion and keep the static review. Do not exfiltrate source or findings to
 - `${CLAUDE_PLUGIN_ROOT}/references/finding-schema.json` - the finding shape.
 - `${CLAUDE_PLUGIN_ROOT}/references/graft-guide.md` - codebase mapping/querying.
 - `${CLAUDE_PLUGIN_ROOT}/references/severity-rubric.md`, `attack-surface-checklist.md`, `sarif-mapping.md`.
+- `${CLAUDE_PLUGIN_ROOT}/references/threat-modeling.md` - the threat model and the hunt plan it produces.
 
 ## Argument parsing
 
@@ -31,8 +32,14 @@ Parse `$ARGUMENTS` (all optional):
 - **target**: a path -> the codebase to review. Default: current working directory.
 - **`classes:a,b,c`**: restrict hunting to these vuln classes (slugs from finding-schema `class` enum).
   Default: recon decides which classes are relevant to the detected stack/surface.
-- **`stage:<name>`**: run only one stage against an existing run (`recon`|`hunt`|`chain`|`verify`|`report`|`remember`).
+- **`stage:<name>`**: run only one stage against an existing run (`recon`|`threat`|`hunt`|`chain`|`verify`|`report`|`remember`).
   Requires a prior run (reads `latest`). Default: run all stages 0->6.
+- **`since:<git ref>`**: an incremental review of what changed since that ref (a branch, tag or commit):
+  recon is reused, the threat model is updated for the change, and hunters look only at the changed
+  files and what calls into them. Far cheaper than a full run; use it for the second and later reviews.
+- **`threats:off`**: skip the threat model (Stage 1b). Hunters then get the whole recon and every class
+  with surface is hunted, which costs more. Default: on.
+- **`reuse:off`**: always run recon afresh, even when a recent one still matches the code.
 - **`memory:off`**: neither read nor write long-term memory (the `sh-memory` skill) for this run. Default:
   on whenever `indra` is available.
 - **`depth:quick|deep`**: `deep` -> `graft build --deep` and larger hunter budgets. `quick` -> structural
@@ -54,6 +61,7 @@ Agent tool `model` parameter; if the resolved value is `inherit`, spawn without 
 |---|---|---|
 | setup (this orchestrator) | inherit | Whatever the user is running. |
 | recon (`sh-recon`) | sonnet | Mechanical, but feeds hunters - don't drop to haiku. |
+| threat (`sh-threat-modeler`) | sonnet | Small input (recon output); decides where hunters spend. |
 | hunt (`sh-hunter`) | **tiered per class** | See table below. |
 | chain (`sh-chainer`) | opus | Small input, high escalation payoff. |
 | verify (`sh-verifier`) | opus | Precision gate - keep strongest model. |
@@ -70,10 +78,10 @@ Agent tool `model` parameter; if the resolved value is `inherit`, spawn without 
 **Presets** (a whole-pipeline shortcut; per-stage overrides still win over a preset):
 - `models:default` - the tables above (same as omitting the arg).
 - `models:max` - every stage **and** every hunter on `opus` (max recall/precision, max cost).
-- `models:cheap` - recon=haiku, hunt=sonnet (flatten: all hunters sonnet, no opus tier), chain=sonnet,
+- `models:cheap` - recon=haiku, threat=sonnet, hunt=sonnet (flatten: all hunters sonnet, no opus tier), chain=sonnet,
   verify=sonnet, report=haiku. Cuts cost most; note to the user it trades some verification precision.
 
-**Granular overrides** - `models:<stage>=<model>` for `stage` in {setup, recon, hunt, chain, verify, report},
+**Granular overrides** - `models:<stage>=<model>` for `stage` in {setup, recon, threat, hunt, chain, verify, report},
 comma-separated, combinable with a preset (granular wins). For the hunt stage:
 - `hunt=<model>` flattens **all** hunters to one model (disables tiering).
 - `hunt.pattern=<model>`, `hunt.trace=<model>`, `hunt.logic=<model>` override an individual tier.
@@ -120,7 +128,8 @@ Stage 0 announcement so the user sees exactly what each stage will run on.
    preset if given, then apply any granular `models:<stage>=...` overrides (granular wins). Store the result
    in `scope.json` under `models` as `{ setup, recon, hunt: {pattern, trace, logic} | "<model>", chain,
    verify, report }`.
-8. Write `scope.json` (target, include/exclude globs - exclude `**/{test,tests,spec,node_modules,vendor,dist,build,.git}/**`
+8. Write `scope.json` (target, `commit` = `git rev-parse HEAD` when the target is a git repo, `since`
+   when given, include/exclude globs - exclude `**/{test,tests,spec,node_modules,vendor,dist,build,.git}/**`
    by default unless the user says otherwise, classes, run_id, mode, models).
 9. If writing inside a git repo and `.security-harness/` is untracked, add it to `.gitignore`.
 10. Announce the plan to the user: target, detected capability matrix (incl. which tools were installed this
@@ -130,14 +139,43 @@ If `stage:<name>` was passed, skip to that stage using the existing `latest` run
 
 ## Stage 1 - Recon (spawn `sh-recon`)
 
+### Reusing recon (saves a whole stage)
+
+Unless `reuse:off`, look for an earlier run before spawning recon: the newest
+`<TARGET>/.security-harness/run-*/` whose `scope.json` has the same `target` and include/exclude globs
+and whose `recon.md` and `codebase-map.json` exist. Reuse it when either:
+- its `scope.json.commit` equals the current `git rev-parse HEAD` and `git status --porcelain` lists no
+  changed source files (the code is the same), or
+- `since:<ref>` was given and no manifest or lockfile changed since that ref
+  (`git diff --name-only <ref>...HEAD` lists none of `package.json`, `go.mod`, `Cargo.toml`, ...).
+
+To reuse, copy `recon.md`, `codebase-map.json` and `sbom.json` (when present) into the new run directory
+and add a line at the top of the copied `recon.md`: `Reused from <run-id> (commit <sha>).` Tell the
+user. Otherwise spawn recon as below.
+
 Spawn one `sh-recon` agent **with `model` = `scope.models.recon`** (default sonnet). In its prompt pass:
 `run_dir`, `scope.json` contents, and a pointer to the references above. It must produce `recon.md` +
 `codebase-map.json` (build the Graft graph, detect stack/versions, run SCA tools if present for SBOM/CVE
 else parse manifests, enumerate attack surface).
 
-After it returns: read `recon.md`. Decide the **class list** to hunt - the user's `classes:` if given,
-else the classes whose sinks/surface recon actually found (don't hunt XXE if there's no XML parsing).
-Log the decision to the user.
+After it returns: read the "recommended classes to hunt" part of `recon.md` (the candidate class list).
+
+## Stage 1b - Threat model (spawn `sh-threat-modeler`)
+
+Skip when `threats:off`, or when the user restricted the run to one class. Otherwise spawn one
+`sh-threat-modeler` **with `model` = `scope.models.threat`** (default sonnet), passing `run_dir` and the
+mode: `diff` with the changed-file list when `since:` was given, else `code`. It writes
+`threat-model.json`, `threat-model.md` and one `focus-<class>.md` per class in its hunt plan (see
+threat-modeling.md).
+
+Then decide the **class list** to hunt:
+- the user's `classes:` if given (always honoured, even without an open threat);
+- else the classes in `threat-model.json` `hunt_plan` (each has at least one open threat);
+- with `threats:off`, the classes whose sinks/surface recon actually found (don't hunt XXE if there's
+  no XML parsing).
+
+Log the decision to the user, with the number of open threats and trust boundaries, and name the
+classes skipped because every threat for them is mitigated.
 
 ### Memory recall (orchestrator, only when `capabilities.indra` is true)
 
@@ -162,8 +200,10 @@ selected class**. **Set each hunter's `model` from `scope.models.hunt`**: if it'
 every hunter (flattened); if it's the tiered object, look up the class's tier (pattern/trace/logic per the
 Model-selection table) and use that tier's model. Each hunter prompt includes: `run_dir`, its assigned
 `class`, the finding-id prefix to use (`SH-<CLASS-UPPER>-`), and the instruction to load the matching
-`sh-kb-<class>` skill for its knowledge base, and the path `<run_dir>/recall-<class>.md` when that file
-exists. Hunters must read `attempts.md` before probing and append to it after, and append candidate
+`sh-kb-<class>` skill for its knowledge base, the path `<run_dir>/focus-<class>.md` when the threat
+model wrote one (the hunter starts there and opens `recon.md` only for what the brief leaves out), and
+the path `<run_dir>/recall-<class>.md` when that file exists. With `since:`, also pass the changed-file
+list: the hunter looks at those files and at the code that calls into them, nothing else. Hunters must read `attempts.md` before probing and append to it after, and append candidate
 findings to `findings.jsonl`.
 
 Batch to respect concurrency limits: if more than ~6 classes, spawn in waves. Between waves, nothing to
@@ -195,9 +235,9 @@ a single consolidated `verified.jsonl`.
 
 ## Stage 5 - Report (spawn `sh-reporter`)
 
-Spawn one `sh-reporter` **with `model` = `scope.models.report`** (default haiku - mechanical formatting). It reads `verified.jsonl` + `chains.md` + `recon.md` and writes into `reports/`:
+Spawn one `sh-reporter` **with `model` = `scope.models.report`** (default haiku - mechanical formatting). It reads `verified.jsonl` + `chains.md` + `recon.md` + `threat-model.md` (when present) and writes into `reports/`:
 `README.md` (human summary: exec summary, severity table, per-finding detail with payload/PoC/mitigation,
-chains, appendix), `findings.json` (array of all findings), `results.sarif` (SARIF 2.1.0 per
+chains, the threat model's trust boundaries and the open threats no finding covered, design gaps, appendix), `findings.json` (array of all findings), `results.sarif` (SARIF 2.1.0 per
 `sarif-mapping.md`, verified + needs-runtime only), `report.html` (self-contained), and `report.pdf`
 (via the capability fallback chain: wkhtmltopdf -> pandoc -> headless Chrome; else keep HTML and note
 PDF skipped). Emit `report.docx` if pandoc is present.
@@ -225,9 +265,28 @@ used, also say how many notes were recalled and recorded, and that
 interactive graph (or open that folder in Obsidian). If any stage
 degraded (Graft/SCA/PDF absent), say so plainly and how it affected coverage/confidence.
 
+## Keeping token use down
+
+Most of a review's tokens go to hunters reading code. The pipeline keeps that down by default:
+
+| Saving | How |
+|---|---|
+| Recon is reused | "Reusing recon" above: an unchanged codebase is not mapped twice. |
+| Only open threats are hunted | Stage 1b drops classes whose every threat is mitigated, and each hunter starts from a focus brief of its open threats instead of the whole recon. |
+| Incremental runs | `since:<ref>` limits the threat model and the hunters to what changed. |
+| Each stage on a fitting model | "Model selection" above; `models:cheap` for a first pass. |
+| No repeated probes | Hunters read `attempts.md` and skip what any hunter, in this run or an earlier one, already covered. |
+| Memory is capped | Recall is limited with `-n` and `--max-chars`, and only for the classes being hunted. |
+
+Pass only paths between agents, never file contents: each agent reads what it needs from `run_dir`. Do
+not paste `recon.md`, `codebase-map.json` or findings into an agent's prompt.
+
 ## Single-stage & single-class shortcuts
 
 - `stage:hunt classes:sqli` on an existing run -> just spawn the sqli hunter against current recon.
+- `stage:threat` on an existing run -> just Stage 1b, e.g. after the user changed the scope.
+- `stage:hunt` on a run made by `sh-threat-model` -> hunt that run's hunt plan (its recon and focus
+  briefs are already there).
 - `stage:remember` on an existing run -> just Stage 6, e.g. after the user corrected a verdict by hand.
 - The router (`indra`) may call this skill with a narrowed scope for targeted requests
   ("find SQLi in ./src") - honor `classes:` and skip irrelevant stages (e.g. chaining a single class).

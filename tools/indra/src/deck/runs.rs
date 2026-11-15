@@ -289,6 +289,7 @@ mod tests {
         let run = t.join(".security-harness").join("run-1");
         std::fs::create_dir_all(run.join("reports")).unwrap();
         std::fs::write(run.join("recon.md"), "x").unwrap();
+        std::fs::write(run.join("threat-model.md"), "x").unwrap();
         std::fs::write(
             run.join("findings.jsonl"),
             "{\"class\":\"sqli\",\"status\":\"candidate\",\"severity\":\"high\"}\n\n{\"class\":\"xss\",\"status\":\"candidate\",\"severity\":\"low\"}\nnot json\n",
@@ -303,7 +304,7 @@ mod tests {
         let states: Vec<&str> = r.stages.iter().map(|s| s.state).collect();
         assert_eq!(
             states,
-            vec!["done", "running", "pending", "pending", "pending"]
+            vec!["done", "done", "running", "pending", "pending", "pending"]
         );
         assert_eq!(r.counts.total, 2);
         assert_eq!(r.counts.by_group["sqli"], 1);

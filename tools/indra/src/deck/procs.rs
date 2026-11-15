@@ -47,6 +47,15 @@ pub struct SubAgent {
     pub tools: usize,
 }
 
+/// Tokens a session used, summed over its runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Tokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcView {
     pub id: u64,
@@ -100,6 +109,9 @@ pub struct ProcView {
     /// Tokens in its context at the last turn, and its model's window.
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
+    /// What its runs used, from Claude Code's result: fresh input, output,
+    /// and input read from or written to the prompt cache.
+    pub tokens: Option<Tokens>,
     /// MCP servers Claude Code reported at start: name and status
     /// (connected, failed, needs-auth, pending).
     pub mcp: Vec<(String, String)>,
@@ -157,6 +169,7 @@ struct State {
     reflection: Option<String>,
     context_tokens: Option<u64>,
     context_window: Option<u64>,
+    tokens: Option<Tokens>,
     mcp: Vec<(String, String)>,
     files: Vec<String>,
     todos: Value,
@@ -189,6 +202,7 @@ impl State {
             reflection: None,
             context_tokens: None,
             context_window: None,
+            tokens: None,
             mcp: Vec::new(),
             files: Vec::new(),
             todos: Value::Null,
@@ -286,6 +300,8 @@ struct Saved {
     model: Option<String>,
     context_tokens: Option<u64>,
     context_window: Option<u64>,
+    #[serde(default)]
+    tokens: Option<Tokens>,
     mcp: Vec<(String, String)>,
     files: Vec<String>,
     todos: Value,
@@ -341,6 +357,7 @@ impl Proc {
                 model: st.model.clone(),
                 context_tokens: st.context_tokens,
                 context_window: st.context_window,
+                tokens: st.tokens.clone(),
                 mcp: st.mcp.clone(),
                 files: st.files.clone(),
                 todos: st.todos.clone(),
@@ -403,6 +420,7 @@ impl Proc {
         st.model = sv.model;
         st.context_tokens = sv.context_tokens;
         st.context_window = sv.context_window;
+        st.tokens = sv.tokens;
         st.mcp = sv.mcp;
         st.files = sv.files;
         st.todos = sv.todos;
@@ -521,6 +539,7 @@ impl Proc {
             },
             context_tokens: st.context_tokens,
             context_window: st.context_window,
+            tokens: st.tokens.clone(),
             mcp: st.mcp.clone(),
             files: st.files.clone(),
             todos: st.todos.clone(),
@@ -992,6 +1011,14 @@ impl Proc {
                 {
                     let mut st = self.state.lock().unwrap();
                     st.last_result = r.clone();
+                    if let Some(u) = v.get("usage") {
+                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        let t = st.tokens.get_or_insert_with(Tokens::default);
+                        t.input += n("input_tokens");
+                        t.output += n("output_tokens");
+                        t.cache_read += n("cache_read_input_tokens");
+                        t.cache_write += n("cache_creation_input_tokens");
+                    }
                     // Claude Code reports each model's context window.
                     if let Some(w) = v
                         .get("modelUsage")
@@ -2164,6 +2191,7 @@ mod tests {
                 reflection: None,
                 context_tokens: None,
                 context_window: None,
+                tokens: None,
                 mcp: Vec::new(),
                 files: Vec::new(),
                 todos: Value::Null,
@@ -2187,7 +2215,7 @@ mod tests {
             r#"{"type":"assistant","parent_tool_use_id":"t1","message":{"content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"pattern":"cursor.execute"}}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"zz","is_error":true,"content":[{"type":"text","text":"permission denied"}]}]}}"#,
-            r#"{"type":"result","subtype":"success","num_turns":3,"duration_ms":4200,"total_cost_usd":0.0123,"result":"All good"}"#,
+            r#"{"type":"result","subtype":"success","num_turns":3,"duration_ms":4200,"total_cost_usd":0.0123,"result":"All good","usage":{"input_tokens":120,"output_tokens":800,"cache_read_input_tokens":9000,"cache_creation_input_tokens":300}}"#,
             "not json at all",
         ] {
             p.claude_line(l);
@@ -2219,6 +2247,15 @@ mod tests {
         );
         assert_eq!(v.tools["Grep"], 1);
         assert_eq!(v.cost_usd, Some(0.0123));
+        assert_eq!(
+            v.tokens,
+            Some(Tokens {
+                input: 120,
+                output: 800,
+                cache_read: 9000,
+                cache_write: 300
+            })
+        );
         assert_eq!(
             v.session.as_deref(),
             Some("4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10")

@@ -16,8 +16,10 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
 | To review a **pull request** (a GitHub PR link, "review PR 42", "check this PR", "review these changes before merge") | Invoke the **`sh-pr-review`** skill. Pass the PR **link** verbatim if the user gave one, else the number; with neither it uses the PR for the current branch. |
 | A full security review / audit / pentest of a codebase | Invoke the **`sh-security-review`** skill (all stages). Pass the target path and any class filters. |
 | To find specific class(es) only ("just SQLi and IDOR") | Invoke **`sh-security-review`** with `classes:<slugs>`; it runs recon + those hunters + verify + report, skipping chaining if a single class. |
-| To re-run one stage on an existing run ("re-verify", "regenerate the report", "re-scan deps") | Invoke **`sh-security-review`** with `stage:<recon\|hunt\|chain\|verify\|report>`. |
+| To re-run one stage on an existing run ("re-verify", "regenerate the report", "re-scan deps") | Invoke **`sh-security-review`** with `stage:<recon\|threat\|hunt\|chain\|verify\|report>`. |
+| To review again what changed since an earlier review ("what changed since v1.2", "re-review the new code") | Invoke **`sh-security-review`** with `since:<ref>`: it reuses the earlier map and threat model and hunts only the change. |
 | Just to learn how a class is detected/exploited, or to hand a hunter its knowledge | Invoke the matching **`sh-kb-<class>`** skill directly (no pipeline). |
+| A **threat model**, trust boundaries, a data flow diagram, STRIDE, "what could go wrong", or a review of a design document or architecture | Invoke the **`sh-threat-model`** skill. Pass `design:<path>` for a design document, `since:<ref>` for a change. |
 | To map/understand a codebase only (no vuln hunt) | Invoke `sh-security-review` with `stage:recon`. |
 | To recall or record what reviews have learned ("what do we know about X", "remember this", "show the knowledge graph", "forget/skip memory") | Invoke the **`sh-memory`** skill. For "don't use memory" on a review, pass `memory:off` to `sh-security-review`. |
 | To put findings where the team works ("file these in Jira", "open GitHub issues", "put the report in Confluence/Notion") | Invoke the **`sh-publish`** skill. It asks before creating anything and never sends evidence or payloads. |
@@ -57,6 +59,9 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
    options in `sh-security-review`). Do not duplicate its work here.
 
 ## Notes
+- **Token use**: a review reuses an unchanged map, hunts only classes with an open threat, and briefs
+  each hunter instead of handing it the whole recon. For repeat reviews suggest `since:<ref>`; for a
+  first, cheap pass `models:cheap`. Pass `threats:off` or `reuse:off` through when the user asks.
 - **Model / cost control**: `sh-security-review` runs each stage on a cost-appropriate model by default
   (recon=sonnet, hunt=tiered haiku/sonnet/opus per class, chain/verify=opus, report=haiku). Users can
   override with `models:` (e.g. `models:max`, `models:cheap`, `models:verify=opus,hunt=sonnet`) - pass these
