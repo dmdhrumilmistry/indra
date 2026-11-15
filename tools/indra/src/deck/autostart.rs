@@ -33,7 +33,13 @@ fn pid_path() -> PathBuf {
 /// What runs: this binary, `node connect`, and the config it was given.
 fn command(config: Option<&Path>) -> Result<(PathBuf, Vec<String>), String> {
     let exe = std::env::current_exe().map_err(|e| format!("where is indra? {}", e))?;
-    let mut args = vec!["node".to_string(), "connect".to_string()];
+    // In the foreground: whatever runs this (a service, the supervisor) is
+    // what keeps it in the background.
+    let mut args = vec![
+        "node".to_string(),
+        "connect".to_string(),
+        "--foreground".to_string(),
+    ];
     if let Some(c) = config {
         args.push("--config".into());
         args.push(c.display().to_string());
@@ -57,6 +63,7 @@ fn quiet(cmd: &mut Command) -> bool {
 pub fn spawn_background(config: Option<&Path>) -> Result<u32, String> {
     let (exe, mut args) = command(config)?;
     args[1] = "supervise".into();
+    args.retain(|a| a != "--foreground");
     let log = log_path();
     if let Some(d) = log.parent() {
         let _ = std::fs::create_dir_all(d);
@@ -336,7 +343,7 @@ pub fn install(config: Option<&Path>) -> Result<String, String> {
     }
     if cfg!(windows) {
         let mut line = format!("\"{}\"", exe.display());
-        for a in &args {
+        for a in args.iter().filter(|a| *a != "--foreground") {
             line.push_str(&format!(" \"{}\"", a));
         }
         line.push_str(" --background");
@@ -359,6 +366,26 @@ pub fn install(config: Option<&Path>) -> Result<String, String> {
         "a background process until the next reboot; logs: {}",
         log_path().display()
     ))
+}
+
+/// Stop the link now, leaving it set up to start at the next sign-in.
+pub fn stop() -> Vec<String> {
+    let mut done = Vec::new();
+    if systemd_unit_path().map(|p| p.exists()).unwrap_or(false)
+        && quiet(Command::new("systemctl").args(["--user", "stop", UNIT]))
+    {
+        done.push(format!("stopped the systemd user service {}", UNIT));
+    }
+    if let Some(plist) = launchd_plist_path().filter(|p| p.exists()) {
+        if quiet(Command::new("launchctl").args(["unload", &plist.display().to_string()])) {
+            done.push(format!("stopped the launchd agent {}", PLIST));
+        }
+    }
+    if pid_path().exists() {
+        stop_background();
+        done.push("stopped the background link".into());
+    }
+    done
 }
 
 /// Undo [`install`] and stop the link.

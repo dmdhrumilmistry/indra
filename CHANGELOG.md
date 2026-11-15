@@ -6,7 +6,9 @@ section from this file.
 ## v0.12.1
 
 - **`indra node restart`** restarts a machine's link to the hub, so it runs the version `indra
-  update` just installed. `indra update` says so on a joined machine.
+  update` just installed. `indra update` says so on a joined machine. `indra node stop` stops it.
+- **`indra node connect` runs in the background** (and again at each sign-in) and gives the
+  terminal back; `--foreground` keeps it in the terminal as before.
 - A machine on an older indra than the hub gets a note on its card with what to run, and requests
   it does not know yet say the same instead of "unknown request".
 
