@@ -87,6 +87,8 @@ enum Cmd {
     Completions(completions::CompletionsArgs),
     /// MCP server for AI agents to design workflows (`claude mcp add indra -- indra mcp`)
     Mcp(deck::cli::McpArgs),
+    /// Accounts agents run with: what each used today and this month, and its limits
+    Accounts(deck::cli::AccountsArgs),
     /// Console users and roles: add, list, passwd, role, rm
     User(deck::users::UserArgs),
     /// Maintainer tools: build the website
@@ -138,6 +140,7 @@ fn main() -> ExitCode {
         Cmd::Update(a) => update::run(a),
         Cmd::Completions(a) => completions::run(a),
         Cmd::Mcp(a) => deck::cli::run_mcp(a),
+        Cmd::Accounts(a) => deck::cli::run_accounts(a),
         Cmd::User(a) => deck::users::run(a),
         Cmd::Publish(a) => publish::run(a),
         Cmd::Review(a) => review::run(a),

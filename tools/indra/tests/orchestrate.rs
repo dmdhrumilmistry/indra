@@ -363,6 +363,84 @@ fn stop_steps_end_the_run_early() {
     assert_eq!(state(&text, "give-up"), "succeeded", "{}", text);
 }
 
+/// An account's credential reaches the agent, here and on a node with no
+/// login of its own; its runs are counted.
+#[test]
+fn accounts_give_agents_their_credentials_on_every_node() {
+    let e = Env::new("accounts");
+    // The node has a claude runner but no credential of its own.
+    let remote = fs::read_to_string(e.dir.join("remote.toml")).unwrap()
+        + "[[runner]]\nname = \"claude\"\ncommand = \"sh\"\nargs = [\"-c\", \"echo key-len=${#ANTHROPIC_API_KEY}\", \"{prompt}\"]\n";
+    fs::write(e.dir.join("remote.toml"), remote).unwrap();
+    let hub = e.hub(&format!(
+        "[[runner]]\nname = \"claude\"\ncommand = \"sh\"\nargs = [\"-c\", \"echo key-len=${{#ANTHROPIC_API_KEY}}\", \"{{prompt}}\"]\n\
+         [[account]]\nname = \"work\"\ncredential = \"secret:anthropic-work\"\n\
+         [[workflow]]\nname = \"both\"\n\
+         [[workflow.task]]\nid = \"here\"\ntarget = \"local-web\"\nrunner = \"claude\"\nprompt = \"x\"\n\
+         [[workflow.task]]\nid = \"there\"\nnode = \"box\"\ntarget = \"{api}\"\nrunner = \"claude\"\nprompt = \"x\"\n",
+        api = e.p("remote-api"),
+    ));
+    let mut set = e
+        .indra(&["secret", "set", "anthropic-work"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    set.stdin
+        .take()
+        .unwrap()
+        .write_all(b"sk-test-123456\n")
+        .unwrap();
+    assert!(set.wait().unwrap().success());
+    let out = e
+        .indra(&["run", "both", "--config", hub.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}\n{}",
+        text,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = |id: &str| -> String {
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .unwrap();
+        let mut rest = line.trim_start();
+        for _ in 0..3 {
+            rest = rest
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r.trim_start())
+                .unwrap();
+        }
+        fs::read_to_string(rest.trim_end()).unwrap_or_default()
+    };
+    assert!(log("here").contains("key-len=14"), "{}", log("here"));
+    assert!(
+        log("there").contains("key-len=14"),
+        "the node got it from the hub: {}",
+        log("there")
+    );
+    assert!(!log("here").contains("sk-test-123456"));
+    // Both runs are counted on the account.
+    let data = fs::read_dir(e.dir.join("app data"))
+        .unwrap()
+        .flatten()
+        .map(|d| d.path().join("accounts.json"))
+        .find(|p| p.exists())
+        .expect("accounts.json");
+    let usage: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(data).unwrap()).unwrap();
+    let days = usage["usage"]["work"]["days"].as_object().unwrap();
+    assert_eq!(days.values().next().unwrap()[0], 2, "{}", usage);
+}
+
 #[test]
 fn bad_workflows_are_rejected_before_anything_runs() {
     let e = Env::new("invalid");
