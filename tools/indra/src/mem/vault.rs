@@ -285,6 +285,19 @@ impl Lock {
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
+                // On Windows a lock file another writer is deleting refuses
+                // to be created for a moment ("access denied"), and its folder
+                // can briefly read as missing: the lock is busy, so wait as
+                // for one that exists. Anything else, or for too long, is an error.
+                Err(e)
+                    if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::NotFound)
+                        && start.elapsed() <= Duration::from_secs(10) =>
+                {
+                    if e.kind() == ErrorKind::NotFound {
+                        init(root)?;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
                 Err(e) => return Err(format!("cannot lock {}: {}", path.display(), e)),
             }
         }
