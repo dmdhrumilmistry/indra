@@ -4,7 +4,7 @@ name: pages
 # https://dmdhrumilmistry.github.io/indra/: the landing page (site/), the brand
 # assets (assets/), and the documentation pages, rendered from the repository's
 # Markdown by `indra dev site` (pages listed in site/pages.toml). Pull requests
-# build the site (and fail on broken links) without deploying it.
+# are checked by pages-check.yml, which builds the site without deploying it.
 #
 # One-time setup: Settings > Pages > Build and deployment > Source: GitHub Actions.
 # Only GitHub's own actions are used.
@@ -20,23 +20,14 @@ on:
       - "tools/indra/README.md"
       - "tools/indra/src/site.rs"
       - ".github/workflows/pages.yml"
-  pull_request:
-    paths:
-      - "site/**"
-      - "assets/**"
-      - "docs/**"
-      - "README.md"
-      - "tools/indra/README.md"
-      - "tools/indra/src/site.rs"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  # One deploy at a time; a pull request's check build runs on its own.
-  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.ref) || 'pages' }}
+  # One deploy at a time.
+  group: pages
   cancel-in-progress: false
 
 jobs:
@@ -49,15 +40,12 @@ jobs:
       - name: Build the site and the docs
         # The runners ship rustup; the site builder is part of the indra binary.
         run: cargo run --locked --quiet --no-default-features --manifest-path tools/indra/Cargo.toml -- dev site --out _site
-      - if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
-      - if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
   deploy:
-    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:

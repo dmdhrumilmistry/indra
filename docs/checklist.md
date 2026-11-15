@@ -94,6 +94,8 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] Stop steps (`stop = "success" | "failure"`) and Start/End blocks in the editor
 - [x] A local step without a target runs in the harness's first target (saving a workflow with
       steps dragged from the palette failed with "has no target")
+- [x] Releases are `v<version>` (no `indra-` prefix); installers and `indra update` read both
+- [x] Each release is published to crates.io (`cargo install indra`) with `CARGO_REGISTRY_TOKEN`
 
 ## Not planned yet (the docs say so)
 

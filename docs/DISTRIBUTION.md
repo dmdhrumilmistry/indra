@@ -156,19 +156,26 @@ make some of these unnecessary.
 
 ### The indra binary
 
-The CLI is released on its own tags, `indra-v<version>`, separate from the plugin's `v<version>`:
+The CLI is released as `v<version>` (releases up to 0.6.0 were `indra-v<version>`; the
+installers and `indra update` understand both):
 
-1. Set `version` in `tools/indra/Cargo.toml` (CI refuses a tag that does not match it).
-2. Merge, then either run **Actions > indra > Run workflow** on `main` with the version
-   (`0.2.0`), which creates the tag and the release on that commit, or push a tag yourself:
-   `git tag indra-v0.2.0 && git push origin indra-v0.2.0`.
+1. Set `version` in `tools/indra/Cargo.toml` (CI refuses a release that does not match it).
+2. Merge, then either run **Actions > release > Run workflow** on `main` with the version
+   (`0.7.0`), which creates the tag and the release on that commit, or push a tag yourself:
+   `git tag v0.7.0 && git push origin v0.7.0`.
 3. CI tests on Linux, macOS and Windows, builds the five binaries (Linux x86_64 and arm64
    static, macOS Apple silicon and Intel, Windows x86_64), uploads each with its `.sha256`, then
    adds `SHA256SUMS`, `install.sh` and `install.ps1` to the release, and only then marks it the
    repository's **Latest** release (it is created as not-latest, so a half-uploaded release never
-   is). The installers and `indra update` look for the newest `indra-v*` release themselves.
+   is). Last, it publishes the crate to crates.io (`cargo install indra`) with the
+   `CARGO_REGISTRY_TOKEN` repository secret (a crates.io API token with the publish-new and
+   publish-update scopes); without the secret it says so and skips it, and a version already on
+   crates.io is left alone.
    To mark an existing release Latest without building, run the workflow with **latest** set to
-   its version (`0.5.0`).
+   its version (`0.6.0`); an old `indra-v<version>` release is renamed to `v<version>` on the way.
+   Releasing lives in `release.yml`, apart from the tests in `indra.yml`, so pull requests show
+   only the checks that apply to them (the site likewise: `pages-check.yml` builds it on pull
+   requests, `pages.yml` deploys it from main).
 4. Check the one-liners against it:
    `curl -fsSL https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh | sh`
    and, on Windows, `irm https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1 | iex`.

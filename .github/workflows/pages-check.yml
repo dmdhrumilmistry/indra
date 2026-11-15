@@ -1,0 +1,33 @@
+name: pages-check
+
+# Pull requests that touch the site or the docs: build them (and fail on
+# broken links) without deploying anything. pages.yml deploys from main.
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "assets/**"
+      - "docs/**"
+      - "README.md"
+      - "tools/indra/README.md"
+      - "tools/indra/src/site.rs"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/pages-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the site and the docs
+        run: cargo run --locked --quiet --no-default-features --manifest-path tools/indra/Cargo.toml -- dev site --out _site

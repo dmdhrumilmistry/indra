@@ -1,0 +1,228 @@
+name: release
+
+# Releases the indra CLI: Actions > release > Run workflow with a version (or
+# a pushed v<version> tag) tests it on Linux, macOS and Windows, publishes the
+# prebuilt binaries to a GitHub release v<version>, marks it Latest, and
+# publishes the crate to crates.io when the CARGO_REGISTRY_TOKEN secret is set.
+# Run it with "latest" instead to only mark an existing release Latest.
+#
+# No third-party actions: the runners already ship rustup, and `gh` uploads the
+# release assets, so the only code that runs here is this repository's. It
+# never runs on pull requests (indra.yml tests those).
+
+on:
+  push:
+    tags: ["v*", "indra-v*"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release this commit as v<version> (e.g. 0.7.0; must match tools/indra/Cargo.toml)."
+        required: false
+        default: ""
+      latest:
+        description: "Only mark the existing release v<version> (e.g. 0.6.0) as Latest (an old indra-v<version> one is renamed to v<version>); builds nothing."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.release }}-${{ inputs.latest }}
+  # A release always runs to the end.
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+    working-directory: tools/indra
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    # Marking a release Latest needs no build.
+    if: inputs.latest == ''
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  release:
+    name: release (${{ matrix.target }})
+    # A pushed v* tag, or Run workflow with a version.
+    if: inputs.latest == ''
+    needs: test
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ inputs.release != '' && format('v{0}', inputs.release) || github.ref_name }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, musl: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: .exe }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+      - name: The tag matches the crate version
+        run: |
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          want="v$ver"
+          if [ "$TAG" != "$want" ] && [ "$TAG" != "indra-v$ver" ]; then
+            echo "::error::release $TAG does not match Cargo.toml ($want)"; exit 1
+          fi
+      - name: musl tools
+        if: matrix.musl
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package
+        id: pkg
+        run: |
+          name="indra-${{ matrix.target }}${{ matrix.exe }}"
+          cp "target/${{ matrix.target }}/release/indra${{ matrix.exe }}" "$name"
+          if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          # Every matrix job races to create the release; losing that race is fine.
+          export GH_REPO="$GITHUB_REPOSITORY"
+          notes="One file, nothing else to install.
+
+          Linux and macOS:
+
+              curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
+
+          Windows (PowerShell):
+
+              irm https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.ps1 | iex
+
+          Then: \`indra serve --open\`. Already installed? \`indra update\`.
+
+          Or download the file for your machine below; each has a .sha256, and SHA256SUMS lists them all."
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --notes "$notes" --latest=false --target "$GITHUB_SHA" \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber
+
+  # After every build: one SHA256SUMS for all of them, and the install
+  # scripts, so a pinned version installs the same way.
+  checksums:
+    name: checksums
+    if: inputs.latest == ''
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: SHA256SUMS and the install scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release != '' && format('v{0}', inputs.release) || github.ref_name }}
+        run: |
+          export GH_REPO="$GITHUB_REPOSITORY"
+          mkdir -p dist && cd dist
+          gh release download "$TAG" --pattern 'indra-*' --skip-existing
+          rm -f ./*.sha256
+          sha256sum indra-* > SHA256SUMS
+          cat SHA256SUMS
+          cp ../install.sh ../install.ps1 .
+          gh release upload "$TAG" SHA256SUMS install.sh install.ps1 --clobber
+          # Complete now: make it the repository's Latest release (it is
+          # created as not-latest so a half-uploaded release never is).
+          gh release edit "$TAG" --latest
+
+  # The crate on crates.io, once the release is complete. Needs the
+  # CARGO_REGISTRY_TOKEN repository secret (a crates.io API token with the
+  # publish-new and publish-update scopes); without it this says so and stops.
+  crates:
+    name: crates.io
+    if: inputs.latest == ''
+    needs: checksums
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Publish
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::notice::Not published to crates.io: add a CARGO_REGISTRY_TOKEN repository secret (Settings > Secrets and variables > Actions)."
+            exit 0
+          fi
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if cargo search indra --limit 1 | grep -q "^indra = \"$ver\""; then
+            echo "indra $ver is already on crates.io"; exit 0
+          fi
+          cargo publish --locked
+
+  # Mark an existing release Latest, without building anything.
+  latest:
+    name: mark latest
+    if: inputs.latest != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Mark it Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.latest }}
+        run: |
+          export GH_REPO="$GITHUB_REPOSITORY"
+          ver="${VERSION#indra-v}"; ver="${ver#v}"
+          TAG="v$ver"
+          # An older release named indra-v<version>: rename it to v<version>.
+          if ! gh release view "$TAG" >/dev/null 2>&1 && gh release view "indra-v$ver" >/dev/null 2>&1; then
+            gh release edit "indra-v$ver" --tag "$TAG" --title "$TAG"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/indra-v$ver" || true
+          fi
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease
+          gh release edit "$TAG" --latest
