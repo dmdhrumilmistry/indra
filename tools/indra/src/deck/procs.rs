@@ -100,6 +100,9 @@ pub struct ProcView {
     /// Tokens in its context at the last turn, and its model's window.
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
+    /// MCP servers Claude Code reported at start: name and status
+    /// (connected, failed, needs-auth, pending).
+    pub mcp: Vec<(String, String)>,
 }
 
 /// A tool request the agent is waiting on.
@@ -146,6 +149,7 @@ struct State {
     reflection: Option<String>,
     context_tokens: Option<u64>,
     context_window: Option<u64>,
+    mcp: Vec<(String, String)>,
 }
 
 impl State {
@@ -174,6 +178,7 @@ impl State {
             reflection: None,
             context_tokens: None,
             context_window: None,
+            mcp: Vec::new(),
         }
     }
 }
@@ -301,6 +306,7 @@ impl Proc {
             },
             context_tokens: st.context_tokens,
             context_window: st.context_window,
+            mcp: st.mcp.clone(),
         }
     }
 
@@ -667,6 +673,34 @@ impl Proc {
                     ),
                     agent,
                 );
+                // Its MCP servers: a missing one is otherwise silent.
+                if parent.is_none() {
+                    let mcp = mcp_servers(&v);
+                    if !mcp.is_empty() {
+                        self.push(
+                            "system",
+                            format!(
+                                "MCP servers: {}",
+                                mcp.iter()
+                                    .map(|(n, st)| format!("{} ({})", n, st))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            None,
+                        );
+                        for (n, st) in mcp
+                            .iter()
+                            .filter(|(_, st)| st != "connected" && st != "pending")
+                        {
+                            self.push(
+                                "error",
+                                format!("MCP server {} is {}: {}", n, st, mcp_hint(st)),
+                                None,
+                            );
+                        }
+                    }
+                    self.state.lock().unwrap().mcp = mcp;
+                }
             }
             "assistant" => {
                 if parent.is_none() {
@@ -1624,6 +1658,38 @@ fn tool_summary(tool: &str, input: &Value) -> String {
     }
 }
 
+/// The MCP servers in Claude Code's init message, as (name, status).
+pub(crate) fn mcp_servers(init: &Value) -> Vec<(String, String)> {
+    init.get("mcp_servers")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|m| {
+                    (
+                        m.get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("?")
+                            .to_string(),
+                        m.get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("?")
+                            .to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What to do about an MCP server that did not connect.
+pub(crate) fn mcp_hint(status: &str) -> &'static str {
+    match status {
+        "needs-auth" => "it needs a login: run `claude` in a terminal on that machine, type /mcp, and log in to it; agents started here then use it",
+        "failed" => "it did not start: run `claude mcp list` on that machine to see why (a missing command, token or network)",
+        _ => "run `claude mcp list` on that machine to check it",
+    }
+}
+
 /// Ask the whole process tree to stop: the runner usually has children of
 /// its own (shells, MCP servers, subagents).
 pub(crate) fn terminate_tree(pid: Option<u32>) {
@@ -1834,6 +1900,7 @@ mod tests {
                 reflection: None,
                 context_tokens: None,
                 context_window: None,
+                mcp: Vec::new(),
             }),
             tx,
             stop: Mutex::new(None),

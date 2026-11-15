@@ -949,6 +949,10 @@ pub(crate) fn resolve_agent(
 /// this machine, a node's configured `targets` for a remote one.
 fn node_targets(app: &App, h: &Harness, node: &str) -> ApiResult<Vec<String>> {
     if node == LOCAL {
+        // Folders set in the console (Machines) replace the harness targets.
+        if let Some(list) = local_folders(app) {
+            return Ok(list);
+        }
         return Ok(h.targets.iter().map(|t| t.display().to_string()).collect());
     }
     let n = app
@@ -963,6 +967,13 @@ fn node_targets(app: &App, h: &Harness, node: &str) -> ApiResult<Vec<String>> {
         }
     }
     Ok(n)
+}
+
+/// The folders set for this machine on the Machines page, if any.
+fn local_folders(app: &App) -> Option<Vec<String>> {
+    let p = app.settings().data_dir.join("local-folders.json");
+    let list: Vec<String> = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+    (!list.is_empty()).then_some(list)
 }
 
 /// WebRTC on or off, and its ICE servers, for nodes that dial in.
@@ -1361,7 +1372,7 @@ async fn nodes_list(
     let local = json!({
         "name": LOCAL, "kind": "local", "description": "This machine",
         "max_parallel": app.settings().local_max_parallel, "running": app.procs.running_on(LOCAL),
-        "targets": match &h { Some(h) => node_targets(&app, h, LOCAL)?, None => vec![] }, "info": nodes::local_info(&app.settings()), "error": null, "checked": now,
+        "targets": match &h { Some(h) => node_targets(&app, h, LOCAL)?, None => local_folders(&app).unwrap_or_default() }, "info": nodes::local_info(&app.settings()), "error": null, "checked": now,
     });
     let cache = app.node_cache.lock().unwrap();
     let mut out = vec![local];
@@ -2062,6 +2073,11 @@ async fn agent_connect(
     let known = app.settings().node(&name).is_some();
     let enrolled = match key {
         Some(k) if known && vault.check_node_key(&name, &k) => None,
+        // Removed in the console: tell it to stop (410), not to retry.
+        Some(_) if !known && removed_nodes(&app).contains(&name) => {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            return ApiError(StatusCode::GONE, "removed in the console".into()).into_response();
+        }
         Some(_) => return refuse("wrong key or unknown node").await,
         None if code.is_empty() => return refuse("no key and no code").await,
         None if known && links.redeem(&name, &code) => match new_node_key(&app, &name) {
@@ -2081,6 +2097,33 @@ async fn agent_connect(
         },
     };
     ws.on_upgrade(move |socket| links.session(name, enrolled, socket))
+}
+
+/// Machines removed on the Machines page: their links are told to stop
+/// rather than retry (a machine the hub merely does not know keeps trying,
+/// in case the hub runs with another config for a while).
+fn removed_path(app: &App) -> std::path::PathBuf {
+    app.settings().data_dir.join("removed-nodes.json")
+}
+
+fn removed_nodes(app: &App) -> Vec<String> {
+    std::fs::read_to_string(removed_path(app))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn set_removed(app: &App, name: &str, removed: bool) {
+    let mut list = removed_nodes(app);
+    list.retain(|n| n != name);
+    if removed {
+        list.push(name.to_string());
+    }
+    let p = removed_path(app);
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, serde_json::to_string(&list).unwrap_or_default());
 }
 
 /// A fresh link key for `node`, kept in the encrypted secret store.
@@ -2132,6 +2175,7 @@ fn join_node(app: &App, code: &str, wanted: &str) -> ApiResult<(String, String)>
     let settings = check_config(app, c, &next)?;
     confedit::write_atomic(&c.path, &next).map_err(internal)?;
     app.settings.set(settings);
+    set_removed(app, &name, false);
     let key = new_node_key(app, &name)?;
     Ok((name, key))
 }
@@ -2282,8 +2326,112 @@ async fn node_remove(
         .procs
         .vault()
         .remove(&crate::deck::link::key_name(&name));
+    set_removed(&app, &name, true);
     app.procs.links().remove(&name);
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct DirsQ {
+    path: Option<String>,
+}
+
+/// `GET /api/nodes/{name}/dirs?path=`: the folder browser for picking where
+/// agents work: folder names only, from this machine or over a machine's
+/// link (admins only, like changing the folders).
+async fn node_dirs(
+    State(app): State<Arc<App>>,
+    UrlPath(name): UrlPath<String>,
+    Query(q): Query<DirsQ>,
+) -> ApiResult<Json<Value>> {
+    if name == LOCAL {
+        return nodes::list_dirs(q.path.as_deref()).map(Json).map_err(bad);
+    }
+    let link = app
+        .procs
+        .links()
+        .get(&name)
+        .filter(|l| l.connected())
+        .ok_or_else(|| {
+            bad("browsing needs the machine to be connected; type the folder's path instead")
+        })?;
+    link.request("dirs", json!({ "path": q.path }), 20)
+        .await
+        .map(Json)
+        .map_err(bad)
+}
+
+#[derive(Deserialize)]
+struct FoldersReq {
+    folders: Vec<String>,
+}
+
+/// `PUT /api/nodes/{name}/folders`: the folders agents may work in on a
+/// machine. This machine keeps them in its data folder; a machine that
+/// joined checks and keeps them itself (`indra node folders` shows them);
+/// one listed with `targets` in indra.toml gets them there. Allowed whenever
+/// machines may join (they are paths, not commands).
+async fn node_folders(
+    State(app): State<Arc<App>>,
+    UrlPath(name): UrlPath<String>,
+    Json(r): Json<FoldersReq>,
+) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    if let Some(why) = &c.join_locked {
+        return Err(forbidden(why.clone()));
+    }
+    if name == LOCAL {
+        let list = nodes::check_folders(&r.folders).map_err(bad)?;
+        let p = app.settings().data_dir.join("local-folders.json");
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| internal(e.to_string()))?;
+        }
+        std::fs::write(&p, serde_json::to_string_pretty(&list).unwrap_or_default())
+            .map_err(|e| internal(e.to_string()))?;
+        return Ok(Json(json!({ "folders": list })));
+    }
+    let n = app
+        .settings()
+        .node(&name)
+        .cloned()
+        .ok_or_else(|| not_found("no such machine"))?;
+    if n.targets.is_empty() {
+        if let Some(l) = app.procs.links().get(&name).filter(|l| l.connected()) {
+            let v = l
+                .request("set_folders", json!({ "folders": r.folders }), 20)
+                .await
+                .map_err(bad)?;
+            let list: Vec<String> = serde_json::from_value(v).unwrap_or_default();
+            l.set_targets(&list);
+            return Ok(Json(json!({ "folders": list })));
+        }
+        if n.ssh.is_empty() {
+            return Err(bad(
+                "the machine is not connected: on it, run `indra node folders <folder>`",
+            ));
+        }
+    }
+    // Listed in indra.toml (reached over SSH, or set up by hand).
+    let list: Vec<String> = r
+        .folders
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let _one = c.saving.lock().unwrap_or_else(|e| e.into_inner());
+    let (current, _) = confedit::read(&c.path).map_err(internal)?;
+    let cf = confedit::parse(&current).map_err(bad)?;
+    let mut nodes_v = serde_json::to_value(&cf.node).map_err(|e| internal(e.to_string()))?;
+    for x in nodes_v.as_array_mut().unwrap() {
+        if x["name"] == name {
+            x["targets"] = json!(list);
+        }
+    }
+    let next = confedit::set_section(&current, "node", &nodes_v).map_err(bad)?;
+    let settings = check_config(&app, c, &next)?;
+    confedit::write_atomic(&c.path, &next).map_err(internal)?;
+    app.settings.set(settings);
+    Ok(Json(json!({ "folders": list })))
 }
 
 /// `GET /api/nodes/enrol/{code}`: has the machine joined yet, and what is it.
@@ -3299,6 +3447,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/ollama", get(crate::deck::tools::ollama))
         .route("/api/ollama/check", get(crate::deck::tools::ollama_check))
         .route("/api/ollama/pull", post(crate::deck::tools::ollama_pull))
+        .route(
+            "/api/ollama/default",
+            axum::routing::put(crate::deck::tools::ollama_default),
+        )
         .route("/api/tools", get(crate::deck::tools::overview))
         .route("/api/tools/cache", post(crate::deck::tools::cache))
         .route(
@@ -3393,6 +3545,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/nodes/enrol", post(node_enrol))
         .route("/api/nodes/enrol/{code}", get(node_enrol_status))
         .route("/api/nodes/{name}", axum::routing::delete(node_remove))
+        .route("/api/nodes/{name}/dirs", get(node_dirs))
+        .route(
+            "/api/nodes/{name}/folders",
+            axum::routing::put(node_folders),
+        )
         .route("/agent/connect", get(agent_connect))
         .route("/api/nodes/runs", get(node_runs))
         .route("/api/nodes/runs/fetch", post(node_run_fetch))

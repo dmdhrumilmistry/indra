@@ -4,6 +4,27 @@
   "use strict";
 
   // ---- tiny helpers ----------------------------------------------------------
+  // A select set to a value it has no option for shows blank (browsers do
+  // that silently): a profile or agent reporting a mode, model, runner or node
+  // this page did not list. Everywhere: such a value gets its own option, and
+  // a select left with nothing chosen falls back to its first option.
+  (function () {
+    var d = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+    if (!d || !d.set) return;
+    Object.defineProperty(HTMLSelectElement.prototype, "value", {
+      configurable: true, enumerable: d.enumerable,
+      get: function () { return d.get.call(this); },
+      set: function (v) {
+        d.set.call(this, v);
+        if (this.selectedIndex >= 0) return;
+        var s = v === null || v === undefined ? "" : String(v);
+        if (s !== "") { this.appendChild(new Option(s, s, true, true)); return; }
+        if (this.options.length) this.selectedIndex = 0;
+      }
+    });
+  })();
+
+  var OPENED = {};
   function h(tag, props) {
     var el = document.createElement(tag);
     var kids = Array.prototype.slice.call(arguments, 2);
@@ -14,7 +35,13 @@
         if (k === "class") el.className = v;
         else if (k === "text") el.textContent = v;
         else if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
-        else if (k === "value") el.value = v;
+        else if (k === "value") { if (tag !== "select") el.value = v; }
+        else if (k === "keep") {
+          // A section the page redraws while it refreshes: it stays as the
+          // user left it (open or closed) instead of snapping shut.
+          if (OPENED[v] !== undefined) el.open = OPENED[v];
+          el.addEventListener("toggle", function () { OPENED[v] = el.open; });
+        }
         else if (k === "hidden") el.hidden = !!v;
         else el.setAttribute(k, v === true ? "" : v);
       });
@@ -24,6 +51,8 @@
       if (Array.isArray(c)) c.forEach(add);
       else el.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
     });
+    // A select's value once its options are there.
+    if (tag === "select" && props && props.value !== undefined && props.value !== null) el.value = props.value;
     return el;
   }
   function $(id) { return document.getElementById(id); }
@@ -775,7 +804,7 @@
           if (!ro) holder.appendChild(addForm());
           if (!open.length) holder.appendChild(empty("Nothing waiting for review."));
           open.forEach(function (l) { holder.appendChild(card(l)); });
-          if (done.length) holder.appendChild(h("details", { class: "card" }, h("summary", { text: "Accepted (" + done.length + ")" }),
+          if (done.length) holder.appendChild(h("details", { class: "card", keep: "learnings-accepted" }, h("summary", { text: "Accepted (" + done.length + ")" }),
             h("ul", { class: "links" }, done.map(function (l) {
               var vi = vaults.findIndex(function (v) { return l.note && v.path === l.note[0]; });
               return h("li", null, h("span", { class: "rel", text: ago(l.created) }),
@@ -1131,7 +1160,12 @@
     load();
     return h("div", { class: "card ollama" }, h("h3", { text: "Local models (Ollama)" }),
       h("p", { class: "muted small" }, "Run Claude Code on one: a profile with Runs on: Ollama, Launch's Runs on, or ", h("code", { text: "indra claude -m MODEL" }), " in your own terminal."),
-      h("div", { class: "row" }, url, h("button", { type: "button", onclick: load }, "Refresh")),
+      h("div", { class: "row" }, url, h("button", { type: "button", onclick: load }, "Refresh"),
+        canEdit() || (S.ov.is_admin && !ro) ? h("button", { type: "button", title: "Agents set to run on Ollama use this server unless their profile names another", onclick: function () {
+          api("/api/ollama/default", { method: "PUT", body: { url: url.value.trim() || null } }).then(function (r) {
+            url.value = ""; url.placeholder = r.url; toast("Saved: agents use Ollama at " + r.url); load();
+          }).catch(function (err) { toast(err.message, true); });
+        } }, "Save as default") : null),
       out,
       ro ? null : h("form", { class: "row", onsubmit: function (e) {
         e.preventDefault(); if (!model.value.trim()) return;
@@ -1173,7 +1207,7 @@
           })),
           Object.keys(by).length ? h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Model", "Events", "Tokens in", "Tokens out", "Time"].map(function (x) { return h("th", { text: x }); }))),
             h("tbody", null, Object.keys(by).map(function (k) { var b = by[k]; return h("tr", null, h("td", { text: k }), h("td", { text: String(b.events) }), h("td", { text: String(b.tokens_in) }), h("td", { text: String(b.tokens_out) }), h("td", { text: Math.round(b.ms / 1000) + "s" })); })))) : null,
-          (mt.runs || []).length ? h("details", null, h("summary", { text: "Runs (" + mt.runs.length + ")" }), h("div", { class: "tablewrap" }, h("table", null,
+          (mt.runs || []).length ? h("details", { keep: "metrics-runs" }, h("summary", { text: "Runs (" + mt.runs.length + ")" }), h("div", { class: "tablewrap" }, h("table", null,
             h("thead", null, h("tr", null, ["Run", "Repository", "PR", "Verdict", "Agents", "Reused", "Cost"].map(function (x) { return h("th", { text: x }); }))),
             h("tbody", null, mt.runs.slice().reverse().map(function (r) {
               return h("tr", null, h("td", null, h("code", { text: r.run_id })), h("td", { text: r.repo || "" }), h("td", { text: r.pr || "" }), h("td", { text: (r.verdict || (r.complete ? "" : "incomplete")) }),
@@ -1429,7 +1463,7 @@
   // ---- nodes --------------------------------------------------------------------
   function meter(used, max) {
     var fill = h("div", { class: "fill" }); fill.style.width = Math.min(100, 100 * used / Math.max(1, max)) + "%";
-    return h("div", { class: "bar" }, h("span", { text: "agents" }), h("div", { class: "track" }, fill), h("b", { text: used + "/" + max }));
+    return h("div", { class: "bar" }, h("span", { text: "running now" }), h("div", { class: "track" }, fill), h("b", { text: used + "/" + max }));
   }
   var INSTALL_SH = "https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh";
   var INSTALL_PS = "https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1";
@@ -1555,6 +1589,56 @@
           }))));
       }).catch(function (e) { box.textContent = e.message; });
     }
+    // Where agents work on a machine: a list to edit, and a folder browser
+    // that walks the machine's folders (names only) over its link.
+    function folderEditor(n, box) {
+      var list = n.targets.slice();
+      var listBox = h("div", { class: "files" }), err = h("div", { class: "note bad", role: "alert", hidden: true });
+      var typed = h("input", { type: "text", placeholder: n.info && n.info.os === "windows" ? "D:\\code\\my-app" : "/home/me/code/my-app", "aria-label": "Folder path" });
+      var browser = h("div");
+      function drawList() {
+        listBox.textContent = "";
+        if (!list.length) listBox.appendChild(h("p", { class: "muted small", text: n.kind === "local" ? "None set: agents use the folders indra was started with." : "None yet: add one below." }));
+        list.forEach(function (f, i) {
+          listBox.appendChild(h("div", { class: "row folder" }, h("span", { class: "cmd", text: f }),
+            h("button", { type: "button", class: "ghost", "aria-label": "Remove " + f, onclick: function () { list.splice(i, 1); drawList(); } }, "Remove")));
+        });
+      }
+      function add(f) { f = (f || "").trim(); if (f && list.indexOf(f) < 0) list.push(f); drawList(); }
+      function browse(path) {
+        browser.textContent = "";
+        browser.appendChild(h("p", { class: "muted small", text: "Opening..." }));
+        api("/api/nodes/" + encodeURIComponent(n.name) + "/dirs" + (path ? q({ path: path }) : "")).then(function (d) {
+          browser.textContent = "";
+          var head = h("div", { class: "row" }, h("b", { class: "cmd", text: d.path }),
+            h("button", { type: "button", class: "primary", onclick: function () { add(d.path); browser.textContent = ""; } }, "Use this folder"));
+          var nav = h("div", { class: "chips" },
+            d.parent ? h("button", { type: "button", class: "ghost", onclick: function () { browse(d.parent); } }, "Up") : null,
+            d.roots.map(function (r) { return h("button", { type: "button", class: "ghost", title: r.path, onclick: function () { browse(r.path); } }, r.label); }));
+          var dirs = h("div", { class: "dirlist" }, d.dirs.length ? d.dirs.map(function (x) {
+            return h("button", { type: "button", class: "ghost dir", onclick: function () { browse(d.path.replace(/[\\/]$/, "") + d.sep + x); } }, x);
+          }) : h("p", { class: "muted small", text: "No folders inside." }));
+          browser.appendChild(h("div", { class: "card browser" }, head, nav, dirs, d.more ? h("p", { class: "muted small", text: "Showing the first 500." }) : null));
+        }).catch(function (e) { browser.textContent = ""; browser.appendChild(h("div", { class: "note bad", text: e.message })); });
+      }
+      box.textContent = "";
+      drawList();
+      box.appendChild(h("div", { class: "card form folders" },
+        h("h3", { text: "Folders agents work in on " + n.name }),
+        h("p", { class: "muted small", text: "Agents can only be started in these folders. They do not have to be where indra is installed." }),
+        listBox,
+        h("div", { class: "row" }, typed, h("button", { type: "button", onclick: function () { add(typed.value); typed.value = ""; } }, "Add"),
+          n.info ? h("button", { type: "button", onclick: function () { browse(""); } }, "Browse...") : null),
+        browser, err,
+        h("div", { class: "row" }, h("button", { type: "button", class: "primary", onclick: function (e) {
+          if (typed.value.trim()) { add(typed.value); typed.value = ""; }
+          e.target.disabled = true; err.hidden = true;
+          api("/api/nodes/" + encodeURIComponent(n.name) + "/folders", { method: "PUT", body: { folders: list } }).then(function (r) {
+            toast("Saved: " + (r.folders.length ? r.folders.join(", ") : "default folders")); load(true);
+          }).catch(function (x) { err.textContent = x.message; err.hidden = false; e.target.disabled = false; });
+        } }, "Save"), h("button", { type: "button", onclick: function () { box.textContent = ""; } }, "Cancel"))));
+      typed.focus();
+    }
     function remove(n) {
       if (!confirm("Remove " + n.name + "? It disconnects now; to add it again, run a new join command on it.")) return;
       api("/api/nodes/" + encodeURIComponent(n.name), { method: "DELETE" }).then(function () { toast("Removed " + n.name); load(true); })
@@ -1563,7 +1647,7 @@
     function render(nodes) {
       grid.textContent = "";
       nodes.forEach(function (n) {
-        var i = n.info, ok = !!i;
+        var i = n.info, ok = !!i, edBox = h("div");
         var state = n.kind === "local" ? "this machine" : n.transport === "webrtc" ? "connected (direct)" : n.transport === "relay" ? "connected (relayed)" : n.transport === "none" ? "offline" : "over SSH";
         var card = h("div", { class: "card" },
           h("div", { class: "row" }, h("h4", { text: n.name }), h("span", { class: "pill" + (n.transport === "webrtc" ? " ok" : ""),
@@ -1577,8 +1661,10 @@
             })) : h("div", { class: "note bad", text: n.ssh ? (n.error || "not checked yet") : "Not connected. On that machine: `indra node status` says why, `indra node connect` reconnects." }),
           meter(n.running, n.max_parallel),
           ok ? [h("h3", { text: "Agents installed" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (not installed)") }); }))] : null,
-          h("h3", { text: "Folders agents work in" }),
+          h("div", { class: "row" }, h("h3", { text: "Folders agents work in" }),
+            canJoin() && (n.kind === "local" || ok || n.ssh) ? h("button", { type: "button", class: "ghost", onclick: function () { folderEditor(n, edBox); } }, "Change") : null),
           n.targets.length ? h("div", { class: "files" }, n.targets.map(function (t) { return h("div", { class: "cmd", text: t }); })) : h("p", { class: "muted", text: "none yet" }),
+          edBox,
           h("div", { class: "row" }, h("a", { class: "btn", href: "#/launch", text: "Run an agent here" }),
             h("button", { type: "button", onclick: function () { showRuns(n); } }, "Results here"),
             n.kind !== "local" && canJoin() && (!n.ssh || canEdit()) ? h("button", { type: "button", class: "ghost", onclick: function () { remove(n); } }, "Remove") : null));
@@ -1756,7 +1842,7 @@
               t.attempts > 1 || t.retries ? h("div", { class: "muted", text: "attempt " + t.attempts + " of " + (t.retries + 1) }) : null,
               t.exit_code != null && t.state !== "running" ? h("div", { class: "muted small", text: "exit code " + t.exit_code }) : null,
               t.error ? h("div", { class: "note " + (t.state === "failed" ? "bad" : "warn"), text: t.error }) : null,
-              t.output && t.state !== "running" ? h("details", null, h("summary", { text: "Output" }), h("pre", { class: "view small", text: t.output.slice(-4000) })) : null,
+              t.output && t.state !== "running" ? h("details", { keep: "wf-out:" + r.id + ":" + t.id }, h("summary", { text: "Output" }), h("pre", { class: "view small", text: t.output.slice(-4000) })) : null,
               t.proc_id ? h("a", { href: "#/proc/" + t.proc_id, text: (t.run ? "Open command process #" : "Open agent process #") + t.proc_id }) : null);
           })));
         });
@@ -2465,7 +2551,7 @@
   }
 
   // Claude Code's permission modes, with what each means.
-  var MODES = [["manual", "manual: ask before every tool"], ["acceptEdits", "acceptEdits: file edits run, the rest asks"],
+  var MODES = [["default", "default: ask before risky tools"], ["manual", "manual: ask before every tool"], ["acceptEdits", "acceptEdits: file edits run, the rest asks"],
     ["auto", "auto: Claude decides what is safe"], ["plan", "plan: read and plan, change nothing"],
     ["dontAsk", "dontAsk: deny whatever would ask"], ["bypassPermissions", "bypassPermissions: run everything"]];
   // Model suggestions: Claude's, then whatever the local Ollama server has.

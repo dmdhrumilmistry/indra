@@ -393,22 +393,45 @@ pub async fn dashes(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
 // ---- Ollama --------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+pub struct OllamaDefault {
+    url: Option<String>,
+}
+
+/// `PUT /api/ollama/default`: the Ollama server agents use when their profile
+/// names none (empty: back to http://localhost:11434). Kept in indra's data
+/// folder, so it can be saved when settings are locked.
+pub async fn ollama_default(
+    State(_app): State<Arc<App>>,
+    Json(r): Json<OllamaDefault>,
+) -> ApiResult<Json<Value>> {
+    if let Some(u) = r.url.as_deref().filter(|u| !u.trim().is_empty()) {
+        crate::deck::router::check_url(u.trim()).map_err(bad)?;
+    }
+    crate::deck::nodes::set_default_ollama_url(r.url.as_deref()).map_err(internal)?;
+    Ok(Json(
+        json!({ "url": crate::deck::nodes::default_ollama_url() }),
+    ))
+}
+
+#[derive(Deserialize)]
 pub struct OllamaQ {
     url: Option<String>,
     model: Option<String>,
 }
 
-/// The Ollama server asked for, else the first profile's, else this machine's.
+/// The Ollama server asked for, else the one saved as the default, else the
+/// first profile's, else this machine's.
 fn ollama_url(app: &App, asked: Option<String>) -> ApiResult<String> {
     let url = asked
         .filter(|u| !u.trim().is_empty())
+        .or_else(crate::deck::nodes::saved_ollama_url)
         .or_else(|| {
             app.settings()
                 .profiles
                 .iter()
                 .find_map(|p| p.ollama_url.clone().filter(|u| !u.trim().is_empty()))
         })
-        .unwrap_or_else(|| crate::deck::nodes::OLLAMA_URL.to_string());
+        .unwrap_or_else(crate::deck::nodes::default_ollama_url);
     crate::deck::router::check_url(&url).map_err(bad)?;
     Ok(url.trim_end_matches('/').to_string())
 }

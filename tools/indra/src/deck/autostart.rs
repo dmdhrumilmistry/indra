@@ -50,10 +50,13 @@ fn quiet(cmd: &mut Command) -> bool {
         .unwrap_or(false)
 }
 
-/// Start `node connect` now, detached, its output in the log; remembers the
-/// process so a later join or leave can stop it.
+/// Start the link now, detached, its output in the log: a small supervisor
+/// (`indra node supervise`) that runs `node connect` and starts it again if
+/// it ever fails. Remembers the supervisor so a later join or leave can stop
+/// it (and its link).
 pub fn spawn_background(config: Option<&Path>) -> Result<u32, String> {
-    let (exe, args) = command(config)?;
+    let (exe, mut args) = command(config)?;
+    args[1] = "supervise".into();
     let log = log_path();
     if let Some(d) = log.parent() {
         let _ = std::fs::create_dir_all(d);
@@ -91,7 +94,51 @@ pub fn spawn_background(config: Option<&Path>) -> Result<u32, String> {
     Ok(pid)
 }
 
-/// Stop a background `node connect` started by [`spawn_background`].
+/// `indra node supervise`: run `node connect` and start it again whenever it
+/// fails, waiting a little longer each time (5 s up to a minute). It ends
+/// when the link ends on purpose (the machine was removed, or left).
+pub fn supervise(config: Option<&Path>) -> ! {
+    let (exe, args) = match command(config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("indra: {}", e);
+            std::process::exit(1)
+        }
+    };
+    let mut wait = 5u64;
+    loop {
+        let started = std::time::Instant::now();
+        let mut cmd = Command::new(&exe);
+        cmd.args(&args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // no window
+        }
+        match cmd.status() {
+            Ok(st) if st.success() => std::process::exit(0),
+            Ok(st) => eprintln!(
+                "indra: the link stopped ({}); starting it again in {}s",
+                st, wait
+            ),
+            Err(e) => eprintln!(
+                "indra: cannot start the link ({}); trying again in {}s",
+                e, wait
+            ),
+        }
+        if crate::deck::link::saved().is_none() {
+            // `indra node leave` ran: nothing to keep up.
+            std::process::exit(0);
+        }
+        if started.elapsed().as_secs() > 300 {
+            wait = 5;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+        wait = (wait * 2).min(60);
+    }
+}
+
+/// Stop a background link started by [`spawn_background`].
 fn stop_background() {
     let Ok(t) = std::fs::read_to_string(pid_path()) else {
         return;
@@ -107,11 +154,13 @@ fn stop_background() {
     {
         // Only if it is still indra (the number may have been reused).
         let ours = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
-            .map(|c| c.contains("indra") && c.contains("connect"))
+            .map(|c| c.contains("indra") && (c.contains("supervise") || c.contains("connect")))
             .unwrap_or(cfg!(target_os = "macos"));
         if ours {
-            // SAFETY: plain kill(2) on a process id.
+            // SAFETY: plain kill(2): its whole process group (the supervisor
+            // leads it), so the link it started stops too.
             unsafe {
+                libc::kill(-(pid as i32), libc::SIGTERM);
                 libc::kill(pid as i32, libc::SIGTERM);
             }
         }
@@ -129,7 +178,8 @@ fn stop_background() {
             })
             .unwrap_or(false);
         if listed {
-            let _ = quiet(Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]));
+            // /T: the link it started too.
+            let _ = quiet(Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]));
         }
     }
 }
