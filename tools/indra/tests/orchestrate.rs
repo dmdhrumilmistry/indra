@@ -429,12 +429,22 @@ fn accounts_give_agents_their_credentials_on_every_node() {
     );
     assert!(!log("here").contains("sk-test-123456"));
     // Both runs are counted on the account.
-    let data = fs::read_dir(e.dir.join("app data"))
-        .unwrap()
-        .flatten()
-        .map(|d| d.path().join("accounts.json"))
-        .find(|p| p.exists())
-        .expect("accounts.json");
+    // The data directory is per OS (XDG on Linux, ~/Library/Application
+    // Support on macOS): look for the file anywhere under the test's home.
+    fn find(dir: &Path, name: &str) -> Option<PathBuf> {
+        for e in fs::read_dir(dir).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if let Some(f) = find(&p, name) {
+                    return Some(f);
+                }
+            } else if p.file_name().is_some_and(|n| n == name) {
+                return Some(p);
+            }
+        }
+        None
+    }
+    let data = find(&e.dir, "accounts.json").expect("accounts.json");
     let usage: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(data).unwrap()).unwrap();
     let days = usage["usage"]["work"]["days"].as_object().unwrap();
