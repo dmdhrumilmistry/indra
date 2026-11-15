@@ -66,11 +66,49 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # The release, as a draft: invisible to `indra update` and the installers
+  # until every file is on it (checksums publishes it). One job makes it, so
+  # the builds do not race to create several drafts.
+  draft:
+    name: draft release
+    if: inputs.latest == ''
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    env:
+      TAG: ${{ inputs.release != '' && format('v{0}', inputs.release) || github.ref_name }}
+    steps:
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export GH_REPO="$GITHUB_REPOSITORY"
+          notes="One file, nothing else to install.
+
+          Linux and macOS:
+
+              curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
+
+          Windows (PowerShell):
+
+              irm https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.ps1 | iex
+
+          Then: \`indra serve --open\`. Already installed? \`indra update\`.
+
+          Or download the file for your machine below; each has a .sha256, and SHA256SUMS lists them all."
+          # Run again for the same version: keep the release that is there.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --draft --title "$TAG" --notes "$notes" --target "$GITHUB_SHA"
+
   release:
     name: release (${{ matrix.target }})
     # A pushed v* tag, or Run workflow with a version.
     if: inputs.latest == ''
-    needs: test
+    needs: draft
     runs-on: ${{ matrix.os }}
     env:
       TAG: ${{ inputs.release != '' && format('v{0}', inputs.release) || github.ref_name }}
@@ -117,24 +155,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NAME: ${{ steps.pkg.outputs.name }}
         run: |
-          # Every matrix job races to create the release; losing that race is fine.
           export GH_REPO="$GITHUB_REPOSITORY"
-          notes="One file, nothing else to install.
-
-          Linux and macOS:
-
-              curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
-
-          Windows (PowerShell):
-
-              irm https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.ps1 | iex
-
-          Then: \`indra serve --open\`. Already installed? \`indra update\`.
-
-          Or download the file for your machine below; each has a .sha256, and SHA256SUMS lists them all."
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --notes "$notes" --latest=false --target "$GITHUB_SHA" \
-            || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber
 
   # After every build: one SHA256SUMS for all of them, and the install
@@ -166,9 +187,9 @@ jobs:
           cat SHA256SUMS
           cp ../install.sh ../install.ps1 .
           gh release upload "$TAG" SHA256SUMS install.sh install.ps1 --clobber
-          # Complete now: make it the repository's Latest release (it is
-          # created as not-latest so a half-uploaded release never is).
-          gh release edit "$TAG" --latest
+          # Complete now: publish the draft as the repository's Latest release
+          # (until here nobody could see it, so nobody got a half-uploaded one).
+          gh release edit "$TAG" --draft=false --latest
 
   # The crate on crates.io, once the release is complete. Needs the
   # CARGO_REGISTRY_TOKEN repository secret (a crates.io API token with the
