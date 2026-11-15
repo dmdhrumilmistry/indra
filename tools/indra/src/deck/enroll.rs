@@ -100,18 +100,22 @@ impl Keys {
             .unwrap_or_default()
     }
 
+    /// Write the keys: to a temporary file, then renamed over the old one,
+    /// so a reader never sees a half-written file.
     fn save(&self, keys: &[Key]) -> Result<(), String> {
         if let Some(d) = self.path.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let text = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
+        let tmp = self.path.with_extension("json.tmp");
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
         use std::io::Write;
-        opts.open(&self.path)
-            .and_then(|mut f| f.write_all(text.as_bytes()))
+        opts.open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all()))
+            .and_then(|_| std::fs::rename(&tmp, &self.path))
             .map_err(|e| format!("{}: {}", self.path.display(), e))
     }
 
@@ -157,6 +161,7 @@ impl Keys {
 
     /// The keys, never their secrets.
     pub fn list(&self) -> Vec<Value> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let t = now();
         self.load().iter().rev().map(|k| view(k, t)).collect()
     }
@@ -176,6 +181,8 @@ impl Keys {
         }
         let h = hash(secret);
         let t = now();
+        // Under the lock: a join recording a use is not half-way through.
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         self.load()
             .into_iter()
             .find(|k| same(&k.hash, &h) && k.state(t) == "active")
@@ -253,6 +260,30 @@ mod tests {
         assert_eq!(keys.check(&s2), None);
         assert!(keys.create("x", 0, None).is_err());
         assert!(keys.create("x", 400, None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn many_joins_at_once_each_see_the_key() {
+        let dir = std::env::temp_dir().join(format!("indra-enroll-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let keys = std::sync::Arc::new(Keys::open(&dir));
+        let (secret, _) = keys.create("fleet", 1, Some(64)).unwrap();
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let (k, s) = (keys.clone(), secret.clone());
+                std::thread::spawn(move || {
+                    let id = k
+                        .check(&s)
+                        .expect("the key is readable while others record uses");
+                    assert!(k.record_use(&id, &format!("m{}", i)));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(keys.list()[0]["uses"], 16);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
