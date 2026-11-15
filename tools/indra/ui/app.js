@@ -649,7 +649,7 @@
           var pick = function () { go(tab === "learnings" ? "notes" : tab, x.index); };
           return h("div", { class: "vault" + (x.index === cur ? " sel" : ""), role: "listitem", tabindex: "0", title: x.path,
             onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
-            h("span", { class: "vlabel", text: vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
+            h("span", { class: "vlabel", text: x.global ? "Global memory (every agent)" : vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
             h("code", { class: "vpath", text: x.path }),
             x.exists ? h("span", { class: "vstats" },
               h("span", null, h("b", { text: String(x.notes) }), " notes"),
@@ -813,12 +813,14 @@
 
     function learnings(vaults, cur) {
       var holder = h("div", { class: "stack" });
-      body.appendChild(h("p", { class: "muted", text: "Agents launched with \"Ask for learnings\" (or a profile with reflect = true) propose what they learned before they finish. Nothing reaches memory until you accept it: it then becomes a learning note, with where it came from, and later agents are given it when it is relevant." }));
+      body.appendChild(h("p", { class: "muted", text: "Agents launched with \"Ask for learnings\" (or a profile with reflect = true) propose what they learned before they finish. Nothing reaches memory until you accept it: it then becomes a learning note, with where it came from, in the global memory unless you pick another vault, so every agent on every project can be given it when it is relevant." }));
       body.appendChild(holder);
       var existing = vaults.filter(function (v) { return true; });
       function vaultSelect() {
-        var s = h("select", { "aria-label": "Vault" }, existing.map(function (v) { return h("option", { value: String(v.index), text: v.path + (v.exists ? "" : " (created on accept)") }); }));
-        s.value = String(cur);
+        var s = h("select", { "aria-label": "Vault" }, existing.map(function (v) { return h("option", { value: String(v.index), text: (v.global ? "Global memory (every agent): " : "") + v.path + (v.exists ? "" : " (created on accept)") }); }));
+        // Learnings go to the global memory unless you pick another vault.
+        var g = existing.find(function (v) { return v.global; });
+        s.value = String(g ? g.index : cur);
         return s;
       }
       function load() {

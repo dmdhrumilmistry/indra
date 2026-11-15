@@ -697,7 +697,11 @@ impl Proc {
             st.turns = st.turns.saturating_sub(1);
             if st.reflect_state == 1 && st.turns == 0 {
                 st.reflect_state = 2;
-                st.reflection = Some(std::mem::take(&mut st.last_result));
+                // An error is not a learning.
+                let r = std::mem::take(&mut st.last_result);
+                if !st.last_failed {
+                    st.reflection = Some(r);
+                }
             }
             if !(st.interactive && st.open && st.turns == 0) {
                 Next::Wait

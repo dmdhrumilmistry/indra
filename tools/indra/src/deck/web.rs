@@ -6148,6 +6148,7 @@ while True:
     #[cfg(unix)]
     const REFLECTOR: &str = r#"#!/usr/bin/env python3
 import json, os, sys
+bad = False
 log = open(os.environ["FAKE_REFLECT_LOG"], "a")
 def out(o):
     print(json.dumps(o), flush=True)
@@ -6164,11 +6165,14 @@ while True:
     if m["type"] != "user":
         continue
     c = m["message"]["content"]
-    if "Before you finish" in c:
+    if "Before you finish" in c and bad:
+        out({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "duration_ms": 5, "result": "API Error: 500 read GGUF metadata"})
+    elif "Before you finish" in c:
         ans = '[{"title": "Use make db", "body": "The tests need Postgres.", "tags": ["tests"]}]'
         out({"type": "assistant", "message": {"content": [{"type": "text", "text": ans}], "usage": {"input_tokens": 10, "cache_read_input_tokens": 3000, "output_tokens": 40}}})
         out({"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 5, "result": ans, "modelUsage": {"m": {"contextWindow": 123456}}})
     else:
+        bad = "BADREFLECT" in c
         out({"type": "system", "subtype": "init", "model": "m", "session_id": "s-9"})
         out({"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}], "usage": {"input_tokens": 1000, "cache_read_input_tokens": 2000, "output_tokens": 50}}, "session_id": "s-9"})
         out({"type": "result", "subtype": "success", "is_error": "FAIL" in c, "num_turns": 1, "duration_ms": 5, "result": "API Error: 500" if "FAIL" in c else "done", "session_id": "s-9"})
@@ -6278,6 +6282,33 @@ while True:
         assert_eq!(v["reflection"], "none", "{}", v);
         let sent = std::fs::read_to_string(&log).unwrap();
         assert!(!sent[before..].contains("Before you finish"));
+
+        // An answer to the learnings question that is an error is not a learning.
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "reflector", "prompt": "BADREFLECT the review", "target": 0, "reflect": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        for _ in 0..400 {
+            if app.procs.get(id).unwrap().view().status != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            sent.contains("BADREFLECT") && sent.matches("Before you finish").count() == 2,
+            "it was asked"
+        );
+        crate::deck::knowledge::harvest(&app);
+        assert_eq!(app.learnings.list().len(), 1, "only the one from before");
         let _ = std::fs::remove_dir_all(dir);
     }
 

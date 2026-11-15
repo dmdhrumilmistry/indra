@@ -48,6 +48,16 @@ pub fn locate(explicit: Option<PathBuf>) -> PathBuf {
     default_vault()
 }
 
+/// The global vault: shared by every harness, project and agent on this
+/// machine ($INDRA_VAULT, else the default in indra's data folder). Unlike
+/// [`locate`], it does not depend on the current folder.
+pub fn global() -> PathBuf {
+    std::env::var_os("INDRA_VAULT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_vault)
+}
+
 fn default_vault() -> PathBuf {
     crate::paths::data_dir().join("memory")
 }

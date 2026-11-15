@@ -1243,6 +1243,12 @@ impl Harness {
                 }
             }
         }
+        // The global vault, last, for every harness: what one agent learns
+        // is there for all of them.
+        let g = crate::mem::vault::global();
+        if !out.contains(&g) {
+            out.push(g);
+        }
         out
     }
 }
@@ -1690,7 +1696,7 @@ pub fn security_harness_profile(plugin: &Path, targets: &[PathBuf]) -> Harness {
         agent: agent.map(String::from),
         done_when: Some(done.into()),
     };
-    let global_memory = crate::mem::vault::locate(None);
+    let global_memory = crate::mem::vault::global();
     Harness {
         name: "indra".into(),
         description: "Multi-agent application-security review: recon, parallel hunters, chain, verify, report.".into(),

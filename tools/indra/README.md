@@ -713,7 +713,8 @@ Agents can start with what earlier agents learned, and finish by proposing what 
   agent's input closes, it is asked what a future agent should know. Its answer, and learnings
   people add from a process page or `indra attach`, wait in **Knowledge > Learnings** with their
   source (process, session, profile, directory) until you accept one into a vault, as a
-  `learning` note, or discard it.
+  `learning` note, or discard it. Learnings go to the **global memory** unless you pick another
+  vault: every harness has it, so every agent on every project can be given them.
 - **Context meter.** Each process page shows the tokens in the agent's context against its
   model's window, so you can pivot before it fills up.
 - **Manage memory** on **Knowledge**: search, read, edit, link, create, download and delete
