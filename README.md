@@ -123,7 +123,7 @@ That's it. The console opens in your browser: launch agents, watch them, read th
 | I want to... | Run |
 |---|---|
 | Use the console (the "server") | `indra serve --open` |
-| Run agents on another machine too | install there the same way, then paste the line the console shows under **Nodes > Add a machine** |
+| Run agents on another machine too | in the console: **Machines > Add a machine**, then paste the one command it shows on that machine (it installs indra and joins; see [adding machines](docs/guides/machines.md)) |
 | Run Claude Code on a local model (Ollama) | `indra claude -m qwen3-coder --pull` |
 | Give a team accounts and roles | `indra user add alice` (see [users and roles](docs/guides/users-and-roles.md)) |
 | Build a workflow from a description | **Workflows > Create with Claude** in the console |
@@ -358,9 +358,11 @@ cd indra && indra serve --target ~/code/my-api     # prints a URL with an access
 
 ### Agents on many machines (`indra nodes`, `indra run`)
 
-Run agents on this machine and on any machine you can SSH into, and orchestrate them:
+Run agents on this machine and on any other machine you add, and orchestrate them:
 
-- **Nodes:** a machine dials in with `indra node connect` (no open port, no SSH; a direct
+- **Machines:** a machine joins with one command from the console's **Machines > Add a machine**
+  (`indra join <hub> <code>`; its name, system and agents are detected, and it keeps running in
+  the background). It dials in (no open port, no SSH; a direct
   WebRTC channel when possible, relayed otherwise; it reconnects on its own and loses no output),
   or is reached over SSH as a fallback. Either way it runs only its own configured runners.
 - **Workflows:** a graph of agent tasks across nodes, run in dependency order within each

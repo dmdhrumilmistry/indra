@@ -108,9 +108,11 @@ Agents need tokens (tracker APIs, cloud credentials, model keys). The rules:
 Today the hub reaches nodes over SSH. The next transport inverts the direction, so nodes need no
 open port and no SSH account:
 
-1. **Enrol.** On the hub, **Nodes > Add a machine** creates a one-time enrolment code (15
-   minutes). On the node: `indra node connect https://hub.example --name box --code ABCDE-FGHJK`.
-   The hub answers with a random 256-bit key for that node, kept in its encrypted secret store
+1. **Enrol.** On the hub, **Machines > Add a machine** creates a one-time code (an hour, admins
+   only). On the node: `indra join https://hub.example ABCDE-FGHJK` (or the installer with
+   `INDRA_JOIN`). The node suggests a name (its host name); the hub adds it to `indra.toml` under
+   a free name, with no command or SSH destination, so this works even when the console's
+   settings are locked because it listens on the network. The hub answers with a random 256-bit key for that node, kept in its encrypted secret store
    and in an owner-only file on the node; from then on the node presents that key.
 2. **Signal.** The node keeps one outbound WebSocket to the hub (`/agent/connect`). It carries
    presence, heartbeats and WebRTC offers, answers and ICE candidates.

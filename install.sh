@@ -14,6 +14,11 @@
 #   INDRA_NO_COMPLETIONS=1         do not set up Tab completion for your shell
 #   INDRA_AUTO_UPDATE=1            keep indra up to date by itself (indra update --auto on)
 #   INDRA_RELEASES_URL=...         another releases API (a mirror, or tests)
+#
+# Add this machine to a hub in the same step (the hub's Machines page gives
+# you this line): INDRA_JOIN="http://hub:7878 CODE" runs `indra join` after
+# installing, with INDRA_JOIN_NAME and INDRA_JOIN_TARGET as its --name and
+# --target (default: the machine's name, and the folder you run this in).
 set -eu
 
 REPO="dmdhrumilmistry/indra"
@@ -106,6 +111,17 @@ if [ -z "${INDRA_NO_COMPLETIONS:-}" ] && "$DIR/indra" completions --install --qu
 fi
 if [ -n "${INDRA_AUTO_UPDATE:-}" ] && "$DIR/indra" update --auto on >/dev/null 2>&1; then
   say "Automatic updates are on (turn off: indra update --auto off)"
+fi
+
+# Join a hub: it keeps the link running in the background.
+if [ -n "${INDRA_JOIN:-}" ]; then
+  # shellcheck disable=SC2086 # "URL CODE": two words on purpose
+  set -- $INDRA_JOIN
+  [ $# -eq 2 ] || fail "INDRA_JOIN must be \"<hub-url> <code>\", as the hub's Machines page shows it"
+  [ -n "${INDRA_JOIN_NAME:-}" ] && set -- "$@" --name "$INDRA_JOIN_NAME"
+  [ -n "${INDRA_JOIN_TARGET:-}" ] && set -- "$@" --target "$INDRA_JOIN_TARGET"
+  say ""
+  exec "$DIR/indra" join "$@"
 fi
 
 say ""

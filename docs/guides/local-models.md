@@ -94,7 +94,7 @@ show how many requests went each way.
 context window, marks which ones can run Claude Code, and pulls new ones with progress. Model
 fields everywhere suggest the server's models next to Claude's aliases.
 
-On **Launch**, **Runs on** overrides the profile for one launch: the whole agent on Ollama, or
+On **Run an agent** (under **More options**), **Runs on** overrides the profile for one launch: the whole agent on Ollama, or
 Anthropic with its subagents on Ollama (and the subagents' model). Before you launch, Launch
 checks the model and warns if it is not pulled, cannot call tools, or has too small a window.
 

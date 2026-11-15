@@ -11,24 +11,27 @@
 <div class="shell">
   <aside class="side">
     <div class="brand"><img src="/favicon.svg" alt="" width="22" height="22"><span>indra</span></div>
-    <label class="hsel"><span>Harness</span><select id="harness"></select></label>
+    <label class="hsel" title="A harness is a set of agents, skills and prompts for one kind of work (the security review by default)"><span>Setup</span><select id="harness"></select></label>
     <nav id="nav">
-      <a href="#/overview" data-route="overview">Overview</a>
-      <a href="#/agents" data-route="agents">Agents</a>
-      <a href="#/skills" data-route="skills">Skills</a>
-      <a href="#/prompts" data-route="prompts">Prompts</a>
-      <a href="#/graph" data-route="graph">Graph map</a>
-      <a href="#/market" data-route="market">Marketplace</a>
-      <a href="#/knowledge" data-route="knowledge">Knowledge <b id="learnings-badge" class="badge warn" hidden></b></a>
-      <a href="#/runs" data-route="runs">Runs</a>
-      <a href="#/nodes" data-route="nodes">Nodes</a>
-      <a href="#/workflows" data-route="workflows">Workflows</a>
-      <a href="#/board" data-route="board">Board</a>
-      <a href="#/launch" data-route="launch">Launch</a>
-      <a href="#/accounts" data-route="accounts">Accounts</a>
-      <a href="#/procs" data-route="procs">Processes <span><b id="approvals-badge" class="badge warn" hidden></b> <b id="running-badge" class="badge" hidden></b></span></a>
-      <a href="#/terminal" data-route="terminal">Terminal</a>
-      <a href="#/tools" data-route="tools">Tools</a>
+      <a href="#/overview" data-route="overview" title="Start here: what indra is and what is going on">Home</a>
+      <a href="#/launch" data-route="launch" title="Start an AI agent on a codebase">Run an agent</a>
+      <a href="#/procs" data-route="procs" title="Agents that are running or ran, and what they ask you">Running <span><b id="approvals-badge" class="badge warn" hidden></b> <b id="running-badge" class="badge" hidden></b></span></a>
+      <a href="#/workflows" data-route="workflows" title="Several steps in order: agents, skills and shell commands">Workflows</a>
+      <a href="#/board" data-route="board" title="Tasks to hand to agents">Board</a>
+      <a href="#/runs" data-route="runs" title="What reviews found: findings and reports">Results</a>
+      <a href="#/nodes" data-route="nodes" title="Computers agents run on; add one with one command">Machines</a>
+      <a href="#/knowledge" data-route="knowledge" title="What agents remember, and learnings to review">Knowledge <b id="learnings-badge" class="badge warn" hidden></b></a>
+      <details id="nav-more">
+        <summary>More</summary>
+        <a href="#/accounts" data-route="accounts" title="Credentials agents run with, and their usage">Accounts</a>
+        <a href="#/agents" data-route="agents" title="The agent definitions of this setup">Agents</a>
+        <a href="#/skills" data-route="skills">Skills</a>
+        <a href="#/prompts" data-route="prompts">Prompts</a>
+        <a href="#/graph" data-route="graph" title="How agents, skills and prompts link">Graph map</a>
+        <a href="#/market" data-route="market" title="Install agents and skills others shared">Marketplace</a>
+        <a href="#/terminal" data-route="terminal">Terminal</a>
+        <a href="#/tools" data-route="tools">Tools</a>
+      </details>
       <a href="#/settings" data-route="settings">Settings</a>
     </nav>
     <div class="side-foot">

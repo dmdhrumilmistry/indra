@@ -85,7 +85,7 @@ its own marked, and its instructions, so a small model has what it needs without
 whole conversation. The reviewer then looks at what changed (for example `git diff`), runs the
 checks the plan names, fixes small mistakes and reports.
 
-The plan's page shows each step's state and process, and what each role cost; **Processes**
+The plan's page shows each step's state and process, and what each role cost; **Running**
 lists all plans. **Cancel** stops the planner or the remaining steps.
 
 ## Why it saves tokens

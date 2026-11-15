@@ -329,15 +329,23 @@ Open: http://127.0.0.1:7878/?token=3f9c...
 Open the printed URL once. It exchanges the token for a cookie and you are in. Add `--open` to
 open the browser for you, `--read-only` to turn off launching and editing.
 
+The menu keeps what you use every day at the top: **Home** (a short *Get started* checklist that
+ticks itself off), **Run an agent**, **Running**, **Workflows**, **Board**, **Results**,
+**Machines** and **Knowledge**. **More** opens the rest: Accounts, the harness's Agents, Skills
+and Prompts, the Graph map, the Marketplace, the Terminal and Tools. **Run an agent** asks for
+four things (what to do, the machine, the agent and the folder); profile, model, permissions and
+memory are under **More options**.
+
 | Page | What it shows |
 |---|---|
+| **Machines** | The computers agents run on: this one, and every machine that joined. **Add a machine** gives one command to paste on the other computer; the page then shows what joined (name, system, CPUs, agents installed). See [Adding machines](../../docs/guides/machines.md). |
 | **Agents, Skills, Prompts** | Everything a harness is made of, with model, tools and description. Open one to read, edit, download or delete it, and see what it uses and is used by; create a new one from a template or import `.md` files (they go where the harness's first simple pattern points, like `agents/*.md`). A save is refused if the file changed since you loaded it. |
 | **Graph map** | Pipeline stages run agents, agents spawn agents and invoke skills (a family reference such as `sh-kb-*` loads every member), and everything reads its prompts. |
 | **Knowledge** | The `indra mem` vaults the harness reads and writes: search, read, edit, link and delete notes, the graph, and its health (dangling links, orphans). Also the **learnings inbox**: what agents proposed they learned, to accept into memory or discard. See [Context, memory and learnings](../../docs/guides/context-and-learnings.md). |
-| **Runs** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. Start a pull request review from here; on a run, triage its findings, compare it with an earlier run, record it into memory, publish it or post it. See [Reviewing pull requests from the console](../../docs/guides/review-loop.md). |
+| **Results** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. Refreshes every 3 s. Start a pull request review from here; on a run, triage its findings, compare it with an earlier run, record it into memory, publish it or post it. See [Reviewing pull requests from the console](../../docs/guides/review-loop.md). |
 | **Marketplace** | Plugins, skills and agents from Claude Code plugin marketplaces (Anthropic's built in, add your own) and skill repositories: look inside, install for Claude Code, Codex or a harness, or as a Claude Code plugin; update and remove. See [Marketplace](../../docs/guides/marketplace.md). |
-| **Plan and delegate** | Under Launch: a planner profile writes a plan, you review and edit it, worker profiles (cheaper or local models) carry out each step, a reviewer checks the result; cost per role. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). |
-| **Launch, Processes** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
+| **Plan and delegate** | Under Run an agent: a planner profile writes a plan, you review and edit it, worker profiles (cheaper or local models) carry out each step, a reviewer checks the result; cost per role. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). |
+| **Run an agent, Running** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
 | **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. Items can be edited and removed, and the board exported to or imported from JSON. See [the board guide](../../docs/guides/board.md). |
 | **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |
 | **Settings** | Everything in `indra.toml`, edited in the browser: runners, nodes, workflows, presets, harnesses, the agents-at-once limit, and the file itself as text. Each section exports to and imports from JSON (same names are replaced after you confirm); the File tab downloads `indra.toml` or loads one to check and save. Secret values never leave. See [Settings](#settings). |
@@ -432,7 +440,7 @@ Everything the config file holds can be changed from the console, without a rest
 | **Nodes** | remote machines: SSH destination (or none, for a node that dials in), port, key, capacity, targets |
 | **Workflows** | workflows and their tasks: node, runner, profile, model and provider, component or sub-workflow, target, prompt, what each runs after, retries (the graph editor draws the same) |
 | **Components** | reusable tasks a workflow task can start from |
-| **Presets** | saved prompts for Launch (Launch also has **Save as preset**) |
+| **Presets** | saved prompts for Run an agent (it also has **Save as preset**) |
 | **Teams** | plan and delegate: the planner, worker and reviewer profiles |
 | **Marketplaces** | Claude Code plugin marketplaces and skill repositories to install from |
 | **Harnesses** | custom harnesses, or **Customize** a built-in profile |
@@ -778,8 +786,9 @@ the page, hangs it up and ends what it started, background jobs included
 
 ## Nodes and orchestration
 
-Agents can run on this machine and on any machine you can SSH into. A **node** is one such
-machine; `local` is always there.
+Agents can run on this machine and on other machines. A **node** is one such machine; `local` is
+always there. The easy way to add one is [joining](#machines-that-dial-in-no-ssh): one command
+on that machine, no SSH. Machines you already reach over SSH can be listed instead:
 
 ```toml
 [local]
@@ -802,28 +811,53 @@ build-box      ok    ci-7       (linux x86_64, 16 cpus, indra 0.1.0, max 2 agent
 gpu-box        DOWN  me@gpu-box  ssh: Could not resolve hostname gpu-box: Name or service not known
 ```
 
-In the console, **Nodes** shows each machine, its runners, its capacity and the review runs on
+In the console, **Machines** shows each machine, its runners, its capacity and the review runs on
 its disk (over SSH, or over the link for a machine that dials in). Click a remote run to copy its
 text files to the hub (`<data dir>/fetched/<node>/<run>`) and open it like a local one: findings,
 triage, comparison, memory, publish and post work on the copy, and changes stay in the copy.
-**Launch** can start an agent on any node. A remote agent streams into the same
+**Run an agent** can start an agent on any node. A remote agent streams into the same
 live view as a local one, with its subagents and tool calls, and Stop stops it on the remote.
 
 ### Machines that dial in (no SSH)
 
-A node can connect to the hub instead of being reached over SSH. On the Nodes page, **Add a
-machine** gives a one-time command; run it on that machine (with indra installed):
+A machine can join the hub instead of being reached over SSH. On the **Machines** page, click
+**Add a machine** and paste the command it shows on that machine. Nothing else to fill in:
 
 ```bash
-indra node connect https://hub.example:7878 --name build-box --code ABCDE-FGHJK --target /srv/api
-# later starts: indra node connect https://hub.example:7878 --name build-box --target /srv/api
+# Linux or macOS: installs indra if needed, then joins
+curl -fsSL https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh | INDRA_JOIN="http://192.168.1.20:7878 ABCDE-FGHJK" sh
 ```
+
+```powershell
+# Windows (PowerShell)
+$env:INDRA_JOIN="http://192.168.1.20:7878 ABCDE-FGHJK"; irm https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1 | iex
+```
+
+```bash
+# indra already installed
+indra join http://192.168.1.20:7878 ABCDE-FGHJK   # optional: --name build-box --target /srv/api
+```
+
+`indra join` names the machine after its host name (taking `name-2` if that is in use), reports
+its system, CPUs and installed agents, lets agents work in the folder it ran in, and keeps the
+link running in the background, started again at log-in or boot (a systemd user service on Linux,
+a launchd agent on macOS, a sign-in entry on Windows; `--foreground` stays in the terminal). The
+console shows the machine as soon as it joins. On the machine, `indra node status` says which hub
+it joined and how its link runs, `indra node folders` lists or changes the folders agents may use,
+and `indra node leave` undoes it all. **Remove** on its card in the console disconnects it and
+deletes its key. The step-by-step guide, with troubleshooting, is
+[Adding machines](../../docs/guides/machines.md).
+
+Joining works when the console listens on the network (`--bind 0.0.0.0:7878`) even though its
+settings are then locked against browser edits: a joining machine adds only its name to
+`indra.toml`, never a command. A console started with `--read-only` or `--lock-config` refuses
+joins.
 
 - **Outbound only.** The node opens a WebSocket to the hub (`/agent/connect`); it needs no open
   port and no SSH account. The hub needs to be reachable by the node: bind it with `--bind` (and
   `--allow-remote-config` if you also want to edit settings remotely), ideally behind a TLS
   reverse proxy so the node uses `https://`/`wss://`.
-- **Enrolment.** The code works once, for 15 minutes. The node then gets its own random key,
+- **Enrolment.** The code works once, for an hour, and only an admin can make one. The node then gets its own random key,
   stored in the hub's encrypted secret store (never given to agents) and in an owner-only
   `agent.json` in the node's config folder.
 - **Direct when possible.** The WebSocket carries signaling; hub and node then open a WebRTC data
@@ -839,7 +873,7 @@ indra node connect https://hub.example:7878 --name build-box --code ABCDE-FGHJK 
   ```
 
   When there is no direct path, traffic is relayed over the WebSocket. `[server] webrtc = false`,
-  or `indra node connect --no-webrtc`, keeps everything on the relay. The Nodes page shows which
+  or `indra join --no-webrtc`, keeps everything on the relay. The Machines page shows which
   path each node uses.
 - **Reconnects on its own.** Heartbeats every 5 s; a link silent for 15 s is dead. The node
   retries with exponential backoff and jitter (1 s up to 60 s). Jobs keep running through a drop:

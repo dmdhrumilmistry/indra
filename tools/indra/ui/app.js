@@ -362,7 +362,10 @@
 
   function pageOverview(m) {
     var ov = S.ov;
-    m.appendChild(header("Overview", "Harnesses indra found, what they contain, and what is running."));
+    m.appendChild(header("Home", "indra runs AI coding agents (Claude Code, Codex, Gemini) on your code, on this computer or others you add, and shows what they do and find."));
+    m.appendChild(getStarted(ov));
+    m.appendChild(h("h2", { text: "Setups" }));
+    m.appendChild(h("p", { class: "muted small", text: "A setup (harness) is a set of agents, skills and prompts for one kind of work. Pick one; the menu on the left shows its parts." }));
     var grid = h("div", { class: "grid" });
     ov.harnesses.forEach(function (x) {
       var c = x.counts;
@@ -385,13 +388,35 @@
       m.appendChild(h("h2", { text: "Pipeline: " + hs.name }));
       m.appendChild(stagePipe(hs.stages));
     }
-    m.appendChild(h("h2", { text: "Runners" }));
+    m.appendChild(h("h2", { text: "Agents installed here" }));
     m.appendChild(h("div", { class: "chips" }, ov.runners.map(function (r) {
       return h("span", { class: "pill " + (r.available ? "ok" : ""), title: r.program || (r.command + " is not on PATH"), text: r.name + (r.available ? "" : " (not installed)") });
     })));
     var running = ov.procs.filter(function (p) { return p.status === "running"; });
     m.appendChild(h("h2", { text: "Running agents" }));
-    m.appendChild(running.length ? procTable(running) : empty("Nothing running. Start one from Launch."));
+    m.appendChild(running.length ? procTable(running) : empty("Nothing running. Start one with Run an agent."));
+  }
+
+  // A short checklist for new users; it ticks itself off and can be hidden.
+  function getStarted(ov) {
+    if (store("indra.started") === "hidden") return h("div");
+    var avail = ov.runners.filter(function (r) { return r.available; });
+    var steps = [
+      { done: avail.length > 0, title: "Have an agent installed", text: avail.length ? "Found: " + avail.map(function (r) { return r.name; }).join(", ") + "." : "Install Claude Code (or Codex, Gemini) on this computer, then reload this page.", href: null },
+      { done: ov.procs.length > 0, title: "Run your first agent", text: "Pick a folder, type what it should do, press Run. You watch it work and answer its questions.", href: "#/launch", go: "Run an agent" },
+      { done: ov.nodes.length > 1, title: "Add another machine (optional)", text: "One command on that machine, no SSH: agents can then run there too.", href: "#/nodes", go: "Add a machine" },
+      { done: store("indra.seen.workflows") === "1", title: "Try a workflow (optional)", text: "Steps in order, like review then fix then test. Start from a built-in one or describe it and let Claude build it.", href: "#/workflows", go: "See workflows" }
+    ];
+    var left = steps.filter(function (x) { return !x.done; }).length;
+    var box = h("div", { class: "card" },
+      h("div", { class: "row" }, h("h3", { text: left ? "Get started" : "You are all set" }),
+        h("button", { type: "button", class: "ghost", onclick: function () { store("indra.started", "hidden"); box.remove(); } }, "Hide")),
+      h("ol", { class: "steps" }, steps.map(function (x, i) {
+        return h("li", { class: x.done ? "done" : "" }, h("i", { text: x.done ? "ok" : String(i + 1) }),
+          h("div", null, h("b", { text: x.title }), h("div", { class: "muted small", text: x.text }),
+            !x.done && x.href ? h("a", { href: x.href, text: x.go + " ->" }) : null));
+      })));
+    return box;
   }
 
   function pageDefs(m, kind) {
@@ -901,7 +926,7 @@
 
   function pageRuns(m) {
     var hs = harness();
-    m.appendChild(header("Runs", hs && hs.has_runs ? "Run directories under " + hs.targets.join(", ") + ". Refreshes every 3 seconds." : "This harness does not define a runs directory."));
+    m.appendChild(header("Results", hs && hs.has_runs ? "Run directories under " + hs.targets.join(", ") + ". Refreshes every 3 seconds." : "This harness does not define a runs directory."));
     var rwc = runWorkflowCard(); if (rwc) m.appendChild(rwc);
     var holder = h("div", { class: "tablewrap" });
     m.appendChild(holder);
@@ -1248,21 +1273,21 @@
 
   function pageLaunch(m) {
     var ov = S.ov, hs = harness();
-    m.appendChild(header("Launch an agent", "Runs a runner on any node, in one of its target directories, and streams what it does."));
+    m.appendChild(header("Run an agent", "Choose where it works and what it should do; you watch it live and can answer or steer it."));
     m.appendChild(launchTabs("one"));
     if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
-    if (!hs) { m.appendChild(empty("No harness configured.")); return; }
-    var holder = h("div", { class: "muted", text: "Checking nodes..." });
+    if (!hs) { m.appendChild(empty("No project yet: start indra in your project's folder (cd my-project, then indra serve), or pass --target <folder>.")); return; }
+    var holder = h("div", { class: "muted", text: "Checking machines..." });
     m.appendChild(holder);
     loadNodes(false).then(function (nodes) {
       holder.remove();
-      var node = h("select", { "aria-label": "Node" }, nodes.map(function (n) {
-        return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : "  (" + n.ssh + (n.error ? ", unreachable" : "") + ")") });
+      var node = h("select", { "aria-label": "Machine" }, nodes.map(function (n) {
+        return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : n.info ? "" : "  (offline)") });
       }));
       var runner = h("select", { "aria-label": "Runner" });
       var target = h("select", { "aria-label": "Target" });
       var presets = ov.presets.filter(function (p) { return !p.harness || p.harness === hs.name; });
-      var preset = h("select", { "aria-label": "Preset" }, h("option", { value: "", text: "Write your own" }), presets.map(function (p, i) { return h("option", { value: String(i), text: p.name }); }));
+      var preset = h("select", { "aria-label": "Start from" }, h("option", { value: "", text: "Write your own" }), presets.map(function (p, i) { return h("option", { value: String(i), text: p.name }); }));
       var prompt = h("textarea", { placeholder: "What should the agent do?", "aria-label": "Prompt" });
       var profiles = ov.profiles || [];
       var profile = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "None (runner defaults)" }),
@@ -1291,7 +1316,7 @@
       profile.addEventListener("change", fillProfile);
       [model, mode, effort, where, subModel].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
       var preview = h("div", { class: "cmd" });
-      var go = h("button", { class: "primary", type: "submit" }, "Launch");
+      var go = h("button", { class: "primary", type: "submit" }, "Run");
       function cur() { return nodes.find(function (n) { return n.name === node.value; }) || nodes[0]; }
       function fillNode() {
         var n = cur(), names = runnersOn(n, ov), keep = runner.value;
@@ -1319,9 +1344,9 @@
           if (on === "ollama") preview.textContent += "\n(on Ollama at " + (pr.ollama_url || "http://localhost:11434") + ": every model it asks for, subagents included, is " + (model.value || pr.model || "the model you pick") + ")";
           if (on === "subagents") preview.textContent += "\n(the main agent stays on Anthropic; requests for " + (subModel.value || pr.subagent_model || "the subagent model") + " go to Ollama through indra's model router)";
         } else {
-          preview.textContent = "ssh " + n.ssh + " -- indra node exec   (job: " + JSON.stringify({ runner: runner.value, target: t, prompt: p }) + ")";
+          preview.textContent = (n.ssh && n.transport === "ssh" ? "ssh " + n.ssh + " -- " : "(over its link) ") + "indra node exec   (job: " + JSON.stringify({ runner: runner.value, target: t, prompt: p }) + ")";
         }
-        var why = !runner.value ? (n.error ? "This node is unreachable: " + n.error : "No runner is installed on this node.") : !n.targets.length ? "This node has no targets configured." : "";
+        var why = !runner.value ? (n.info ? "No agent (Claude Code, Codex, Gemini) is installed on this machine." : "This machine is offline" + (n.error ? ": " + n.error : ".")) : !n.targets.length ? "This machine has no folder for agents yet." + (n.kind === "local" ? " Start indra in your project folder, or pass --target." : " On it, run `indra node connect --target <folder>`.") : "";
         note.textContent = why; note.hidden = !why;
         subLabel.hidden = where.value !== "subagents";
         go.disabled = !prompt.value.trim() || !runner.value || !n.targets.length;
@@ -1367,26 +1392,26 @@
           .then(function (r) { location.hash = "#/proc/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
-        h("label", null, "Preset", preset),
-        h("label", null, "Prompt", h("small", { text: "{target} becomes the target path, {node} the node name." }), prompt),
-        h("div", { class: "fields" }, h("label", null, "Node", node), h("label", null, "Runner", runner), h("label", { class: "wide" }, "Target", target)),
-        h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
-        h("div", { class: "fields" }, h("label", null, "Runs on", where), subLabel),
-        pfNote,
-        modelList(),
-        h("div", { class: "card knowctl" },
-          h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
-          h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: function () {
-            var p = prompt.value.trim(); if (!p) { memNote.textContent = "Write the prompt first."; return; }
-            memNote.textContent = "Recalling...";
-            api("/api/knowledge/recall" + hq({ q: p })).then(function (r) {
-              memNote.textContent = r.notes.length ? "It would get: " + r.notes.map(function (n) { return n.title; }).join("; ") : "Nothing relevant in memory for this prompt.";
-            }).catch(function (e) { memNote.textContent = e.message; });
-          } }, "Preview what it would get"), memNote),
-          h("label", { class: "check" }, reflect, h("span", null, h("b", { text: "Ask for learnings at the end" }), h("small", { text: " - before it finishes, a Claude Code agent proposes what it learned; review them under Knowledge > Learnings" })))),
+        h("label", null, "What should it do?", h("small", { text: "Plain words are fine. {target} becomes the folder, {node} the machine." }), prompt),
+        h("div", { class: "fields" }, h("label", null, "Start from", preset), h("label", null, "Machine", node), h("label", null, "Agent", runner), h("label", { class: "wide" }, "Folder", target)),
         note,
-        h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On a remote node the job travels as JSON over SSH." }), preview),
-        h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. A remote node runs only runners from its own configuration." }),
+        h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, memory" }),
+          h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+          h("div", { class: "fields" }, h("label", null, "Runs on", where), subLabel),
+          pfNote,
+          modelList(),
+          h("div", { class: "knowctl" },
+            h("label", { class: "check" }, memory, h("span", null, h("b", { text: "Give it relevant memory" }), h("small", { text: " - the notes from this harness's vaults that best match the prompt are added after it" }))),
+            h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: function () {
+              var p = prompt.value.trim(); if (!p) { memNote.textContent = "Write the prompt first."; return; }
+              memNote.textContent = "Recalling...";
+              api("/api/knowledge/recall" + hq({ q: p })).then(function (r) {
+                memNote.textContent = r.notes.length ? "It would get: " + r.notes.map(function (n) { return n.title; }).join("; ") : "Nothing relevant in memory for this prompt.";
+              }).catch(function (e) { memNote.textContent = e.message; });
+            } }, "Preview what it would get"), memNote),
+            h("label", { class: "check" }, reflect, h("span", null, h("b", { text: "Ask for learnings at the end" }), h("small", { text: " - before it finishes, a Claude Code agent proposes what it learned; review them under Knowledge > Learnings" })))),
+          h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On another machine the job travels as JSON over its link." }), preview),
+          h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. Another machine runs only agents from its own configuration." })),
         h("div", { class: "row" }, go, canEdit() ? h("button", { type: "button", onclick: function () {
           var name = window.prompt("Save this prompt as a preset named:");
           if (!name || !name.trim()) return;
@@ -1395,7 +1420,7 @@
           if (profile.value) p.profile = profile.value;
           addToSection("preset", p).then(function () { toast("Saved preset " + p.name); })
             .catch(function (err) { toast(err.message, true); });
-        } }, "Save as preset") : null, h("a", { href: "#/workflows", text: "Or fan out to many targets at once" })));
+        } }, "Save as preset") : null, h("a", { href: "#/workflows", text: "Or run on many folders at once" })));
       m.appendChild(form);
       fillNode();
     }).catch(function (e) { holder.textContent = e.message; });
@@ -1406,39 +1431,109 @@
     var fill = h("div", { class: "fill" }); fill.style.width = Math.min(100, 100 * used / Math.max(1, max)) + "%";
     return h("div", { class: "bar" }, h("span", { text: "agents" }), h("div", { class: "track" }, fill), h("b", { text: used + "/" + max }));
   }
+  var INSTALL_SH = "https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh";
+  var INSTALL_PS = "https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1";
+  // A command in a box, with a Copy button.
+  function cmdBox(text) {
+    var pre = h("pre", { class: "view", text: text });
+    return h("div", { class: "cmdbox" }, pre, h("button", { type: "button", onclick: function () {
+      var t = pre.textContent;
+      (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () { toast("Copied"); })
+        .catch(function () { var r = document.createRange(); r.selectNodeContents(pre); var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast("Selected: press Ctrl+C"); });
+    } }, "Copy"));
+  }
+  function canJoin() { return !!(S.ov && S.ov.settings && S.ov.settings.join); }
+
   function pageNodes(m) {
     var refresh = h("button", { type: "button" }, "Check again");
-    m.appendChild(header("Nodes", "The machines agents run on. A machine dials in to this hub (Add a machine: no open port, no SSH, a direct WebRTC channel when possible), or is reached over SSH; either way it runs only its own configured runners.",
-      [canEdit() ? h("button", { type: "button", class: "primary", onclick: function () { addMachine(); } }, "Add a machine") : null,
-        canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Edit nodes" }) : null, refresh]));
+    m.appendChild(header("Machines", "Computers your agents run on. Add one with a single command: no SSH, no open ports, and it reconnects by itself.",
+      [canJoin() ? h("button", { type: "button", class: "primary", onclick: function () { addMachine(); } }, "Add a machine") : null,
+        canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Advanced (SSH)" }) : null, refresh]));
     var addBox = h("div"); m.appendChild(addBox);
-    // A machine dials in: no open port, no SSH. One-time code, then its own key.
+    if (!canJoin() && S.ov.is_admin && S.ov.settings && S.ov.settings.join_locked)
+      m.appendChild(h("div", { class: "note warn", text: "Machines cannot be added here: " + S.ov.settings.join_locked + "." }));
+    var stopPoll = null;
+    S.cleanup.push(function () { if (stopPoll) stopPoll(); });
+    // One click: a code, the command to run there, and then what joined.
     function addMachine() {
-      var name = h("input", { type: "text", required: true, placeholder: "build-box", "aria-label": "Name" });
-      var targets = h("textarea", { class: "list", rows: "2", placeholder: "optional: codebases on it, one per line (it can also report its own with --target)" });
-      var out = h("div");
+      if (stopPoll) stopPoll();
       addBox.textContent = "";
-      addBox.appendChild(h("form", { class: "form card", onsubmit: function (e) {
-        e.preventDefault();
-        var t = targets.value.split("\n").map(function (x) { return x.trim(); }).filter(Boolean);
-        api("/api/nodes/enrol", { method: "POST", body: { name: name.value.trim(), targets: t } }).then(function (r) {
-          out.textContent = "";
-          out.appendChild(h("p", null, h("b", { text: "1. " }), "Install indra on that machine (skip if it has it):"));
-          out.appendChild(h("pre", { class: "view", text: "# Linux or macOS\ncurl -fsSL https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.sh | sh\n\n# Windows (PowerShell)\nirm https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1 | iex" }));
-          out.appendChild(h("p", null, h("b", { text: "2. " }), "Connect it to this console (the code works once, for 15 minutes):"));
-          out.appendChild(h("pre", { class: "view", text: r.command }));
-          out.appendChild(h("p", { class: "muted small", text: "It dials out to this hub (no open port, no SSH), keeps the link up and reconnects on its own, and moves to a direct WebRTC channel when it can. Its key is saved on it; later starts need only `indra node connect <hub> --name " + name.value.trim() + "`. Behind a different address or a proxy, use the URL people use to reach this console." }));
-          load(true);
-        }).catch(function (err) { toast(err.message, true); });
-      } }, h("h2", { text: "Add a machine" }), h("label", null, "Name", name), h("label", null, "Targets", targets),
-        h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Get a connect command"), h("button", { type: "button", onclick: function () { addBox.textContent = ""; } }, "Close")), out));
-      name.focus();
+      var card = h("div", { class: "card form" }, h("h2", { text: "Add a machine" }), h("p", { class: "muted", text: "Getting a code..." }));
+      addBox.appendChild(card);
+      api("/api/nodes/enrol", { method: "POST", body: {} }).then(function (r) {
+        card.textContent = "";
+        card.appendChild(h("div", { class: "row" }, h("h2", { text: "Add a machine" }),
+          h("button", { type: "button", class: "ghost", "aria-label": "Close", onclick: function () { if (stopPoll) stopPoll(); addBox.textContent = ""; } }, "x")));
+        if (!r.reachable) card.appendChild(h("div", { class: "note warn" }, h("b", { text: "Other machines cannot reach this console yet. " }),
+          "It listens on this computer only. Restart it with ", h("code", { text: "indra serve --bind 0.0.0.0:7878" }), " and open it by this computer's network address, then add the machine."));
+        card.appendChild(h("p", null, "Run this on the machine you want to add. It installs indra if needed, joins with code ",
+          h("b", { text: r.code }), " (works once, for an hour), and keeps running in the background. Its name, system and agents are detected for you."));
+        var name = h("input", { type: "text", placeholder: "its computer name", "aria-label": "Name" });
+        var folder = h("input", { type: "text", placeholder: "the folder the command runs in", "aria-label": "Folder" });
+        var tab = store("indra.jointab") || (/Win/.test(navigator.platform) ? "win" : "unix");
+        var tabs = h("div", { class: "tabs", role: "tablist" }), boxHolder = h("div");
+        var kinds = [["unix", "Linux or macOS"], ["win", "Windows (PowerShell)"], ["have", "indra already installed"]];
+        function q(v) { return '"' + v.replace(/"/g, "") + '"'; }
+        function commands() {
+          var n = name.value.trim(), f = folder.value.trim(), join = r.hub + " " + r.code;
+          var env = 'INDRA_JOIN="' + join + '"' + (n ? " INDRA_JOIN_NAME=" + q(n) : "") + (f ? " INDRA_JOIN_TARGET=" + q(f) : "");
+          var penv = '$env:INDRA_JOIN="' + join + '"; ' + (n ? "$env:INDRA_JOIN_NAME=" + q(n) + "; " : "") + (f ? "$env:INDRA_JOIN_TARGET=" + q(f) + "; " : "");
+          return {
+            unix: "curl -fsSL " + INSTALL_SH + " | " + env + " sh",
+            win: penv + "irm " + INSTALL_PS + " | iex",
+            have: "indra join " + join + (n ? " --name " + q(n) : "") + (f ? " --target " + q(f) : "")
+          };
+        }
+        function draw() {
+          tabs.textContent = ""; boxHolder.textContent = "";
+          kinds.forEach(function (k) {
+            tabs.appendChild(h("button", { type: "button", role: "tab", class: k[0] === tab ? "on" : "", "aria-selected": String(k[0] === tab),
+              onclick: function () { tab = k[0]; store("indra.jointab", tab); draw(); } }, k[1]));
+          });
+          boxHolder.appendChild(cmdBox(commands()[tab]));
+          if (tab === "have") boxHolder.appendChild(h("p", { class: "muted small", text: "Needs indra 0.8.0 or newer there (`indra update`)." }));
+        }
+        name.addEventListener("input", draw); folder.addEventListener("input", draw);
+        draw();
+        card.appendChild(tabs); card.appendChild(boxHolder);
+        card.appendChild(h("details", null, h("summary", { text: "Options: name and folder" }),
+          h("label", null, "Name", h("small", { text: "How it is listed here. Default: the machine's own name." }), name),
+          h("label", null, "Folder for agents", h("small", { text: "Where agents may work on that machine, e.g. D:\\work or ~/code. Default: the folder the command runs in." }), folder)));
+        var status = h("div", { class: "note", role: "status" }, "Waiting for the machine to join...");
+        card.appendChild(status);
+        var timer = setInterval(poll, 2000), shown = false;
+        stopPoll = function () { clearInterval(timer); stopPoll = null; };
+        function poll() {
+          api("/api/nodes/enrol/" + encodeURIComponent(r.code)).then(function (st) {
+            if (!st.joined) return;
+            if (!st.info && !shown) { status.textContent = st.joined + " joined; connecting..."; return; }
+            if (!st.info) return;
+            shown = true; stopPoll();
+            var i = st.info;
+            status.className = "card joined";
+            status.textContent = "";
+            status.appendChild(h("h3", { text: st.joined + " joined" }));
+            status.appendChild(h("div", { class: "stats" }, [["computer", i.hostname], ["system", i.os + " " + i.arch], ["cpus", String(i.cpus)], ["indra", i.version]].map(function (x) {
+              return h("div", { class: "stat" }, h("b", { class: "small", text: x[1] }), h("span", { text: x[0] }));
+            })));
+            status.appendChild(h("p", null, "Agents there: ", (i.runners || []).map(function (x) { return h("span", { class: "pill " + (x.available ? "ok" : ""), text: x.name + (x.available ? "" : " (not installed)") }); })));
+            if ((st.targets || []).length) status.appendChild(h("p", { class: "muted small", text: "Agents work in: " + st.targets.join(", ") }));
+            status.appendChild(h("div", { class: "row" }, h("a", { class: "btn primary", href: "#/launch", text: "Run an agent there" }),
+              h("button", { type: "button", onclick: function () { addMachine(); } }, "Add another")));
+            load(true);
+          }).catch(function (e) { if (e.status === 404) { stopPoll(); status.className = "note bad"; status.textContent = "The code expired. Click Add a machine for a new one."; } });
+        }
+      }).catch(function (err) {
+        card.textContent = "";
+        card.appendChild(h("h2", { text: "Add a machine" }));
+        card.appendChild(h("div", { class: "note bad", role: "alert", text: "Could not make a code: " + err.message }));
+      });
     }
     var grid = h("div", { class: "grid" }), runsBox = h("div");
     m.appendChild(grid); m.appendChild(runsBox);
     function showRuns(n) {
       runsBox.textContent = "";
-      runsBox.appendChild(h("h2", { text: "Runs on " + n.name }));
+      runsBox.appendChild(h("h2", { text: "Results on " + n.name }));
       var box = h("div", { class: "muted", text: "Loading..." }); runsBox.appendChild(box);
       api("/api/nodes/runs" + hq({ node: n.name })).then(function (runs) {
         box.textContent = ""; box.className = "tablewrap";
@@ -1460,32 +1555,39 @@
           }))));
       }).catch(function (e) { box.textContent = e.message; });
     }
+    function remove(n) {
+      if (!confirm("Remove " + n.name + "? It disconnects now; to add it again, run a new join command on it.")) return;
+      api("/api/nodes/" + encodeURIComponent(n.name), { method: "DELETE" }).then(function () { toast("Removed " + n.name); load(true); })
+        .catch(function (e) { toast(e.message, true); });
+    }
     function render(nodes) {
       grid.textContent = "";
       nodes.forEach(function (n) {
         var i = n.info, ok = !!i;
+        var state = n.kind === "local" ? "this machine" : n.transport === "webrtc" ? "connected (direct)" : n.transport === "relay" ? "connected (relayed)" : n.transport === "none" ? "offline" : "over SSH";
         var card = h("div", { class: "card" },
           h("div", { class: "row" }, h("h4", { text: n.name }), h("span", { class: "pill" + (n.transport === "webrtc" ? " ok" : ""),
             title: { webrtc: "Dialled in; a direct, encrypted WebRTC data channel", relay: "Dialled in; traffic relayed over its link to this hub", ssh: "Reached over SSH", none: "Not connected" }[n.transport] || "",
-            text: n.kind === "local" ? "this machine" : n.transport === "webrtc" ? "link: direct (WebRTC)" : n.transport === "relay" ? "link: relayed" : n.transport === "none" ? "offline" : "ssh" }),
-            h("span", { class: "pill " + (ok ? "ok" : "bad"), text: ok ? "online" : "unreachable" })),
-          h("p", { class: "muted", text: n.kind === "local" ? (n.description || "") : n.ssh + (n.description ? "  -  " + n.description : "") }),
+            text: state }),
+            n.transport === "none" ? null : h("span", { class: "pill " + (ok ? "ok" : "bad"), text: ok ? "online" : "unreachable" })),
+          n.kind === "local" ? h("p", { class: "muted", text: n.description || "" }) : (n.ssh || (n.description && n.description !== "joined with a code")) ? h("p", { class: "muted", text: [n.ssh, n.description === "joined with a code" ? "" : n.description].filter(Boolean).join("  -  ") }) : null,
           ok ? h("div", { class: "stats" },
-            [["host", i.hostname], ["os", i.os + " " + i.arch], ["cpus", String(i.cpus)], ["indra", i.version]].map(function (x) {
+            [["computer", i.hostname], ["system", i.os + " " + i.arch], ["cpus", String(i.cpus)], ["indra", i.version]].map(function (x) {
               return h("div", { class: "stat" }, h("b", { class: "small", text: x[1] }), h("span", { text: x[0] }));
-            })) : h("div", { class: "note bad", text: n.error || "not checked yet" }),
+            })) : h("div", { class: "note bad", text: n.ssh ? (n.error || "not checked yet") : "Not connected. On that machine: `indra node status` says why, `indra node connect` reconnects." }),
           meter(n.running, n.max_parallel),
-          ok ? [h("h3", { text: "Runners" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (missing)") }); }))] : null,
-          h("h3", { text: "Targets" }),
-          n.targets.length ? h("div", { class: "files" }, n.targets.map(function (t) { return h("div", { class: "cmd", text: t }); })) : h("p", { class: "muted", text: "none configured" }),
-          h("div", { class: "row" }, h("button", { type: "button", onclick: function () { showRuns(n); } }, "Show runs"),
-            h("a", { href: "#/launch", text: "Launch here" })));
+          ok ? [h("h3", { text: "Agents installed" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (not installed)") }); }))] : null,
+          h("h3", { text: "Folders agents work in" }),
+          n.targets.length ? h("div", { class: "files" }, n.targets.map(function (t) { return h("div", { class: "cmd", text: t }); })) : h("p", { class: "muted", text: "none yet" }),
+          h("div", { class: "row" }, h("a", { class: "btn", href: "#/launch", text: "Run an agent here" }),
+            h("button", { type: "button", onclick: function () { showRuns(n); } }, "Results here"),
+            n.kind !== "local" && canJoin() && (!n.ssh || canEdit()) ? h("button", { type: "button", class: "ghost", onclick: function () { remove(n); } }, "Remove") : null));
         grid.appendChild(card);
       });
-      if (nodes.length === 1) grid.appendChild(h("div", { class: "card" }, h("h4", { text: "Add a remote machine" }),
-        h("p", { class: "muted", text: "Install indra on it and make sure `ssh <host>` works without a password prompt, then add it here." }),
-        canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Add a node" })
-          : h("pre", { class: "view", text: '[[node]]\nname = "build-box"\nssh = "me@build-box"\nmax_parallel = 2\ntargets = ["/srv/api"]' })));
+      if (nodes.length === 1) grid.appendChild(h("div", { class: "card" }, h("h4", { text: "Add another machine" }),
+        h("p", { class: "muted", text: "Run agents on a laptop, a build box or a server. Click Add a machine, copy one command, run it there: done." }),
+        canJoin() ? h("button", { type: "button", class: "primary", onclick: function () { addMachine(); } }, "Add a machine")
+          : h("p", { class: "muted small", text: "Ask an admin of this console to add it." })));
     }
     function load(force) { grid.textContent = ""; grid.appendChild(h("div", { class: "muted", text: "Checking nodes..." })); loadNodes(force).then(render).catch(function (e) { grid.textContent = e.message; }); }
     refresh.addEventListener("click", function () { load(true); });
@@ -1498,6 +1600,7 @@
 
   function pageWorkflows(m) {
     var ov = S.ov, hs = harness();
+    store("indra.seen.workflows", "1");
     var genBox = h("div");
     m.appendChild(header("Workflows", "Multi-step work across nodes: agents, skills and shell commands in dependency order, with conditions, loops and retries. Run them here or with `indra run <name>`.",
       [canEdit() && !ov.read_only ? h("button", { type: "button", onclick: function () { showGen(); } }, "Create with Claude") : null,
@@ -2018,7 +2121,7 @@
   }
 
   function pageProcs(m) {
-    m.appendChild(header("Processes", "Agents started from this console since it started. Logs stay on disk under " + S.ov.data_dir + "."));
+    m.appendChild(header("Running", "Agents started from this console: live ones first. Open one to watch it, answer its questions or steer it. Logs stay under " + S.ov.data_dir + "."));
     var plans = h("div"); m.appendChild(plans);
     var holder = h("div"); m.appendChild(holder);
     function load() {
@@ -3658,6 +3761,9 @@
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
+    // The page is under More: show it open.
+    var more = $("nav-more"), inMore = more && more.querySelector('a[data-route="' + navKey + '"]');
+    if (inMore) more.open = true;
     var m = $("main"); m.textContent = ""; m.scrollTop = 0;
     // A newer navigation wins: a slower, earlier one must not render too.
     var gen = S.gen = (S.gen || 0) + 1;
