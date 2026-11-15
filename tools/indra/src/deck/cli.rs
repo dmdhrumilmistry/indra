@@ -794,6 +794,17 @@ pub struct NodeArgs {
     config: Option<PathBuf>,
 }
 
+/// `indra mcp`: the MCP server for designing workflows (stdio).
+#[derive(Args)]
+pub struct McpArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+}
+
+pub fn run_mcp(a: McpArgs) -> Result<ExitCode, String> {
+    crate::deck::mcp::serve(load_options(a.opts, None, false)?)
+}
+
 pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
     let opts = DeckOpts {
         config: a.config,

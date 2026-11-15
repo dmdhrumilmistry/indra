@@ -85,6 +85,8 @@ enum Cmd {
     Update(update::UpdateArgs),
     /// Tab completion for your shell: print the script, or --install it
     Completions(completions::CompletionsArgs),
+    /// MCP server for AI agents to design workflows (`claude mcp add indra -- indra mcp`)
+    Mcp(deck::cli::McpArgs),
     /// Console users and roles: add, list, passwd, role, rm
     User(deck::users::UserArgs),
     /// Maintainer tools: build the website
@@ -116,7 +118,7 @@ fn main() -> ExitCode {
     // (its output is read by the hub).
     if !matches!(
         cli.cmd,
-        Cmd::Update(_) | Cmd::Completions(_) | Cmd::Node(_) | Cmd::Dev { .. }
+        Cmd::Update(_) | Cmd::Completions(_) | Cmd::Node(_) | Cmd::Mcp(_) | Cmd::Dev { .. }
     ) {
         update::on_start();
     }
@@ -135,6 +137,7 @@ fn main() -> ExitCode {
         Cmd::Claude(a) => deck::claude::run(a),
         Cmd::Update(a) => update::run(a),
         Cmd::Completions(a) => completions::run(a),
+        Cmd::Mcp(a) => deck::cli::run_mcp(a),
         Cmd::User(a) => deck::users::run(a),
         Cmd::Publish(a) => publish::run(a),
         Cmd::Review(a) => review::run(a),

@@ -950,6 +950,106 @@ node      = "build-box"
 target    = "/srv/api"
 ```
 
+**Shell steps.** A step with `run` runs a command instead of an agent: bash (else sh;
+PowerShell on Windows), in its target, on any node. It succeeds with exit code 0, and its output
+is what later steps and conditions see. No value is ever pasted into a command: inputs, the loop
+item and earlier results arrive as environment variables, so an input cannot change what runs.
+
+```toml
+[[workflow.task]]
+id  = "test"
+run = "cargo test 2>&1"
+```
+
+| Variable | What it holds |
+|---|---|
+| `INDRA_INPUT_<NAME>` | an input's value (name in upper case) |
+| `INDRA_ITEM` | the item of a `foreach` copy |
+| `INDRA_OUTPUT_<STEP>`, `INDRA_EXIT_<STEP>`, `INDRA_STATUS_<STEP>` | a finished step's output (last 8000 characters), exit code and state (`-` becomes `_`) |
+| `INDRA_TARGET`, `INDRA_NODE`, `INDRA_WORKFLOW`, `INDRA_STEP` | where and what is running |
+
+A command cannot contain `{input.}`, `{item}` or `{steps.}`; agent prompts can (`{steps.test.output}`
+writes an earlier step's result into the prompt). A node refuses shell steps with
+`[local] shell_steps = false` in its own `indra.toml`.
+
+**Conditions and failure handling.**
+
+```toml
+[[workflow.task]]
+id            = "test"
+run           = "cargo test 2>&1"
+allow_failure = true                     # a failure here does not fail the workflow
+
+[[workflow.task]]
+id      = "fix"
+needs   = ["test"]
+when    = "test.failed and input.autofix == 'true'"
+profile = "worker"
+prompt  = "The tests fail:\n{steps.test.output}\nFix the code."
+
+[[workflow.task]]
+id    = "tell"
+needs = ["fix"]
+on    = "failure"                        # only if something it needs failed
+run   = "echo \"fix failed: $INDRA_OUTPUT_FIX\" | mail -s ci team@example.com"
+
+[[workflow.task]]
+id    = "clean"
+needs = ["test", "fix"]
+on    = "always"                         # once they finish, however they went
+run   = "rm -rf target/tmp"
+```
+
+- `when` is a condition on earlier steps and inputs: `<step>.succeeded`, `.failed`, `.skipped`,
+  `.status`, `.output`, `.exit_code`, and `input.<name>`, with `==`, `!=`, `contains`, `<`, `<=`,
+  `>`, `>=`, `and`, `or`, `not` and parentheses. False: the step is skipped. A step it reads must
+  run before it (in its `needs`, directly or through others), so its result is known.
+- `on`: `success` (the default: every step it needs succeeded, or failed with `allow_failure`),
+  `failure` (one of them failed) or `always`.
+- Skipped steps, a branch not taken, do not fail the workflow; a failure fails it unless that
+  step has `allow_failure`.
+
+**Loops.**
+
+```toml
+[[workflow.task]]
+id      = "lint"
+foreach = ["api", "web", "worker"]       # or "{input.services}": commas or new lines
+run     = "make -C services/$INDRA_ITEM lint"
+
+[[workflow.task]]
+id       = "make-green"
+prompt   = "Run the tests and fix what fails."
+until    = "self.output contains 'all tests pass'"
+max_runs = 3                             # default 3, at most 20
+```
+
+- `foreach` makes one copy of the step per item (`lint-1`, `lint-2`, ...), run in parallel within
+  the node's capacity; `{item}` in a prompt or target, `$INDRA_ITEM` in a command. Whatever needs
+  the step waits for every copy. At most 50 items; none, and the step drops out.
+- `until` runs the step again after each success until the condition holds (`self.output`,
+  `self.exit_code`, or other steps), at most `max_runs` times, then fails. A failed run uses
+  `retries` as before.
+- The run page shows each step's condition, loop item, run count, exit code and output.
+
+**Create a workflow from a description.** **Workflows > Create with Claude**: describe what it
+should do and where to save it, and Claude Code builds it with indra's MCP server. It reads the
+format and this machine's profiles, nodes, repositories and skills, looks at the repository if it
+needs to (build and test commands), validates the workflow until it is right, and saves it; the
+page then offers it in the editor. Claude Code runs with only the indra tools and read-only file
+tools allowed; anything else it asks for waits for your answer on its process page.
+
+**`indra mcp`** is that MCP server, for any MCP client. In your own Claude Code:
+
+```bash
+claude mcp add indra -- indra mcp        # then: "make me a workflow that ..."
+```
+
+Its tools: `workflow_guide` (the format and what this machine has), `list_workflows`,
+`get_workflow`, `validate_workflow` (checked exactly as `indra serve` loads it) and
+`save_workflow` (to `indra.toml`, keeping its comments, or to a repository's
+`.indra/workflows/`). It never runs a workflow or a command.
+
 **Workflows as code.** A workflow can live in the repository it works on, as
 `.indra/workflows/<name>.toml`, to be reviewed, committed and shared like any other code. Every
 console and `indra run` with that repository as a harness root or target picks it up, and a

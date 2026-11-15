@@ -1498,8 +1498,32 @@
 
   function pageWorkflows(m) {
     var ov = S.ov, hs = harness();
-    m.appendChild(header("Workflows", "Multi-step agent work across nodes: tasks run in dependency order, within each node's capacity, with retries. Run them here or with `indra run <name>`.",
-      [canEdit() ? h("a", { class: "btn", href: "#/wfedit/", text: "New workflow" }) : null]));
+    var genBox = h("div");
+    m.appendChild(header("Workflows", "Multi-step work across nodes: agents, skills and shell commands in dependency order, with conditions, loops and retries. Run them here or with `indra run <name>`.",
+      [canEdit() && !ov.read_only ? h("button", { type: "button", onclick: function () { showGen(); } }, "Create with Claude") : null,
+       canEdit() ? h("a", { class: "btn", href: "#/wfedit/", text: "New workflow" }) : null]));
+    m.appendChild(genBox);
+    var waitingFor = null; // names before a generated workflow, to spot the new one
+    function showGen() {
+      genBox.textContent = "";
+      var desc = h("textarea", { "aria-label": "Describe the workflow", placeholder: "e.g. Every night: pull, run the tests; if they fail, have an agent fix them and run them again (at most 3 times); then review the diff and post a summary." });
+      var where = h("select", { "aria-label": "Save in" }, h("option", { value: "config", text: "My indra.toml (only on this machine)" }));
+      var go = h("button", { class: "primary", type: "submit" }, "Create");
+      var note = h("p", { class: "muted small", text: "Claude Code builds it with indra's MCP server: it reads the format and this machine's profiles, nodes and skills, validates the workflow until it is right, and saves it. You can then edit it in the graph editor." });
+      genBox.appendChild(h("form", { class: "card form genbox", onsubmit: function (e) {
+        e.preventDefault(); go.disabled = true;
+        waitingFor = Array.prototype.map.call(defsBox.querySelectorAll("h4"), function (x) { return x.textContent; });
+        api("/api/workflow-files/generate", { method: "POST", body: { description: desc.value, location: where.value } }).then(function (r) {
+          genBox.textContent = "";
+          genBox.appendChild(h("div", { class: "note" }, "Claude is writing the workflow (", h("a", { href: "#/proc/" + r.proc, text: "follow it, or answer its questions" }), "). It appears below once saved."));
+        }).catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } }, h("h3", { text: "Create a workflow with Claude" }), h("label", null, "What should it do?", desc), h("label", null, "Save in", where), note,
+        h("div", { class: "row" }, go, h("button", { type: "button", onclick: function () { genBox.textContent = ""; } }, "Cancel"))));
+      api("/api/config").then(function (c) {
+        ((c.repo && c.repo.repos) || []).forEach(function (r) { where.appendChild(h("option", { value: r.dir, text: r.dir + " (commit to share)" })); });
+      }).catch(function () { /* config only */ });
+      desc.focus();
+    }
     var runsBox = h("div"), defsBox = h("div", { class: "grid" });
     var defsSig = null;
     m.appendChild(h("h2", { text: "Runs" })); m.appendChild(runsBox);
@@ -1522,6 +1546,15 @@
         // Redrawn only when they change, so an open Run form survives the refresh.
         var sig = JSON.stringify([w.defs, w.errors]);
         if (sig === defsSig) return;
+        if (waitingFor && defsSig !== null) {
+          var fresh = w.defs.filter(function (d) { return waitingFor.indexOf(d.name) < 0; });
+          if (fresh.length) {
+            waitingFor = null;
+            genBox.textContent = "";
+            genBox.appendChild(h("div", { class: "note" }, "Workflow ", h("b", { text: fresh[0].name }), " is ready. ",
+              h("a", { href: "#/wfedit/" + encodeURIComponent(fresh[0].name), text: "Open it in the editor" }), " or run it below."));
+          }
+        }
         defsSig = sig;
         defsBox.textContent = ""; errBox.textContent = "";
         if ((w.errors || []).length) errBox.appendChild(h("div", { class: "note warn" }, h("b", { text: "Workflow files in repositories that are not used:" }),
@@ -1609,13 +1642,19 @@
         cols.forEach(function (col, ci) {
           dag.appendChild(h("div", { class: "dag-col" }, h("h3", { text: ci === 0 ? "Start" : "Step " + (ci + 1) }), col.map(function (t) {
             return h("div", { class: "card task " + t.state },
-              h("div", { class: "row" }, h("b", { text: t.id }), wfPill(t.state)),
-              h("div", { class: "muted", text: t.node + "  -  " + t.runner }),
+              h("div", { class: "row" }, h("b", { text: t.id }), wfPill(t.state), t.allow_failure ? h("span", { class: "pill", title: "Its failure does not fail the workflow", text: "may fail" }) : null),
+              h("div", { class: "muted", text: t.node + "  -  " + (t.run ? "command" : t.runner) }),
+              t.run ? h("div", { class: "cmd small", text: "$ " + t.run }) : null,
               h("div", { class: "cmd small", text: t.target }),
-              t.needs.length ? h("div", { class: "muted", text: "after " + t.needs.join(", ") }) : null,
+              t.item ? h("div", { class: "muted", text: "item: " + t.item }) : null,
+              t.needs.length ? h("div", { class: "muted", text: (t.on && t.on !== "success" ? "on " + t.on + " of " : "after ") + t.needs.join(", ") }) : null,
+              t.when ? h("div", { class: "muted small", text: "when " + t.when }) : null,
+              t.until ? h("div", { class: "muted small", text: "until " + t.until + " (run " + t.runs + " of at most " + t.max_runs + ")" }) : null,
               t.attempts > 1 || t.retries ? h("div", { class: "muted", text: "attempt " + t.attempts + " of " + (t.retries + 1) }) : null,
+              t.exit_code != null && t.state !== "running" ? h("div", { class: "muted small", text: "exit code " + t.exit_code }) : null,
               t.error ? h("div", { class: "note " + (t.state === "failed" ? "bad" : "warn"), text: t.error }) : null,
-              t.proc_id ? h("a", { href: "#/proc/" + t.proc_id, text: "Open agent process #" + t.proc_id }) : null);
+              t.output && t.state !== "running" ? h("details", null, h("summary", { text: "Output" }), h("pre", { class: "view small", text: t.output.slice(-4000) })) : null,
+              t.proc_id ? h("a", { href: "#/proc/" + t.proc_id, text: (t.run ? "Open command process #" : "Open agent process #") + t.proc_id }) : null);
           })));
         });
         if (r.status !== "running") stop();
@@ -2616,14 +2655,18 @@
       while (stack.length) { var id = stack.pop(); if (id === from) return true; if (seen[id]) continue; seen[id] = 1; var t = task(id); if (t) stack = stack.concat(t.needs || []); }
       return false;
     }
-    function kind(t) { return t.workflow ? "workflow " + t.workflow : t.skill ? "skill " + t.skill : t.component ? "saved task " + t.component : "task"; }
+    function kind(t) {
+      var k = t.workflow ? "workflow " + t.workflow : t.run ? "$ " + t.run.split("\n")[0] : t.skill ? "skill " + t.skill : t.component ? "saved task " + t.component : "task";
+      var flow = [t.on && t.on !== "success" ? "on " + t.on : "", t.when ? "if" : "", t.foreach ? "for each" : "", t.until ? "until" : ""].filter(Boolean);
+      return flow.length ? k + "  [" + flow.join(", ") + "]" : k;
+    }
 
     function draw() {
       Array.prototype.slice.call(canvas.querySelectorAll(".gnode")).forEach(function (n) { n.remove(); });
       while (svg.firstChild) svg.removeChild(svg.firstChild);
       var maxX = 900, maxY = 500;
       wf.task.forEach(function (t) {
-        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (t.workflow ? " sub" : t.skill ? " skill" : t.component ? " comp" : ""), tabindex: "0", "data-id": t.id },
+        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (t.workflow ? " sub" : t.run ? " cmdstep" : t.skill ? " skill" : t.component ? " comp" : "") + (t.on === "failure" ? " onfail" : ""), tabindex: "0", "data-id": t.id },
           h("button", { type: "button", class: "gdel", title: "Delete this step", "aria-label": "Delete step " + t.id }, "\u00d7"),
           h("span", { class: "port in", title: "runs after" }),
           h("b", { text: t.id }), h("small", { text: kind(t) }),
@@ -2663,7 +2706,7 @@
           hit.setAttribute("d", path(a, b)); hit.setAttribute("class", "hit");
           hit.addEventListener("pointerdown", function (e) { e.stopPropagation(); selEdge = [from, t.id]; sel = null; inspect(); edges(); });
           var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-          p.setAttribute("d", path(a, b)); p.setAttribute("class", "edge" + (on ? " on" : ""));
+          p.setAttribute("d", path(a, b)); p.setAttribute("class", "edge" + (on ? " on" : "") + (t.on === "failure" ? " fail" : t.on === "always" ? " always" : ""));
           svg.appendChild(p); svg.appendChild(hit);
         });
       });
@@ -2741,7 +2784,7 @@
         wf.task.forEach(function (x) { x.needs = (x.needs || []).map(function (n) { return n === t.id ? v : n; }); });
         t.id = v; sel = v; changed(); draw();
       });
-      f.appendChild(h("div", { class: "row inspect-head" }, h("h3", { text: t.workflow ? "Sub-workflow step" : t.skill ? "Skill step" : "Task" }),
+      f.appendChild(h("div", { class: "row inspect-head" }, h("h3", { text: t.workflow ? "Sub-workflow step" : t.run != null ? "Command step" : t.skill ? "Skill step" : "Task" }),
         h("button", { type: "button", class: "danger small", title: "Delete this step (or press Delete)", onclick: function () { removeTask(t.id); } }, "Delete step")));
       f.appendChild(field("Id", idIn));
       function sel_(k, options, blank, help) {
@@ -2761,23 +2804,48 @@
           "Its tasks run as this one step: they start after this step's links, and what runs after this step waits for them all."));
       } else {
         var comp = allComponents(), cc = t.component && comp.find(function (x) { return x.name === t.component; });
-        if (t.skill) {
+        if (t.run != null) {
+          var cmd = h("textarea", { class: "code", placeholder: "cargo test 2>&1", spellcheck: "false" }); cmd.value = t.run;
+          cmd.addEventListener("input", function () { t.run = cmd.value; changed(); });
+          cmd.addEventListener("change", draw);
+          f.appendChild(field("Command", cmd, "Runs with bash (sh; PowerShell on Windows) in the target. Inputs, the loop item and earlier results are environment variables: $INDRA_INPUT_NAME, $INDRA_ITEM, $INDRA_OUTPUT_STEP, $INDRA_EXIT_STEP, $INDRA_STATUS_STEP."));
+        } else if (t.skill) {
           var names = skills.map(function (x) { return x.name; }); if (names.indexOf(t.skill) < 0) names.unshift(t.skill);
           f.appendChild(field("Skill", sel_("skill", names, null), "Runs the skill as Claude Code's /" + t.skill + " command; the prompt below is what follows it."));
         } else {
           f.appendChild(field("Saved task", sel_("component", comp.map(function (x) { return x.name; }), "None"), "Start from a saved task: fields left empty here come from it."));
         }
         f.appendChild(field("Node", sel_("node", cfgNodeNames(c), cc && cc.node ? "component: " + cc.node : "local")));
-        f.appendChild(field("Profile", sel_("profile", cfgProfileNames(c), cc && cc.profile ? "component: " + cc.profile : "None")));
-        f.appendChild(field("Runner", sel_("runner", cfgRunnerNames(c), cc && cc.runner ? "component: " + cc.runner : "claude (or the profile's)")));
-        var mdl = text("model", false, "the profile's"); mdl.setAttribute("list", "models");
-        f.appendChild(field("Model", mdl, "Over the profile's; with Ollama, a local model's name."));
-        f.appendChild(field("Runs on", sel_("provider", ["anthropic", "ollama"], "the profile's choice")));
+        if (t.run == null) {
+          f.appendChild(field("Profile", sel_("profile", cfgProfileNames(c), cc && cc.profile ? "component: " + cc.profile : "None")));
+          f.appendChild(field("Runner", sel_("runner", cfgRunnerNames(c), cc && cc.runner ? "component: " + cc.runner : "claude (or the profile's)")));
+          var mdl = text("model", false, "the profile's"); mdl.setAttribute("list", "models");
+          f.appendChild(field("Model", mdl, "Over the profile's; with Ollama, a local model's name."));
+          f.appendChild(field("Runs on", sel_("provider", ["anthropic", "ollama"], "the profile's choice")));
+        }
         f.appendChild(field("Target", text("target", false, cc && cc.target ? cc.target : loc.kind === "repo" ? "this repository" : "a directory on that node"),
           loc.kind === "repo" ? "Relative paths are inside the repository." : null));
-        f.appendChild(field(t.skill ? "Arguments" : "Prompt", text("prompt", true, t.skill ? "{target}" : cc && cc.prompt ? cc.prompt : "What should the agent do? {target} and {node} are filled in."),
-          t.skill ? "Default {target}: the directory it runs in." : null));
+        if (t.run == null) f.appendChild(field(t.skill ? "Arguments" : "Prompt", text("prompt", true, t.skill ? "{target}" : cc && cc.prompt ? cc.prompt : "What should the agent do? {target}, {node}, {input.NAME}, {item} and {steps.STEP.output} are filled in."),
+          t.skill ? "Default {target}: the directory it runs in." : "{steps.STEP.output} is an earlier step's result (it must run before this one)."));
         f.appendChild(field("Retries", text("retries", false, cc && cc.retries ? String(cc.retries) : "0")));
+        // Control flow.
+        var flowBox = h("details", { class: "flowbox", open: t.when || t.on || t.foreach || t.until || t.allow_failure ? "" : null }, h("summary", { text: "Conditions and loops" }));
+        flowBox.appendChild(field("Runs", sel_("on", ["failure", "always"], "when the steps before it succeed"),
+          "On failure: only if a step before it failed (to report or fix). Always: once they finish, however they went (to clean up)."));
+        flowBox.appendChild(field("Only if", text("when", false, "e.g. test.failed and input.fix == 'true'"),
+          "A condition on earlier steps (STEP.succeeded, .failed, .skipped, .output contains 'x', .exit_code != 0) and inputs (input.NAME); and, or, not. False: the step is skipped."));
+        var af = h("input", { type: "checkbox" }); af.checked = !!t.allow_failure;
+        af.addEventListener("change", function () { if (af.checked) t.allow_failure = true; else delete t.allow_failure; changed(); draw(); select(t.id); });
+        flowBox.appendChild(h("label", { class: "check" }, af, " Its failure does not fail the workflow (what follows still runs; STEP.failed tells)"));
+        var fe = h("input", { type: "text", placeholder: "api, web, worker  or  {input.services}" });
+        fe.value = t.foreach == null ? "" : Array.isArray(t.foreach) ? t.foreach.join(", ") : t.foreach;
+        fe.addEventListener("input", function () { if (fe.value.trim()) t.foreach = fe.value; else delete t.foreach; changed(); });
+        fe.addEventListener("change", draw);
+        flowBox.appendChild(field("For each", fe, "One copy per item, in parallel ({item} in the prompt and target, $INDRA_ITEM in a command); separate with commas or new lines."));
+        flowBox.appendChild(field("Repeat until", text("until", false, "e.g. self.output contains 'PASS'"), "Runs again after a success until this holds (self.output, self.exit_code)."));
+        var mr = text("max_runs", false, "3"); mr.addEventListener("input", function () { if (mr.value.trim()) t.max_runs = Number(mr.value) || 3; else delete t.max_runs; });
+        flowBox.appendChild(field("At most (runs)", mr));
+        f.appendChild(flowBox);
       }
       f.appendChild(h("p", { class: "muted small", text: (t.needs || []).length ? "Runs after: " + t.needs.join(", ") : "Runs first (nothing before it)." }));
       f.appendChild(h("div", { class: "row" },
@@ -2804,6 +2872,7 @@
       if (spec.workflow) t.workflow = spec.workflow;
       if (spec.component) t.component = spec.component;
       if (spec.skill) t.skill = spec.skill;
+      if (spec.run != null) { t.run = spec.run; t.id = uniqueId("command"); }
       wf.task.push(t); changed(); draw(); select(t.id);
     }
     function renderPalette() {
@@ -2817,6 +2886,7 @@
       }
       palette.appendChild(h("h3", { text: "Add" }));
       palette.appendChild(item("Task", "an agent with a prompt", {}));
+      palette.appendChild(item("Command", "a shell command (bash)", { run: "" }));
       palette.appendChild(h("h3", { text: "Skills", title: "Run one of the harness's skills as a step" }));
       if (!skills.length) palette.appendChild(h("p", { class: "muted small", text: "This harness has no skills." }));
       var sf = null;

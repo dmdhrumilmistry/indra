@@ -206,6 +206,106 @@ fn workflow_orders_retries_skips_and_never_shells_the_prompt() {
     assert!(logs.contains("local says: web after api"), "{}", logs);
 }
 
+/// Shell steps (here and on a node), conditions, failure handling, loops
+/// and `until`, through `indra run`; input values never become shell text.
+#[test]
+fn control_flow_commands_conditions_and_loops() {
+    let e = Env::new("flow");
+    let pwned = e.p("pwned");
+    let hub = e.hub(&format!(
+        "[[workflow]]\nname = \"flow\"\n\
+         [[workflow.input]]\nname = \"mode\"\n\
+         [[workflow.input]]\nname = \"who\"\n\
+         [[workflow.task]]\nid = \"check\"\ntarget = \"local-web\"\nrun = \"echo version=3; echo \\\"hello $INDRA_INPUT_WHO\\\"\"\n\
+         [[workflow.task]]\nid = \"per-item\"\nnode = \"box\"\ntarget = \"{api}\"\nrun = \"echo item=$INDRA_ITEM\"\nforeach = \"a, b\"\n\
+         [[workflow.task]]\nid = \"flaky\"\ntarget = \"local-web\"\nrun = \"echo trying; exit 3\"\nallow_failure = true\n\
+         [[workflow.task]]\nid = \"handler\"\ntarget = \"local-web\"\nneeds = [\"flaky\"]\non = \"failure\"\nrun = \"echo handled exit $INDRA_EXIT_FLAKY\"\n\
+         [[workflow.task]]\nid = \"yes\"\ntarget = \"local-web\"\nneeds = [\"check\"]\nwhen = \"check.output contains 'version=3' and input.mode == 'fast'\"\nrunner = \"echo\"\nprompt = \"saw {{steps.check.output}}\"\n\
+         [[workflow.task]]\nid = \"no\"\ntarget = \"local-web\"\nneeds = [\"check\"]\nwhen = \"check.exit_code != 0\"\nrun = \"echo never\"\n\
+         [[workflow.task]]\nid = \"after\"\ntarget = \"local-web\"\nneeds = [\"per-item\", \"flaky\"]\nrun = \"echo after loop\"\n\
+         [[workflow.task]]\nid = \"count\"\ntarget = \"local-web\"\nrun = \"n=$(cat count 2>/dev/null || echo 0); n=$((n+1)); echo $n > count; echo run $n\"\nuntil = \"self.output contains 'run 3'\"\nmax_runs = 5\n",
+        api = e.p("remote-api"),
+    ));
+    let out = e
+        .indra(&[
+            "run",
+            "flow",
+            "--config",
+            hub.to_str().unwrap(),
+            "--input",
+            "mode=fast",
+            "--input",
+            &format!("who=$(touch {}) `touch {}`", pwned, pwned),
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "only an allowed failure:\n{}\n{}",
+        text,
+        err
+    );
+    let state = |id: &str| {
+        text.lines()
+            .rev()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .unwrap_or("")
+            .to_string()
+    };
+    for (id, want) in [
+        ("check", "succeeded"),
+        ("per-item-1", "succeeded"),
+        ("per-item-2", "succeeded"),
+        ("flaky", "failed"),
+        ("handler", "succeeded"),
+        ("yes", "succeeded"),
+        ("no", "skipped"),
+        ("after", "succeeded"),
+        ("count", "succeeded"),
+    ] {
+        assert_eq!(state(id), want, "{}: {}", id, text);
+    }
+    let log = |id: &str| -> String {
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .unwrap();
+        let mut rest = line.trim_start();
+        for _ in 0..3 {
+            rest = rest
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r.trim_start())
+                .unwrap();
+        }
+        fs::read_to_string(rest.trim_end()).unwrap_or_default()
+    };
+    assert!(
+        log("per-item-2").contains("item=b"),
+        "{}",
+        log("per-item-2")
+    );
+    assert!(
+        log("handler").contains("handled exit 3"),
+        "{}",
+        log("handler")
+    );
+    assert!(log("yes").contains("saw version=3"), "{}", log("yes"));
+    assert!(log("count").contains("run 3"), "{}", log("count"));
+    assert_eq!(
+        fs::read_to_string(e.dir.join("local-web/count"))
+            .unwrap()
+            .trim(),
+        "3"
+    );
+    assert!(log("check").contains("hello $(touch"), "{}", log("check"));
+    assert!(!Path::new(&pwned).exists(), "an input value must never run");
+}
+
 #[test]
 fn bad_workflows_are_rejected_before_anything_runs() {
     let e = Env::new("invalid");

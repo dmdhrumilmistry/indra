@@ -86,6 +86,11 @@ their section; nothing is deleted, items are checked off with the change that di
       called saved tasks in the console
 - [x] Terminal shell is configurable (`[terminal]`, Settings > General) and pickable per terminal
 - [x] Several boards: create, rename, delete (move or drop items), trackers per board, move items
+- [x] Release: each indra release is marked Latest once complete; `latest` input marks one (#44)
+- [x] Shell steps (`run`), on any node, with values passed as environment variables only
+- [x] Conditions (`when`), `on = "failure" | "always"`, `allow_failure`, `{steps.X.output}`
+- [x] Loops: `foreach` (copies per item) and `until` with `max_runs`
+- [x] `indra mcp` (MCP server: guide, list, get, validate, save) and **Create with Claude**
 
 ## Not planned yet (the docs say so)
 

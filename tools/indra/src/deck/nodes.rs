@@ -586,12 +586,26 @@ pub async fn run_job(
         out(json!({ "t": "error", "msg": msg }));
         2
     };
-    let Some(runner) = s.runners.iter().find(|r| r.name == job.runner) else {
-        return fail(format!(
-            "runner '{}' is not configured on {}",
-            job.runner,
-            hostname()
-        ));
+    // The hub's workflow shell steps use a reserved runner, unless this
+    // machine turned them off.
+    let shell = crate::deck::config::shell_runner();
+    let runner = if job.runner == crate::deck::config::SHELL_RUNNER {
+        if !s.shell_steps {
+            return fail(format!(
+                "{} does not run workflow shell steps ([local] shell_steps = false)",
+                hostname()
+            ));
+        }
+        &shell
+    } else {
+        let Some(r) = s.runners.iter().find(|r| r.name == job.runner) else {
+            return fail(format!(
+                "runner '{}' is not configured on {}",
+                job.runner,
+                hostname()
+            ));
+        };
+        r
     };
     let target = expand_target(&job.target);
     if !target.is_dir() {

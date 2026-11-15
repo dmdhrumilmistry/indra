@@ -337,6 +337,7 @@ pub fn to_workflow(d: &Delegation, plan: &Plan, settings: &Settings) -> Workflow
         inputs: vec![],
         builtin: false,
         source: None,
+        values: Default::default(),
         name: format!("plan-{}", d.id),
         description: d.task.chars().take(200).collect(),
         harness: Some(d.harness.clone()),

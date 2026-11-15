@@ -1,10 +1,15 @@
-//! Orchestration: run a graph of agent tasks across nodes.
+//! Orchestration: run a graph of agent tasks (and shell commands) across
+//! nodes, with conditions, loops and failure handling (see `deck::flow`).
 //!
 //! A workflow is a set of tasks; each runs one agent (a runner and a prompt)
 //! in a target directory on a node. `needs` orders them. The engine ticks
 //! every half second:
-//!   - a waiting task whose needs all succeeded becomes queued; if any need
-//!     failed, was skipped or cancelled, it is skipped;
+//!   - a waiting task becomes queued by its `on`: "success" (the default)
+//!     when every need succeeded (or failed with `allow_failure`), skipped
+//!     when one did not; "failure" when one failed; "always" once all are
+//!     done. Its `when` condition must then hold, or it is skipped;
+//!   - a `foreach` step is copied per item when the run starts, and an
+//!     `until` step runs again until its condition holds;
 //!   - queued tasks start while their node has capacity (`max_parallel`,
 //!     counting every agent on that node, not only this workflow's);
 //!   - a failed task is retried up to `retries` more times;
@@ -25,6 +30,27 @@ pub const TICK_MS: u64 = 500;
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskRun {
     pub id: String,
+    /// A shell command instead of an agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    /// success | failure | always
+    pub on: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    pub max_runs: u32,
+    pub allow_failure: bool,
+    /// The loop item this copy runs for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    /// What it printed last (an agent's result, a command's output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Completed runs (an `until` loop makes several).
+    pub runs: u32,
     pub node: String,
     pub target: String,
     pub runner: String,
@@ -65,6 +91,140 @@ pub struct WfRun {
     /// running | succeeded | failed | cancelled
     pub status: &'static str,
     pub tasks: Vec<TaskRun>,
+    /// The inputs it was started with.
+    pub inputs: BTreeMap<String, String>,
+}
+
+/// A step's result, as conditions and later steps see it.
+#[derive(Clone)]
+struct Res {
+    state: &'static str,
+    output: String,
+    exit_code: Option<i32>,
+    allow_failure: bool,
+}
+
+fn snapshot(tasks: &[TaskRun]) -> HashMap<String, Res> {
+    tasks
+        .iter()
+        .map(|t| {
+            (
+                t.id.clone(),
+                Res {
+                    state: t.state,
+                    output: t.output.clone().unwrap_or_default(),
+                    exit_code: t.exit_code,
+                    allow_failure: t.allow_failure,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Evaluate a condition against the steps' results, the inputs, and (in
+/// `until`) this step's own last run.
+fn holds(
+    cond: &str,
+    snap: &HashMap<String, Res>,
+    inputs: &BTreeMap<String, String>,
+    me: Option<&Res>,
+) -> bool {
+    use crate::deck::flow::{eval, parse, Val};
+    let Ok(e) = parse(cond) else { return false };
+    let lookup = |r: &str| -> Option<Val> {
+        let (head, field) = r.split_once('.')?;
+        if head == "input" {
+            return Some(Val::Str(inputs.get(field).cloned().unwrap_or_default()));
+        }
+        let res = if head == "self" { me? } else { snap.get(head)? };
+        Some(match field {
+            "succeeded" => Val::Bool(res.state == "succeeded"),
+            "failed" => Val::Bool(res.state == "failed"),
+            "skipped" => Val::Bool(res.state == "skipped"),
+            "status" => Val::Str(res.state.into()),
+            "output" => Val::Str(res.output.clone()),
+            "exit_code" => match res.exit_code {
+                Some(c) => Val::Num(c as f64),
+                None => Val::Str(String::new()),
+            },
+            _ => return None,
+        })
+    };
+    eval(&e, &lookup)
+}
+
+/// `NAME` as an environment variable name part: upper case, `_` for the rest.
+fn env_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// A value for the environment: its last 8000 characters, never a NUL, and
+/// never read as a `secret:` reference.
+fn env_value(v: &str) -> String {
+    let v = v.replace('\0', "");
+    let n = v.chars().count();
+    let v: String = if n > 8000 {
+        v.chars().skip(n - 8000).collect()
+    } else {
+        v
+    };
+    if crate::deck::secrets::reference(&v).is_some() {
+        format!(" {}", v)
+    } else {
+        v
+    }
+}
+
+/// One copy of each `foreach` step per item (`<id>-1`, `<id>-2`, ...);
+/// whatever needed the step waits for all its copies. No items: nothing to
+/// do, so the step drops out.
+pub fn expand_loops(mut wf: WorkflowCfg) -> Result<WorkflowCfg, String> {
+    use crate::deck::flow;
+    let mut out = Vec::new();
+    let mut copies: HashMap<String, Vec<String>> = HashMap::new();
+    for mut t in std::mem::take(&mut wf.tasks) {
+        let Some(f) = t.foreach.take() else {
+            out.push(t);
+            continue;
+        };
+        let items = flow::items(&f.list());
+        if items.len() > flow::MAX_ITEMS {
+            return Err(format!(
+                "task '{}': {} items, more than the {} a loop may have",
+                t.id,
+                items.len(),
+                flow::MAX_ITEMS
+            ));
+        }
+        let mut ids = Vec::new();
+        for (k, item) in items.iter().enumerate() {
+            let mut c = t.clone();
+            c.id = format!("{}-{}", t.id, k + 1);
+            c.prompt = c.prompt.replace("{item}", item);
+            c.target = c.target.replace("{item}", item);
+            c.item = Some(item.clone());
+            ids.push(c.id.clone());
+            out.push(c);
+        }
+        copies.insert(t.id.clone(), ids);
+    }
+    for t in &mut out {
+        t.needs = t
+            .needs
+            .iter()
+            .flat_map(|n| copies.get(n).cloned().unwrap_or_else(|| vec![n.clone()]))
+            .collect();
+    }
+    wf.tasks = out;
+    Ok(wf)
 }
 
 pub struct Engine {
@@ -163,6 +323,11 @@ impl Engine {
         let settings = self.settings.get();
         let names: Vec<String> = settings.nodes.iter().map(|n| n.name.clone()).collect();
         config::validate_workflow(&wf, &names)?;
+        let wf = expand_loops(wf)?;
+        if wf.tasks.is_empty() {
+            return Err("nothing to run: every step loops over no items".into());
+        }
+        config::validate_workflow(&wf, &names)?;
         let harness = wf
             .harness
             .clone()
@@ -177,6 +342,7 @@ impl Engine {
             ended: None,
             status: "running",
             tasks: wf.tasks.iter().map(task_run).collect(),
+            inputs: wf.values.clone(),
         };
         let run = Arc::new(Mutex::new(run));
         self.runs.lock().unwrap().insert(id, run.clone());
@@ -196,6 +362,8 @@ impl Engine {
     fn tick(&self, id: u64, run: &Arc<Mutex<WfRun>>) -> bool {
         let cancel = self.cancelled.lock().unwrap().contains(&id);
         let mut r = run.lock().unwrap();
+        let inputs = r.inputs.clone();
+        let snap = snapshot(&r.tasks);
 
         // 1. Collect finished agents.
         for t in r.tasks.iter_mut().filter(|t| t.state == "running") {
@@ -213,8 +381,47 @@ impl Engine {
             }
             let v = p.view();
             t.ended = Some(now());
+            t.exit_code = v.exit_code;
+            t.output = Some(if t.run.is_some() {
+                p.text_output(20_000)
+            } else {
+                p.outcome()
+            });
             match v.status.as_str() {
-                "exited" => t.state = "succeeded",
+                "exited" => {
+                    t.runs += 1;
+                    let again = t.until.as_deref().map(|u| {
+                        let me = Res {
+                            state: "succeeded",
+                            output: t.output.clone().unwrap_or_default(),
+                            exit_code: t.exit_code,
+                            allow_failure: t.allow_failure,
+                        };
+                        !holds(u, &snap, &inputs, Some(&me))
+                    });
+                    match again {
+                        Some(true) if t.runs < t.max_runs => {
+                            t.state = "queued";
+                            t.attempts = 0;
+                            t.error = Some(format!(
+                                "run {} of at most {}: until not met yet, running again",
+                                t.runs, t.max_runs
+                            ));
+                        }
+                        Some(true) => {
+                            t.state = "failed";
+                            t.error = Some(format!(
+                                "until {:?} still did not hold after {} runs",
+                                t.until.clone().unwrap_or_default(),
+                                t.runs
+                            ));
+                        }
+                        _ => {
+                            t.state = "succeeded";
+                            t.error = None;
+                        }
+                    }
+                }
                 _ if cancel => t.state = "cancelled",
                 _ if t.attempts <= t.retries => {
                     t.state = "queued";
@@ -244,32 +451,64 @@ impl Engine {
                 t.ended = Some(now());
             }
         }
-        let states: HashMap<String, &'static str> =
-            r.tasks.iter().map(|t| (t.id.clone(), t.state)).collect();
+        let snap = snapshot(&r.tasks);
         for t in r.tasks.iter_mut().filter(|t| t.state == "waiting") {
-            let need = |n: &String| states.get(n).copied().unwrap_or("failed");
-            if t.needs
-                .iter()
-                .any(|n| matches!(need(n), "failed" | "skipped" | "cancelled"))
-            {
-                t.state = "skipped";
-                t.error = Some("a task it needs did not succeed".into());
-                t.ended = Some(now());
-            } else if t.needs.iter().all(|n| need(n) == "succeeded") {
-                t.state = "queued";
+            let state = |n: &String| snap.get(n).map(|x| x.state).unwrap_or("failed");
+            let done =
+                |n: &String| matches!(state(n), "succeeded" | "failed" | "skipped" | "cancelled");
+            // Failed, but allowed to: what follows on success still runs.
+            let ok = |n: &String| {
+                state(n) == "succeeded"
+                    || (state(n) == "failed" && snap.get(n).is_some_and(|x| x.allow_failure))
+            };
+            let all_done = t.needs.iter().all(done);
+            let go: Result<bool, &str> = match t.on.as_str() {
+                "failure" if all_done => {
+                    if t.needs.iter().any(|n| state(n) == "failed") {
+                        Ok(true)
+                    } else {
+                        Err("nothing it follows failed (it runs on failure)")
+                    }
+                }
+                "always" if all_done => Ok(true),
+                "failure" | "always" => Ok(false),
+                _ => {
+                    if t.needs.iter().any(|n| done(n) && !ok(n)) {
+                        Err("a step it needs did not succeed")
+                    } else {
+                        Ok(t.needs.iter().all(ok))
+                    }
+                }
+            };
+            match go {
+                Ok(false) => {}
+                Ok(true) => match t.when.as_deref() {
+                    Some(c) if !holds(c, &snap, &inputs, None) => {
+                        t.state = "skipped";
+                        t.error = Some(format!("its condition was not met: when {:?}", c));
+                        t.ended = Some(now());
+                    }
+                    _ => t.state = "queued",
+                },
+                Err(why) => {
+                    t.state = "skipped";
+                    t.error = Some(why.into());
+                    t.ended = Some(now());
+                }
             }
         }
 
         // 3. Start queued tasks while their node has room. A started agent
         // counts as running at once, so the next check already sees it.
         let harness = r.harness.clone();
+        let name = r.name.clone();
         let settings = self.settings.get();
         for t in r.tasks.iter_mut().filter(|t| t.state == "queued") {
             if self.procs.running_on(&t.node) >= settings.capacity(&t.node) {
                 continue;
             }
             t.attempts += 1;
-            match self.launch(t, &harness) {
+            match self.launch(t, &harness, &snap, &inputs, &name) {
                 Ok(pid) => {
                     t.state = "running";
                     t.proc_id = Some(pid);
@@ -289,12 +528,18 @@ impl Engine {
 
         // 4. Done?
         if r.tasks.iter().all(TaskRun::terminal) {
+            // Skipped steps are part of the plan (a condition, a branch not
+            // taken); a failure fails the run unless it was allowed.
             r.status = if cancel {
                 "cancelled"
-            } else if r.tasks.iter().all(|t| t.state == "succeeded") {
-                "succeeded"
-            } else {
+            } else if r
+                .tasks
+                .iter()
+                .any(|t| t.state == "cancelled" || (t.state == "failed" && !t.allow_failure))
+            {
                 "failed"
+            } else {
+                "succeeded"
             };
             r.ended = Some(now());
             return true;
@@ -302,11 +547,94 @@ impl Engine {
         false
     }
 
-    fn launch(&self, t: &TaskRun, harness: &str) -> Result<u64, String> {
-        let prompt = t.prompt.replace("{node}", &t.node);
+    fn launch(
+        &self,
+        t: &TaskRun,
+        harness: &str,
+        snap: &HashMap<String, Res>,
+        inputs: &BTreeMap<String, String>,
+        workflow: &str,
+    ) -> Result<u64, String> {
         // The settings now, so a node or runner edited in the console applies
         // to tasks that have not started yet.
         let settings = self.settings.get();
+        // What the step knows, as environment variables: the inputs, its
+        // loop item, and every finished step's result.
+        let mut env: BTreeMap<String, String> = BTreeMap::new();
+        env.insert("INDRA_WORKFLOW".into(), workflow.into());
+        env.insert("INDRA_STEP".into(), t.id.clone());
+        env.insert("INDRA_NODE".into(), t.node.clone());
+        env.insert("INDRA_TARGET".into(), t.target.clone());
+        if let Some(i) = &t.item {
+            env.insert("INDRA_ITEM".into(), env_value(i));
+        }
+        for (k, v) in inputs {
+            env.insert(format!("INDRA_INPUT_{}", env_name(k)), env_value(v));
+        }
+        for (sid, res) in snap
+            .iter()
+            .filter(|(_, r)| matches!(r.state, "succeeded" | "failed" | "skipped" | "cancelled"))
+        {
+            let n = env_name(sid);
+            env.insert(format!("INDRA_STATUS_{}", n), res.state.into());
+            env.insert(format!("INDRA_OUTPUT_{}", n), env_value(&res.output));
+            if let Some(c) = res.exit_code {
+                env.insert(format!("INDRA_EXIT_{}", n), c.to_string());
+            }
+        }
+        // A shell command: the reserved shell runner, here or on the node.
+        if let Some(cmd) = &t.run {
+            let start = crate::deck::procs::StartOpts {
+                agent: crate::deck::nodes::AgentOpts {
+                    env,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            if t.node == LOCAL {
+                if !settings.shell_steps {
+                    return Err(
+                        "shell steps are turned off on this machine ([local] shell_steps = false)"
+                            .into(),
+                    );
+                }
+                let runner = config::shell_runner();
+                let target = PathBuf::from(&t.target);
+                return self.procs.start_with(
+                    Launch::Local {
+                        runner: &runner,
+                        harness,
+                        prompt: cmd,
+                        target: &target,
+                    },
+                    start,
+                );
+            }
+            let node = settings
+                .node(&t.node)
+                .ok_or_else(|| format!("unknown node '{}'", t.node))?;
+            return self.procs.start_with(
+                Launch::Remote {
+                    node,
+                    runner: config::SHELL_RUNNER,
+                    harness,
+                    prompt: cmd,
+                    target: &t.target,
+                },
+                start,
+            );
+        }
+        // An agent: earlier results can be written into its prompt.
+        let mut prompt = t.prompt.replace("{node}", &t.node);
+        for (sid, res) in snap {
+            prompt = prompt
+                .replace(&format!("{{steps.{}.output}}", sid), &res.output)
+                .replace(&format!("{{steps.{}.status}}", sid), res.state)
+                .replace(
+                    &format!("{{steps.{}.exit_code}}", sid),
+                    &res.exit_code.map(|c| c.to_string()).unwrap_or_default(),
+                );
+        }
         // A profile brings its runner (if it names one) and the agent options.
         let (runner_name, agent) = match t.profile.as_deref() {
             Some(p) => {
@@ -321,11 +649,15 @@ impl Engine {
             None => (t.runner.clone(), crate::deck::nodes::AgentOpts::default()),
         };
         // The task's own model and provider win over the profile's.
-        let agent = agent.with(&crate::deck::nodes::AgentOpts {
+        let mut agent = agent.with(&crate::deck::nodes::AgentOpts {
             model: t.model.clone().filter(|m| !m.trim().is_empty()),
             provider: t.provider.clone().filter(|p| !p.trim().is_empty()),
             ..Default::default()
         });
+        // The profile's own environment wins.
+        for (k, v) in env {
+            agent.env.entry(k).or_insert(v);
+        }
         agent.validate()?;
         let (prompt, memory, reflect) = crate::deck::knowledge::prepare(
             &settings,
@@ -381,6 +713,16 @@ impl Engine {
 fn task_run(t: &TaskCfg) -> TaskRun {
     TaskRun {
         id: t.id.clone(),
+        run: t.run.clone(),
+        when: t.when.clone(),
+        on: t.on.clone().unwrap_or_else(|| "success".into()),
+        until: t.until.clone(),
+        max_runs: t.max_runs.unwrap_or(3),
+        allow_failure: t.allow_failure,
+        item: t.item.clone(),
+        output: None,
+        exit_code: None,
+        runs: 0,
         node: t.node.clone(),
         target: t.target.clone(),
         runner: t.runner.clone(),
@@ -446,6 +788,7 @@ pub fn fan_out(runner: &str, prompt: &str, targets: &[(String, String)]) -> Work
                 workflow: None,
                 skill: None,
                 pos: None,
+                ..Default::default()
             }
         })
         .collect();
@@ -453,6 +796,7 @@ pub fn fan_out(runner: &str, prompt: &str, targets: &[(String, String)]) -> Work
         inputs: vec![],
         builtin: false,
         source: None,
+        values: Default::default(),
         name: "fan-out".into(),
         description: "Ad-hoc fan-out".into(),
         harness: None,
@@ -481,6 +825,7 @@ mod tests {
             workflow: None,
             skill: None,
             pos: None,
+            ..Default::default()
         }
     }
 
@@ -489,6 +834,7 @@ mod tests {
             inputs: vec![],
             builtin: false,
             source: None,
+            values: Default::default(),
             name: "w".into(),
             description: String::new(),
             harness: None,
