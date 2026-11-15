@@ -761,6 +761,9 @@ pub async fn run_job(
             target.display()
         ));
     }
+    if let Err(e) = crate::deck::ollama::ready(&job.opts).await {
+        return fail(e);
+    }
     let ac = match agent_command(runner, &job.prompt, &target, job.resume.as_ref(), &job.opts) {
         Ok(x) => x,
         Err(e) => return fail(e),

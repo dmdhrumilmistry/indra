@@ -5,6 +5,10 @@ section from this file.
 
 ## v0.12.1
 
+- **Ollama models that cannot load fail before the agent starts**, with what to do (update Ollama,
+  or pull the model again), instead of as an API error inside the agent.
+- **A run that ended in an error is not asked for learnings**, so it no longer proposes one about
+  the error.
 - **Replies and README files render as Markdown** in Sessions and on run pages: headings,
   lists, tables, quotes, links and code. HTML in them is shown as text, never run, and
   images are never loaded.

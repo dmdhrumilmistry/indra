@@ -170,6 +170,9 @@ struct State {
     /// 0: not asked for learnings, 1: asked, 2: answered.
     reflect_state: u8,
     last_result: String,
+    /// The last turn ended in an error (an API error, a failed run): no
+    /// learnings are asked for then.
+    last_failed: bool,
     reflection: Option<String>,
     context_tokens: Option<u64>,
     context_window: Option<u64>,
@@ -204,6 +207,7 @@ impl State {
             next_request: 0,
             reflect_state: 0,
             last_result: String::new(),
+            last_failed: false,
             reflection: None,
             context_tokens: None,
             context_window: None,
@@ -697,7 +701,11 @@ impl Proc {
             }
             if !(st.interactive && st.open && st.turns == 0) {
                 Next::Wait
-            } else if self.reflect && st.reflect_state == 0 && st.status == "running" {
+            } else if self.reflect
+                && st.reflect_state == 0
+                && st.status == "running"
+                && !st.last_failed
+            {
                 st.reflect_state = 1;
                 st.turns += 1;
                 Next::Reflect
@@ -1024,6 +1032,8 @@ impl Proc {
                 {
                     let mut st = self.state.lock().unwrap();
                     st.last_result = r.clone();
+                    st.last_failed = s(&v, "subtype") != "success"
+                        || v.get("is_error").and_then(Value::as_bool) == Some(true);
                     if let Some(u) = v.get("usage") {
                         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                         let t = st.tokens.get_or_insert_with(Tokens::default);
@@ -2201,6 +2211,7 @@ mod tests {
                 next_request: 0,
                 reflect_state: 0,
                 last_result: String::new(),
+                last_failed: false,
                 reflection: None,
                 context_tokens: None,
                 context_window: None,
