@@ -504,3 +504,49 @@ dialog.ask h3 { margin-top: 0; }
 .gnode.gstart { max-width: 150px; }
 .inspector { overflow-wrap: anywhere; }
 .inspector select, .inspector input, .inspector textarea { max-width: 100%; }
+
+/* Sessions: list, conversation, side panel (like Claude Code online). */
+.sessions { display: grid; grid-template-columns: 250px minmax(0, 1fr) 280px; gap: 14px; height: calc(100vh - 60px); min-height: 480px; }
+.s-side, .s-panel { display: flex; flex-direction: column; gap: 8px; overflow: auto; min-height: 0; }
+.s-list { display: flex; flex-direction: column; gap: 2px; }
+.s-item { display: grid; grid-template-columns: 12px minmax(0, 1fr); column-gap: 8px; padding: 8px 10px; border-radius: 8px; color: var(--fg); }
+.s-item:hover { background: var(--sunk); text-decoration: none; }
+.s-item.on { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.s-item .dot { grid-row: span 2; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-top: 6px; }
+.s-item .dot.ok { background: var(--ok); } .s-item .dot.bad { background: var(--bad); } .s-item .dot.warn { background: var(--warn); }
+.s-item .dot.run { background: var(--accent); animation: pulse 1.4s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.s-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.s-chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.s-log { flex: 1; overflow: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.msg .body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.msg .who { font-size: 11.5px; color: var(--muted); margin-bottom: 3px; }
+.msg.user { align-self: flex-end; max-width: 80%; background: var(--sunk); border-radius: 12px; padding: 8px 12px; }
+.msg.agent { max-width: 92%; }
+.msg.status { font-size: 12.5px; color: var(--muted); }
+.msg.status.ok { color: var(--ok); } .msg.status.bad { color: var(--bad); } .msg.status.run { color: var(--accent); }
+.msg.ask { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; display: grid; gap: 6px; }
+details.fold { font-size: 12.5px; color: var(--muted); border-left: 2px solid var(--line); padding-left: 10px; }
+details.fold > summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steps-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px; font-family: var(--mono, monospace); font-size: 12px; }
+.steps-list li { overflow-wrap: anywhere; }
+.steps-list li.error, .steps-list li.stderr { color: var(--bad); }
+.s-input { border-top: 1px solid var(--line); padding: 10px 12px; display: grid; gap: 8px; }
+.s-input textarea { width: 100%; resize: vertical; min-height: 44px; }
+.s-sec { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 6px; background: var(--panel); }
+.s-sec h3 { margin: 0; }
+.kv { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 6px; font-size: 12.5px; align-items: baseline; }
+.kv > span:first-child { color: var(--muted); }
+.kv code { overflow-wrap: anywhere; }
+.todos { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 12.5px; }
+.todos li.completed { color: var(--muted); text-decoration: line-through; }
+.todos li.in_progress { font-weight: 600; }
+.todos .tick { display: inline-block; width: 14px; text-align: center; }
+.s-sec .file { text-align: left; font-family: var(--mono, monospace); font-size: 12px; padding: 3px 6px; overflow-wrap: anywhere; }
+.fstat { display: inline-block; min-width: 18px; color: var(--warn); font-weight: 600; }
+.block { display: block; }
+dialog.ask.wide { width: min(960px, calc(100vw - 32px)); }
+pre.diff { max-height: 70vh; overflow: auto; font-size: 12px; background: var(--sunk); padding: 10px; border-radius: 8px; }
+pre.diff .add { color: var(--ok); } pre.diff .del { color: var(--bad); } pre.diff .hunk { color: var(--accent); }
+@media (max-width: 1100px) { .sessions { grid-template-columns: 220px minmax(0, 1fr); height: auto; } .s-panel { grid-column: 1 / -1; } .s-chat { min-height: 60vh; } }
+@media (max-width: 760px) { .sessions { grid-template-columns: minmax(0, 1fr); } .s-side { max-height: 220px; } }

@@ -1110,6 +1110,118 @@ async fn procs_list(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!(app.procs.list()))
 }
 
+/// Run git in `dir` (never through a shell), with a time limit; its output.
+async fn git(dir: &str, args: &[&str]) -> Option<String> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// `GET /api/procs/{id}/workspace`: where an agent on this machine works:
+/// its git branch and the files changed there (another machine: not shown).
+async fn proc_workspace(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+) -> ApiResult<Json<Value>> {
+    let p = app
+        .procs
+        .get(id)
+        .ok_or_else(|| not_found("no such process"))?;
+    if p.node_name() != LOCAL {
+        return Ok(Json(json!({ "local": false })));
+    }
+    let dir = p.target().to_string();
+    let Some(branch) = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await else {
+        return Ok(Json(json!({ "local": true, "git": false })));
+    };
+    let status = git(&dir, &["status", "--porcelain", "--untracked-files=all"])
+        .await
+        .unwrap_or_default();
+    let changed: Vec<Value> = status
+        .lines()
+        .take(300)
+        .filter(|l| l.len() > 3)
+        .map(|l| json!({ "status": l[..2].trim(), "path": l[3..].trim_matches('"') }))
+        .collect();
+    Ok(Json(
+        json!({ "local": true, "git": true, "branch": branch.trim(), "changed": changed }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct DiffQ {
+    path: String,
+}
+
+/// `GET /api/procs/{id}/diff?path=`: one changed file's diff in the agent's
+/// folder (a file git lists as changed there; nothing else is read).
+async fn proc_diff(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Query(q): Query<DiffQ>,
+) -> ApiResult<Json<Value>> {
+    let p = app
+        .procs
+        .get(id)
+        .ok_or_else(|| not_found("no such process"))?;
+    if p.node_name() != LOCAL {
+        return Err(bad("diffs are shown for agents on this machine"));
+    }
+    let dir = p.target().to_string();
+    let status = git(&dir, &["status", "--porcelain", "--untracked-files=all"])
+        .await
+        .ok_or_else(|| bad("not a git repository"))?;
+    let entry = status
+        .lines()
+        .find(|l| l.len() > 3 && l[3..].trim_matches('"') == q.path)
+        .ok_or_else(|| not_found("that file is not changed there"))?;
+    let mut diff = if entry.starts_with("??") {
+        // New file: all of it is added.
+        git(&dir, &["diff", "--no-index", "--", "/dev/null", &q.path])
+            .await
+            .unwrap_or_default()
+    } else {
+        git(&dir, &["diff", "HEAD", "--", &q.path])
+            .await
+            .unwrap_or_default()
+    };
+    if diff.is_empty() && entry.starts_with("??") {
+        // git diff --no-index exits 1 when files differ: read it directly.
+        let out = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["diff", "--no-index", "--", "/dev/null", &q.path])
+            .output()
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        diff = String::from_utf8_lossy(&out.stdout).to_string();
+    }
+    let cut = diff.len() > 200_000;
+    if cut {
+        let mut end = 200_000;
+        while !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        diff.truncate(end);
+    }
+    Ok(Json(
+        json!({ "path": q.path, "diff": diff, "truncated": cut }),
+    ))
+}
+
 async fn proc_get(
     State(app): State<Arc<App>>,
     UrlPath(id): UrlPath<u64>,
@@ -3707,6 +3819,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/procs/{id}/control", post(proc_control))
         .route("/api/procs/{id}/message", post(proc_message))
         .route("/api/procs/{id}/events", get(proc_events))
+        .route("/api/procs/{id}/workspace", get(proc_workspace))
+        .route("/api/procs/{id}/diff", get(proc_diff))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }

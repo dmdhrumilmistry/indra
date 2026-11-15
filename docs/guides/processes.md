@@ -27,7 +27,8 @@ respect each node's capacity.
 
 | Where | What you get |
 |---|---|
-| **Running** page | every process with its node, runner, status, cost and last line |
+| **Sessions** page | your agents as conversations: live and past ones (kept across restarts), replies, approvals, tasks, changed files with diffs |
+| **Running** page (Sessions > Table view) | every process with its node, runner, status, cost and last line |
 | a process's page | the live stream: text, each tool call, each subagent with its own tool calls, refused permissions, and the final cost (Claude Code); plain output lines for other runners |
 | `GET /api/procs`, `GET /api/procs/{id}` | the same as JSON |
 | `GET /api/procs/{id}/events?after=N` | a Server-Sent Events stream of every event after sequence `N`, so a client can reconnect without missing or repeating anything |

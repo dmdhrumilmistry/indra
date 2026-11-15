@@ -131,6 +131,10 @@ their section; nothing is deleted, items are checked off with the change that di
       with Yes and No edges (`if` and `branch`; a step both sides reach runs after the side that
       ran), For each and Repeat until as bands on a step with a loop-back arrow, link conditions
       on the arrow; conditions picked from lists; the old Conditions and loops form is gone
+- [x] Sessions: agents as conversations like Claude Code online (sessions list with search,
+      conversation with folded tool steps, reply or continue, approvals; a side panel with the
+      machine, folder, branch, context, task list, changed files with diffs and linked PRs);
+      finished sessions are kept on disk and come back after a restart
 - [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options

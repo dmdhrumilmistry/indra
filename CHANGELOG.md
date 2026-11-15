@@ -3,6 +3,17 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.11.0
+
+- **Sessions, like Claude Code online.** Your agents as conversations: a list on the left (search, New,
+  live status), the selected one in the middle with its tool steps folded to one line
+  each, Allow and Deny for what it asks, and a box to reply (queued while it works) or to
+  continue it once it ended.
+- **What it worked on, at a glance:** the machine, folder and git branch, the agent and model,
+  how full its context is, its task list, the files it changed (click one for the diff), and
+  the pull requests it linked.
+- **Sessions are kept.** Finished sessions come back after the console restarts.
+
 ## v0.10.0
 
 - **Workflows run on a schedule.** Click Start in the workflow editor: every hour, every day or

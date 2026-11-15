@@ -1467,7 +1467,7 @@
         if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
         if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
         api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
-          .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } location.hash = "#/proc/" + r.id; })
+          .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } location.hash = "#/sessions/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "What should it do?", h("small", { text: "Plain words are fine. {target} becomes the folder, {node} the machine." }), prompt),
@@ -2328,6 +2328,202 @@
         } }, "Run the plan")));
     }
     load(); every(2500, load);
+  }
+
+  // ---- sessions: a conversation view of agents, like Claude Code online ----------
+  // A session is an agent and the agents continued from it (a chain of
+  // processes linked by `parent`). The page lists sessions on the left, shows
+  // the selected one as a conversation in the middle, and what it works on
+  // (machine, branch, context, tasks, changed files, links) on the right.
+  function sessionChains(procs) {
+    var by = {}; procs.forEach(function (p) { by[p.id] = p; });
+    function root(p) { var seen = {}; while (p.parent && by[p.parent] && !seen[p.id]) { seen[p.id] = 1; p = by[p.parent]; } return p; }
+    var chains = {};
+    procs.forEach(function (p) { var r = root(p); (chains[r.id] = chains[r.id] || []).push(p); });
+    return Object.keys(chains).map(function (k) {
+      var list = chains[k].sort(function (a, b) { return a.started - b.started || a.id - b.id; });
+      return { root: list[0], last: list[list.length - 1], procs: list };
+    }).sort(function (a, b) { return b.last.started - a.last.started; });
+  }
+  function firstLine(t, n) { t = String(t || "").split("\n").filter(function (x) { return x.trim(); })[0] || "(no prompt)"; return t.length > n ? t.slice(0, n) + "..." : t; }
+  var DOT = { running: "run live", exited: "ok", failed: "bad", stopped: "warn" };
+
+  function pageSessions(m, arg) {
+    var ro = S.ov.read_only;
+    var wrap = h("div", { class: "sessions" });
+    var side = h("aside", { class: "s-side" }), mid = h("section", { class: "s-chat", "aria-live": "polite" }), panel = h("aside", { class: "s-panel" });
+    wrap.appendChild(side); wrap.appendChild(mid); wrap.appendChild(panel);
+    m.appendChild(wrap);
+    var search = h("input", { type: "search", placeholder: "Search sessions", "aria-label": "Search sessions" });
+    var listBox = h("div", { class: "s-list", role: "navigation", "aria-label": "Sessions" });
+    side.appendChild(h("div", { class: "row" }, h("a", { class: "btn primary", href: "#/launch", text: "+ New" }), h("a", { class: "small", href: "#/procs", text: "Table view" })));
+    side.appendChild(search); side.appendChild(listBox);
+    var chains = [], selected = arg ? Number(arg) : null, streams = [], shownKey = null;
+    search.addEventListener("input", drawList);
+    S.cleanup.push(function () { streams.forEach(function (x) { x.close(); }); });
+
+    function drawList() {
+      var qy = search.value.trim().toLowerCase();
+      listBox.textContent = "";
+      var shown = chains.filter(function (c) { return !qy || c.procs.some(function (p) { return (p.prompt + " " + p.cwd + " " + p.node).toLowerCase().indexOf(qy) >= 0; }); });
+      if (!shown.length) listBox.appendChild(h("p", { class: "muted small", text: chains.length ? "No match." : "No sessions yet. Start one with + New." }));
+      shown.forEach(function (c) {
+        var on = c.procs.some(function (p) { return p.id === selected; });
+        listBox.appendChild(h("a", { class: "s-item" + (on ? " on" : ""), href: "#/sessions/" + c.last.id },
+          h("span", { class: "dot " + (DOT[c.last.status] || ""), title: c.last.status }),
+          h("span", { class: "s-title", text: firstLine(c.root.prompt, 70) }),
+          h("span", { class: "muted small", text: c.last.node + "  -  " + ago(c.last.started) + (c.last.pending && c.last.pending.length ? "  -  needs you" : "") })));
+      });
+    }
+    function chainOf(id) { return chains.find(function (c) { return c.procs.some(function (p) { return p.id === id; }); }); }
+
+    // The conversation: each process's prompt, then its events; tool steps fold.
+    var evs = {};
+    function drawChat() {
+      var c = chainOf(selected);
+      mid.textContent = "";
+      if (!c) { mid.appendChild(empty(chains.length ? "Pick a session on the left." : "No sessions yet: + New starts an agent.")); return; }
+      var atBottom = true;
+      var log = h("div", { class: "s-log" });
+      c.procs.forEach(function (p, i) {
+        log.appendChild(h("div", { class: "msg user" }, h("div", { class: "who", text: i === 0 ? "You" : "You (continued)" }), h("div", { class: "body", text: String(p.prompt || "").slice(0, 4000) })));
+        var fold = null;
+        function flush() { if (fold) { log.appendChild(fold.el); fold = null; } }
+        (evs[p.id] || []).forEach(function (e) {
+          if (e.kind === "user") { flush(); log.appendChild(h("div", { class: "msg user" }, h("div", { class: "who", text: "You" }), h("div", { class: "body", text: e.text }))); return; }
+          if (e.kind === "text" && !e.agent) { flush(); log.appendChild(h("div", { class: "msg agent" }, h("div", { class: "body", text: e.text }))); return; }
+          if (e.kind === "result") { flush(); return; }
+          if (e.kind === "exit") { flush(); log.appendChild(h("div", { class: "msg status " + (/^exited/.test(e.text) ? "ok" : "bad"), text: e.text })); return; }
+          if (!fold) {
+            var items = h("ul", { class: "steps-list" });
+            fold = { n: 0, items: items, sum: h("summary"), el: null };
+            fold.el = h("details", { class: "fold", keep: "fold:" + p.id + ":" + e.seq }, fold.sum, items);
+          }
+          fold.n++;
+          fold.items.appendChild(h("li", { class: e.kind }, e.agent ? h("span", { class: "pill", text: e.agent }) : null, " ", e.text));
+          fold.sum.textContent = fold.n === 1 ? e.text.slice(0, 120) : fold.n + " steps: " + e.text.slice(0, 90);
+        });
+        flush();
+      });
+      var last = c.last;
+      if ((last.pending || []).length && !ro) {
+        last.pending.forEach(function (a) {
+          log.appendChild(h("div", { class: "msg ask" }, h("b", { text: "It asks to use " + a.tool }),
+            h("pre", { class: "view small", text: JSON.stringify(a.input, null, 2).slice(0, 2000) }),
+            h("div", { class: "row" },
+              h("button", { type: "button", class: "primary", onclick: function () { answer(last.id, a.request_id, true); } }, "Allow"),
+              h("button", { type: "button", onclick: function () { answer(last.id, a.request_id, false); } }, "Deny"))));
+        });
+      }
+      if (last.status === "running") log.appendChild(h("div", { class: "msg status run", text: (last.pending || []).length ? "Waiting for you" : "Working..." }));
+      mid.appendChild(log);
+      // The box: a follow-up while it runs (queued for its next turn), or a
+      // continuation of the session once it ended.
+      if (!ro) {
+        var box = h("textarea", { rows: "2", placeholder: last.open ? "Reply (sent now, or queued until its current turn ends)" : last.can_resume && last.session ? "Continue this session" : "This agent cannot be continued (no session); start a new one" });
+        var go = h("button", { type: "submit", class: "primary" }, last.open ? "Send" : "Continue");
+        var stop = last.status === "running" ? h("button", { type: "button", class: "ghost", onclick: function () {
+          if (!window.confirm("Stop this agent?")) return;
+          api("/api/procs/" + last.id + "/stop", { method: "POST" }).then(refresh).catch(function (e) { toast(e.message, true); });
+        } }, "Stop") : null;
+        var form = h("form", { class: "s-input", "data-nodirty": "", onsubmit: function (e) {
+          e.preventDefault(); var t = box.value.trim(); if (!t) return; go.disabled = true;
+          var call = last.open ? api("/api/procs/" + last.id + "/message", { method: "POST", body: { text: t } })
+            : api("/api/procs/" + last.id + "/pivot", { method: "POST", body: { prompt: t, mode: "continue" } });
+          call.then(function (r) { box.value = ""; go.disabled = false; if (r && r.id) location.hash = "#/sessions/" + r.id; else refresh(); })
+            .catch(function (err) { toast(err.message, true); go.disabled = false; });
+        } }, box, h("div", { class: "row" }, go, stop, h("a", { class: "small", href: "#/proc/" + last.id, text: "Details" })));
+        box.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+        mid.appendChild(form);
+      }
+      if (atBottom) log.scrollTop = log.scrollHeight;
+    }
+    function answer(id, rid, allow) {
+      api("/api/procs/" + id + "/permission", { method: "POST", body: { request_id: rid, allow: allow, always: false } }).then(refresh).catch(function (e) { toast(e.message, true); });
+    }
+
+    // The side panel: where it works and what it did.
+    var wsFor = null, ws = null;
+    function drawPanel() {
+      var c = chainOf(selected); panel.textContent = "";
+      if (!c) return;
+      var p = c.last;
+      function sec(title) { var b = h("div", { class: "s-sec" }, h("h3", { text: title })); panel.appendChild(b); return b; }
+      var env = sec("Environment");
+      env.appendChild(h("div", { class: "kv" }, h("span", { text: "Machine" }), h("b", { text: p.node })));
+      env.appendChild(h("div", { class: "kv" }, h("span", { text: "Folder" }), h("code", { class: "small", text: p.cwd })));
+      if (ws && ws.git) env.appendChild(h("div", { class: "kv" }, h("span", { text: "Branch" }), h("code", { text: ws.branch })));
+      env.appendChild(h("div", { class: "kv" }, h("span", { text: "Agent" }), h("span", { text: p.runner + (p.model ? ", " + p.model : "") + (p.mode ? ", " + p.mode : "") })));
+      if (p.context_tokens && p.context_window) {
+        var pct = Math.min(100, Math.round(100 * p.context_tokens / p.context_window));
+        var fill = h("i"); fill.style.width = pct + "%";
+        sec("Context").appendChild(h("div", { class: "row" }, h("div", { class: "meter" + (pct > 80 ? " low" : "") }, fill), h("span", { class: "small", text: pct + "% of " + Math.round(p.context_window / 1000) + "k" })));
+      }
+      var todos = c.procs.slice().reverse().map(function (x) { return x.todos; }).find(function (t) { return Array.isArray(t) && t.length; });
+      if (todos) {
+        var tl = sec("Tasks").appendChild(h("ul", { class: "todos" }));
+        todos.forEach(function (t) { tl.appendChild(h("li", { class: t.status || "" }, h("span", { class: "tick", text: t.status === "completed" ? "\u2713" : t.status === "in_progress" ? "\u25cb" : "\u00b7" }), " ", t.content || t.activeForm || "")); });
+      }
+      var files = {}; c.procs.forEach(function (x) { (x.files || []).forEach(function (f) { files[f] = 1; }); });
+      var changed = ws && ws.changed ? ws.changed : null;
+      var ch = sec("Changes");
+      if (changed && changed.length) {
+        changed.slice(0, 100).forEach(function (f) {
+          ch.appendChild(h("button", { type: "button", class: "ghost file", title: "Show the diff", onclick: function () { showDiff(p.id, f.path); } }, h("span", { class: "fstat", text: f.status }), " ", f.path));
+        });
+      } else if (Object.keys(files).length) {
+        Object.keys(files).forEach(function (f) { ch.appendChild(h("div", { class: "small cmd", text: f })); });
+        if (ws && ws.local === false) ch.appendChild(h("p", { class: "muted small", text: "Diffs show for agents on this machine." }));
+      } else ch.appendChild(h("p", { class: "muted small", text: ws && ws.git ? "No changes in its folder." : "None yet." }));
+      var links = {}; c.procs.forEach(function (x) { (x.links || []).forEach(function (u) { links[u] = 1; }); });
+      if (Object.keys(links).length) {
+        var lk = sec("Pull requests and issues");
+        Object.keys(links).forEach(function (u) { var sh = u.replace("https://github.com/", ""); lk.appendChild(h("a", { class: "small block", href: safeUrl(u), target: "_blank", rel: "noopener noreferrer", text: sh })); });
+      }
+    }
+    function showDiff(id, path) {
+      api("/api/procs/" + id + "/diff" + q({ path: path })).then(function (d) {
+        var pre = h("pre", { class: "diff" });
+        d.diff.split("\n").forEach(function (l) { pre.appendChild(h("span", { class: /^\+(?!\+\+)/.test(l) ? "add" : /^-(?!--)/.test(l) ? "del" : /^@@/.test(l) ? "hunk" : "", text: l + "\n" })); });
+        var dlg = h("dialog", { class: "ask wide", "aria-label": "Diff of " + path }, h("div", { class: "row" }, h("h3", { text: path }), h("button", { type: "button", onclick: function () { dlg.close(); dlg.remove(); } }, "Close")),
+          d.diff ? pre : h("p", { class: "muted", text: "No difference." }), d.truncated ? h("p", { class: "muted small", text: "Shortened: the diff is large." }) : null);
+        dlg.addEventListener("cancel", function () { dlg.remove(); });
+        document.body.appendChild(dlg); dlg.showModal();
+      }).catch(function (e) { toast(e.message, true); });
+    }
+
+    // Live: one stream per process of the selected session.
+    function follow(c) {
+      var key = c.procs.map(function (p) { return p.id; }).join(",");
+      if (key === shownKey) return;
+      shownKey = key;
+      streams.forEach(function (x) { x.close(); }); streams = [];
+      c.procs.forEach(function (p) {
+        evs[p.id] = [];
+        var es = new EventSource("/api/procs/" + p.id + "/events");
+        var t = null;
+        es.onmessage = function (m) { try { evs[p.id].push(JSON.parse(m.data)); } catch (x) { /* skip */ } clearTimeout(t); t = setTimeout(drawChat, 120); };
+        streams.push(es);
+      });
+    }
+    function refresh() {
+      return api("/api/procs").then(function (procs) {
+        chains = sessionChains(procs);
+        if (!selected && chains.length) selected = chains[0].last.id;
+        var c = chainOf(selected);
+        if (c && c.last.id !== selected && arg == null) selected = c.last.id;
+        drawList();
+        if (c) {
+          follow(c);
+          if (wsFor !== c.last.id || c.last.status === "running") {
+            wsFor = c.last.id;
+            api("/api/procs/" + c.last.id + "/workspace").then(function (w) { ws = w; drawPanel(); }).catch(function () { ws = null; drawPanel(); });
+          }
+        }
+        drawChat(); drawPanel();
+      }).catch(function (e) { mid.textContent = e.message; });
+    }
+    refresh(); every(3000, function () { if (!document.activeElement || !mid.contains(document.activeElement)) refresh(); else api("/api/procs").then(function (p) { chains = sessionChains(p); drawList(); drawPanel(); }); });
   }
 
   function pageProcs(m) {
@@ -4220,7 +4416,7 @@
     S.cleanup = [];
     var parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
     var page = parts[0], arg = parts.length > 1 ? decodeURIComponent(parts.slice(1).join("/")) : undefined;
-    var navKey = { def: "agents", run: "runs", proc: "procs", workflow: "workflows", wfedit: "workflows", memory: "knowledge", delegate: "launch", plan: "procs" }[page] || page;
+    var navKey = { def: "agents", run: "runs", proc: "sessions", procs: "sessions", workflow: "workflows", wfedit: "workflows", memory: "knowledge", delegate: "launch", plan: "sessions" }[page] || page;
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       var on = a.dataset.route === navKey; a.classList.toggle("on", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -4253,6 +4449,7 @@
         workflow: function () { pageWorkflowRun(m, arg); },
         launch: function () { pageLaunch(m); },
         procs: function () { pageProcs(m); },
+        sessions: function () { pageSessions(m, arg); },
         proc: function () { pageProc(m, arg); },
         settings: function () { pageSettings(m, arg); },
         board: function () { pageBoard(m); },
