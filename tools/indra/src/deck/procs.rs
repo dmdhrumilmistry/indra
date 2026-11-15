@@ -112,6 +112,10 @@ pub struct ProcView {
     /// What its runs used, from Claude Code's result: fresh input, output,
     /// and input read from or written to the prompt cache.
     pub tokens: Option<Tokens>,
+    /// Its context at its first reply: mostly what it starts with before
+    /// doing anything (instructions, tool and MCP server definitions,
+    /// skills, CLAUDE.md, the prompt).
+    pub base_tokens: Option<u64>,
     /// MCP servers Claude Code reported at start: name and status
     /// (connected, failed, needs-auth, pending).
     pub mcp: Vec<(String, String)>,
@@ -170,6 +174,7 @@ struct State {
     context_tokens: Option<u64>,
     context_window: Option<u64>,
     tokens: Option<Tokens>,
+    base_tokens: Option<u64>,
     mcp: Vec<(String, String)>,
     files: Vec<String>,
     todos: Value,
@@ -203,6 +208,7 @@ impl State {
             context_tokens: None,
             context_window: None,
             tokens: None,
+            base_tokens: None,
             mcp: Vec::new(),
             files: Vec::new(),
             todos: Value::Null,
@@ -302,6 +308,8 @@ struct Saved {
     context_window: Option<u64>,
     #[serde(default)]
     tokens: Option<Tokens>,
+    #[serde(default)]
+    base_tokens: Option<u64>,
     mcp: Vec<(String, String)>,
     files: Vec<String>,
     todos: Value,
@@ -358,6 +366,7 @@ impl Proc {
                 context_tokens: st.context_tokens,
                 context_window: st.context_window,
                 tokens: st.tokens.clone(),
+                base_tokens: st.base_tokens,
                 mcp: st.mcp.clone(),
                 files: st.files.clone(),
                 todos: st.todos.clone(),
@@ -421,6 +430,7 @@ impl Proc {
         st.context_tokens = sv.context_tokens;
         st.context_window = sv.context_window;
         st.tokens = sv.tokens;
+        st.base_tokens = sv.base_tokens;
         st.mcp = sv.mcp;
         st.files = sv.files;
         st.todos = sv.todos;
@@ -540,6 +550,7 @@ impl Proc {
             context_tokens: st.context_tokens,
             context_window: st.context_window,
             tokens: st.tokens.clone(),
+            base_tokens: st.base_tokens,
             mcp: st.mcp.clone(),
             files: st.files.clone(),
             todos: st.todos.clone(),
@@ -949,7 +960,9 @@ impl Proc {
                             + n("cache_creation_input_tokens")
                             + n("output_tokens");
                         if total > 0 {
-                            self.state.lock().unwrap().context_tokens = Some(total);
+                            let mut st = self.state.lock().unwrap();
+                            st.context_tokens = Some(total);
+                            st.base_tokens.get_or_insert(total);
                         }
                     }
                 }
@@ -2192,6 +2205,7 @@ mod tests {
                 context_tokens: None,
                 context_window: None,
                 tokens: None,
+                base_tokens: None,
                 mcp: Vec::new(),
                 files: Vec::new(),
                 todos: Value::Null,
