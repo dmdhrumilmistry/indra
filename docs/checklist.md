@@ -135,6 +135,11 @@ their section; nothing is deleted, items are checked off with the change that di
       conversation with folded tool steps, reply or continue, approvals; a side panel with the
       machine, folder, branch, context, task list, changed files with diffs and linked PRs);
       finished sessions are kept on disk and come back after a restart
+- [x] Threat models (`sh-threat-model`, the threat-model workflow): data flows, trust boundaries
+      with their controls, STRIDE threats ranked by risk, a hunt plan; shown on the run's page; a
+      security review threat-models first and hunts only open threats
+- [x] Fewer tokens: recon reused when the code is unchanged, `since:<ref>` incremental reviews,
+      focus briefs per hunter, and tokens, cache share and cost per session in Sessions
 - [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options

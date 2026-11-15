@@ -1033,6 +1033,70 @@
 
   // A run's findings: change a status (with the reason), and compare with another run.
   var SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  // A run's threat model (threat-model.json, written by sh-threat-modeler):
+  // its trust boundaries with their controls, and its threats ranked by risk.
+  var STRIDE = { S: "Spoofing", T: "Tampering", R: "Repudiation", I: "Information disclosure", D: "Denial of service", E: "Elevation of privilege" };
+  function loc(l) { return l && l.file ? l.file + (l.line ? ":" + l.line : "") : ""; }
+  function runThreats(key) {
+    var box = h("div");
+    api("/api/run/file" + hq({ key: key, rel: "threat-model.json", max: 4194304 })).then(function (f) {
+      var tm;
+      try { tm = JSON.parse(f.text); } catch (e) { return; }
+      if (!tm || typeof tm !== "object") return;
+      var threats = Array.isArray(tm.threats) ? tm.threats : [], bounds = Array.isArray(tm.boundaries) ? tm.boundaries : [];
+      var bname = {}; bounds.forEach(function (b) { bname[b.id] = b.name || b.id; });
+      var open = threats.filter(function (t) { return t.status === "open"; });
+      var card = h("div", { class: "card tm" });
+      card.appendChild(h("h3", { text: "Threat model" }));
+      card.appendChild(h("p", { class: "small", text: bounds.length + " trust boundaries, " + threats.length + " threats, " + open.length + " open" + (tm.mode && tm.mode !== "code" ? " (" + tm.mode + ")" : "") }));
+      if (tm.summary) card.appendChild(h("p", { text: String(tm.summary) }));
+      if (bounds.length) {
+        card.appendChild(h("h4", { text: "Trust boundaries" }));
+        card.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["Boundary", "Controls", "Gaps"].map(function (x) { return h("th", { text: x }); }))),
+          h("tbody", null, bounds.map(function (b) {
+            var ctl = (Array.isArray(b.controls) ? b.controls : []).map(function (c) { return (c.name || "") + (loc(c) ? " (" + loc(c) + ")" : ""); });
+            var gaps = Array.isArray(b.gaps) ? b.gaps : [];
+            return h("tr", null, h("td", null, h("b", { text: b.name || b.id || "" })),
+              h("td", { class: "small", text: ctl.length ? ctl.join("; ") : "none found" }),
+              h("td", { class: "small" + (gaps.length ? " warn-text" : ""), text: gaps.join("; ") }));
+          })))));
+      }
+      if (threats.length) {
+        var show = h("select", { "aria-label": "Show threats" }, [["open", "open"], ["all", "all"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+        var tbody = h("tbody");
+        var rank = function (t) { var r = SEV_ORDER[t.risk]; return r == null ? 9 : r; };
+        var rows = function () {
+          tbody.textContent = "";
+          threats.slice().sort(function (a, b) { return rank(a) - rank(b); })
+            .filter(function (t) { return show.value === "all" || t.status === "open"; })
+            .forEach(function (t) {
+              var more = h("div", { class: "small muted" },
+                t.scenario ? h("div", { text: String(t.scenario) }) : null,
+                t.check ? h("div", null, h("b", { text: "Check: " }), String(t.check)) : null,
+                Array.isArray(t.locations) && t.locations.length ? h("div", { class: "mono", text: t.locations.map(loc).filter(Boolean).join("  ") }) : null);
+              tbody.appendChild(h("tr", null,
+                h("td", null, h("span", { class: "sev sev-" + (t.risk || "info"), text: t.risk || "?" })),
+                h("td", null, h("b", { text: (t.id ? t.id + ": " : "") + (t.title || "") }), more),
+                h("td", { class: "small", title: STRIDE[t.stride] || "", text: STRIDE[t.stride] || t.stride || "" }),
+                h("td", { class: "small", text: bname[t.boundary] || t.boundary || "" }),
+                h("td", null, h("span", { class: "pill" + (t.status === "open" ? " warn" : ""), text: t.status || "" })),
+                h("td", { class: "small", text: Array.isArray(t.classes) ? t.classes.join(", ") : "" })));
+            });
+          if (!tbody.childNodes.length) tbody.appendChild(h("tr", null, h("td", { colspan: "6", class: "muted", text: "No open threats." })));
+        };
+        show.addEventListener("change", rows);
+        card.appendChild(h("div", { class: "row" }, h("h4", { text: "Threats" }), h("label", { class: "small" }, "Show ", show)));
+        card.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["Risk", "Threat", "STRIDE", "Boundary", "Status", "Hunt"].map(function (x) { return h("th", { text: x }); }))), tbody)));
+        rows();
+      }
+      card.appendChild(h("p", { class: "muted small", text: "The diagram and the full write-up are in threat-model.md below." }));
+      box.appendChild(card);
+    }).catch(function () { /* no threat model in this run */ });
+    return box;
+  }
+
   function runFindings(key) {
     var box = h("div");
     api("/api/run/findings" + hq({ key: key })).then(function (r) {
@@ -1299,7 +1363,7 @@
 
   function pageRun(m, key) {
     var top = h("div"), body = h("div"), viewer = h("div");
-    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runFindings(key)); m.appendChild(body);
+    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
     var openRel = null, lastMod = 0;
     function showFile(rel) {
       openRel = rel;
@@ -2510,7 +2574,22 @@
       if (p.context_tokens && p.context_window) {
         var pct = Math.min(100, Math.round(100 * p.context_tokens / p.context_window));
         var fill = h("i"); fill.style.width = pct + "%";
-        sec("Context").appendChild(h("div", { class: "row" }, h("div", { class: "meter" + (pct > 80 ? " low" : "") }, fill), h("span", { class: "small", text: pct + "% of " + Math.round(p.context_window / 1000) + "k" })));
+        var cx = sec("Context");
+        cx.appendChild(h("div", { class: "row" }, h("div", { class: "meter" + (pct > 80 ? " low" : "") }, fill), h("span", { class: "small", text: pct + "% of " + Math.round(p.context_window / 1000) + "k" })));
+        if (pct > 60) cx.appendChild(h("p", { class: "muted small", text: "Every turn re-reads this context. For an unrelated task, start a new session: it costs less." }));
+      }
+      // Tokens over the whole session (all its continuations).
+      var tk = { input: 0, output: 0, cache_read: 0, cache_write: 0 }, cost = 0, any = false;
+      c.procs.forEach(function (x) {
+        if (x.tokens) { any = true; Object.keys(tk).forEach(function (k) { tk[k] += x.tokens[k] || 0; }); }
+        if (x.cost_usd) cost += x.cost_usd;
+      });
+      if (any) {
+        var read = tk.input + tk.cache_read + tk.cache_write, kfmt = function (n) { return n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "k" : String(n); };
+        var u = sec("Usage");
+        u.appendChild(h("div", { class: "kv" }, h("span", { text: "Input" }), h("span", { text: kfmt(read) + (read ? ", " + Math.round(100 * tk.cache_read / read) + "% from cache" : "") })));
+        u.appendChild(h("div", { class: "kv" }, h("span", { text: "Output" }), h("span", { text: kfmt(tk.output) })));
+        if (cost) u.appendChild(h("div", { class: "kv" }, h("span", { text: "Cost" }), h("span", { text: "$" + cost.toFixed(cost < 1 ? 4 : 2) })));
       }
       var todos = c.procs.slice().reverse().map(function (x) { return x.todos; }).find(function (t) { return Array.isArray(t) && t.length; });
       if (todos) {

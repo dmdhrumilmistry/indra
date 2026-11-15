@@ -118,7 +118,7 @@ Details to paste into the form:
 - **License:** MIT
 - **Category:** security
 - **Description:** Multi-agent application-security review harness. A router
-  skill dispatches to a full pipeline (recon, hunt, chain, verify, report)
+  skill dispatches to a full pipeline (recon, threat model, hunt, chain, verify, report)
   backed by 15 per-class vulnerability knowledge bases, using Graft for codebase
   mapping and SCA tooling for SBOM and CVE data. Outputs README, JSON, SARIF,
   HTML, and PDF.

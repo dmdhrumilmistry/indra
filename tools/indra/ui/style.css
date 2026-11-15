@@ -572,3 +572,8 @@ dialog.code .code-title { margin: 0; flex: 1; font-family: var(--mono, monospace
 .crumbs button { padding: 1px 4px; }
 .flist { display: grid; max-height: 320px; overflow: auto; }
 .ficon { display: inline-block; width: 12px; color: var(--muted); }
+.tm h4 { margin: 14px 0 6px; font-size: 13px; }
+.tm .row { margin-top: 14px; }
+.tm .row h4 { margin: 0; }
+.warn-text { color: var(--warn, #b45309); }
+.mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }

@@ -180,6 +180,13 @@
         }
       }
     },
+    "threats": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Threat ids from threat-model.json (e.g. T3) that this finding realises. Empty when there was no threat model."
+    },
     "chained_with": {
       "type": "array",
       "items": {

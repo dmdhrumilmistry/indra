@@ -90,16 +90,21 @@ nothing in any external tracker.
 ## Pipeline
 
 ```
-recon -> hunt (parallel, one per class) -> chain -> verify -> report
+recon -> threat model -> hunt (parallel, one per class with an open threat) -> chain -> verify -> report
 ```
 
 | Stage | Agent | What it produces |
 |---|---|---|
 | Recon | `sh-recon` | `recon.md`, `codebase-map.json`: stack, SBOM, known CVEs, attack surface |
+| Threat model | `sh-threat-modeler` | `threat-model.md`, `threat-model.json`, `focus-<class>.md`: data flows, trust boundaries and their controls, STRIDE threats ranked by risk, and where to hunt |
 | Hunt | `sh-hunter` (xN) | `findings.jsonl`, `attempts.md`: candidate findings, one agent per class |
 | Chain | `sh-chainer` | `chains.md`: multi-step escalations built from individual findings |
 | Verify | `sh-verifier` | `verified.jsonl`: exploitability verdict, payload, PoC, CVSS, confidence |
 | Report | `sh-reporter` | `README.md`, `findings.json`, `results.sarif`, `report.html`, `report.pdf` |
+
+Run the threat model on its own with `threat model this repo` (`sh-threat-model`), on a design
+document (`design:<file>`), or on a change (`since:<ref>`). A second review of the same code reuses
+the map, and `since:<ref>` reviews only what changed, so repeat reviews cost far fewer tokens.
 
 ## Knowledge bases
 

@@ -3,6 +3,18 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.12.0
+
+- **Threat models.** `threat model this repo` (or the threat-model workflow) maps the data flows, draws
+  the trust boundaries with the controls found at each, and ranks STRIDE threats by risk, with a data
+  flow diagram. It also works on a design document (`design:<file>`) or a change (`since:<ref>`). The
+  run's page shows the boundaries and the open threats.
+- **Reviews hunt where it matters.** A security review now threat-models first and hunts only the
+  classes with an open threat, each hunter starting from a short brief; findings link to their threats.
+- **Fewer tokens.** An unchanged codebase is not mapped twice, `since:<ref>` reviews only what changed,
+  and Sessions shows each session's tokens, cache share and cost, with a hint when a long context makes
+  every turn expensive.
+
 ## v0.11.0
 
 - **Sessions, like Claude Code online.** Your agents as conversations: a list on the left (search, New,
