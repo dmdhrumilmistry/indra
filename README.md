@@ -21,11 +21,18 @@
   <a href="tools/indra/README.md">CLI docs</a>
 </p>
 
-**indra** is a multi-agent **application-security review harness** for Claude Code and other AI agents.
-One request runs a team of specialist agents that **map** a codebase, **hunt** vulnerabilities with a
-per-class knowledge base, **chain** findings into escalations, **verify** real impact, and **report** to
-README, JSON, SARIF, HTML and PDF. Every run **remembers** what it learned, and the `indra` CLI gives you
-a web console to launch agents and watch them work.
+**indra** runs, watches and orchestrates AI coding agents (Claude Code, Codex, Gemini CLI, or a local
+model through Ollama) on your machines, and ships a multi-agent **application-security review harness**
+built on them.
+
+- **The harness.** One request runs a team of specialist agents that **map** a codebase, **hunt**
+  vulnerabilities with a per-class knowledge base, **chain** findings into escalations, **verify** real
+  impact, and **report** to README, JSON, SARIF, HTML and PDF. Every run **remembers** what it learned.
+- **The `indra` CLI** is one binary: a web console to launch agents, watch every tool call and steer
+  them; **workflows** of agents, skills and shell commands with conditions, loops and failure handling
+  (drawn in a graph editor, kept in your repository as code, or written by Claude from a description
+  through indra's **MCP server**); **boards** synced with Jira, GitHub, ClickUp and Linear; remote
+  **nodes** over SSH or a dial-in link; browser **terminals**; users and roles; and graph **memory**.
 
 ```
 /plugin marketplace add dmdhrumilmistry/indra
@@ -48,7 +55,7 @@ a web console to launch agents and watch them work.
     <td width="33%" valign="top">
       <h3>Watch it work</h3>
       <code>indra serve</code> shows every subagent, its tool calls, refused permissions and cost, live,
-      on this machine or remote ones over SSH, and <code>indra run</code> orchestrates them.
+      on this machine or remote ones, and workflows chain agents and commands with conditions and loops.
     </td>
   </tr>
 </table>
@@ -119,6 +126,9 @@ That's it. The console opens in your browser: launch agents, watch them, read th
 | Run agents on another machine too | install there the same way, then paste the line the console shows under **Nodes > Add a machine** |
 | Run Claude Code on a local model (Ollama) | `indra claude -m qwen3-coder --pull` |
 | Give a team accounts and roles | `indra user add alice` (see [users and roles](docs/guides/users-and-roles.md)) |
+| Build a workflow from a description | **Workflows > Create with Claude** in the console |
+| Let my own Claude Code design workflows | `claude mcp add indra -- indra mcp` |
+| Install with Rust instead | `cargo install --locked indra` |
 | Get the newest version | `indra update` (or `indra update --auto on` to stay up to date by itself) |
 | Tab completion in my shell | set up by the installer; else `indra completions --install` |
 | Uninstall | delete the `indra` file (`~/.local/bin/indra`, or `%LOCALAPPDATA%\Programs\indra` on Windows) |

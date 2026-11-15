@@ -36,7 +36,7 @@ irm https://raw.githubusercontent.com/dmdhrumilmistry/indra/main/install.ps1 | i
 ```
 
 Then `indra serve --open`. The installers also set up Tab completion for your shell. They take
-`INDRA_VERSION=indra-v0.2.0` for a specific release, `INDRA_INSTALL_DIR` for another folder
+`INDRA_VERSION=0.7.0` for a specific release, `INDRA_INSTALL_DIR` for another folder
 (default `~/.local/bin`, or `%LOCALAPPDATA%\Programs\indra`), `INDRA_AUTO_UPDATE=1` to turn on
 automatic updates, and `INDRA_NO_COMPLETIONS=1` to skip completion.
 
@@ -68,7 +68,7 @@ marked block (`# >>> indra completions >>>`) in `~/.bashrc`, `~/.zshrc` or `$PRO
 it; fish gets `~/.config/fish/completions/indra.fish`. `indra update` refreshes the script, so
 new commands complete after an update.
 
-**Prebuilt, by hand:** download `indra-<target>` from an `indra-v*`
+**Prebuilt, by hand:** download `indra-<target>` from a
 [release](https://github.com/dmdhrumilmistry/indra/releases) (each file has a `.sha256`, and
 `SHA256SUMS` lists them all), rename it to `indra` (`indra.exe` on Windows) and put it on your
 `PATH`. Builds exist for Linux (x86_64 and arm64, static, any distro), macOS (Apple silicon and
@@ -78,9 +78,11 @@ Intel) and Windows (x86_64).
 (`indra node connect`, or plain SSH) are the same file, like `gh` or `docker`: one download, one
 version to keep in step, no mismatched pieces.
 
-**From source** (any platform with [Rust](https://rustup.rs) 1.89+):
+**From crates.io or source** (any platform with [Rust](https://rustup.rs) 1.89+):
 
 ```bash
+cargo install --locked indra
+# or the newest code:
 cargo install --locked --git https://github.com/dmdhrumilmistry/indra indra
 # or, from a clone:
 cargo install --locked --path tools/indra

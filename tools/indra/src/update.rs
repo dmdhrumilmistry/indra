@@ -19,7 +19,7 @@ pub struct UpdateArgs {
     /// Only say whether a newer release exists
     #[arg(long)]
     check: bool,
-    /// Install this release (e.g. indra-v0.2.0, or 0.2.0) instead of the newest
+    /// Install this release (e.g. 0.7.0 or v0.7.0) instead of the newest
     #[arg(long)]
     version: Option<String>,
     /// Reinstall even when this is already the newest
@@ -132,7 +132,7 @@ pub fn notice(st: &mut State, at: u64) -> Option<String> {
     st.noticed = at;
     Some(format!(
         "indra {} is available (this is {}): run `indra update`, or `indra update --auto on` to stay up to date by itself",
-        latest.trim_start_matches("indra-v"),
+        latest.trim_start_matches("indra-v").trim_start_matches('v'),
         env!("CARGO_PKG_VERSION")
     ))
 }
@@ -197,7 +197,7 @@ pub fn summary() -> Value {
     let latest = st.latest.clone().filter(|t| newer_than_here(t));
     serde_json::json!({
         "current": env!("CARGO_PKG_VERSION"),
-        "available": latest.map(|t| t.trim_start_matches("indra-v").to_string()),
+        "available": latest.map(|t| t.trim_start_matches("indra-v").trim_start_matches('v').to_string()),
         "auto": st.auto,
         "error": if st.auto { st.error.clone() } else { None },
         "checks": !checks_off(),
@@ -274,18 +274,45 @@ async fn get(url: &str) -> Result<Bytes, String> {
     Err("too many redirects".into())
 }
 
-/// The newest indra release's tag (the repository has other releases too).
-async fn newest(api: &str) -> Result<String, String> {
+/// A release tag of indra: `v0.7.0`, or the older `indra-v0.6.0`.
+fn is_release_tag(t: &str) -> bool {
+    let rest = t.strip_prefix("indra-v").or_else(|| t.strip_prefix('v'));
+    rest.is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// The published releases' tags (not drafts or pre-releases).
+async fn release_tags(api: &str) -> Result<Vec<String>, String> {
     let body = get(&format!("{}?per_page=50", api)).await?;
     let list: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    list.as_array()
+    Ok(list
+        .as_array()
         .into_iter()
         .flatten()
         .filter(|r| r["draft"] != true && r["prerelease"] != true)
         .filter_map(|r| r["tag_name"].as_str())
-        .find(|t| t.starts_with("indra-v"))
+        .filter(|t| is_release_tag(t))
         .map(String::from)
+        .collect())
+}
+
+/// The newest indra release's tag, by version.
+async fn newest(api: &str) -> Result<String, String> {
+    release_tags(api)
+        .await?
+        .into_iter()
+        .filter(|t| parse(t).is_some())
+        .max_by_key(|t| parse(t))
         .ok_or_else(|| "no indra release found".to_string())
+}
+
+/// The tag of a given version: `v0.7.0`, or `indra-v0.5.0` for older ones.
+async fn tag_of(api: &str, want: &str) -> Result<String, String> {
+    let w = parse(want).ok_or_else(|| format!("{} is not a version", want))?;
+    release_tags(api)
+        .await?
+        .into_iter()
+        .find(|t| parse(t) == Some(w))
+        .ok_or_else(|| format!("there is no release {}", want))
 }
 
 pub fn run(a: UpdateArgs) -> Result<ExitCode, String> {
@@ -355,8 +382,7 @@ async fn go(a: UpdateArgs) -> Result<ExitCode, String> {
     let api = api();
     asset().ok_or("there is no prebuilt indra for this machine; build it from source")?;
     let tag = match &a.version {
-        Some(v) if v.starts_with("indra-v") => v.clone(),
-        Some(v) => format!("indra-v{}", v.trim_start_matches('v')),
+        Some(v) => tag_of(&api, v).await?,
         None => newest(&api).await?,
     };
     let here = env!("CARGO_PKG_VERSION");
@@ -528,6 +554,9 @@ mod tests {
                 "/releases",
                 axum::routing::get(|| async {
                     axum::Json(serde_json::json!([
+                        { "tag_name": "v0.9.0", "draft": true },
+                        { "tag_name": "v0.2.0" },
+                        { "tag_name": "v0.7.0" },
                         { "tag_name": "indra-v0.4.0", "draft": true },
                         { "tag_name": "v0.2.0" },
                         { "tag_name": "indra-v0.3.0-rc1", "prerelease": true },
@@ -546,7 +575,22 @@ mod tests {
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         assert_eq!(
             newest(&format!("{}/releases", url)).await.unwrap(),
+            "v0.7.0"
+        );
+        assert_eq!(
+            tag_of(&format!("{}/releases", url), "0.3.0").await.unwrap(),
             "indra-v0.3.0"
+        );
+        assert_eq!(
+            tag_of(&format!("{}/releases", url), "v0.7.0")
+                .await
+                .unwrap(),
+            "v0.7.0"
+        );
+        assert!(tag_of(&format!("{}/releases", url), "0.8.0").await.is_err());
+        assert_eq!(
+            newest(&format!("{}/releases", url)).await.unwrap(),
+            "v0.7.0"
         );
         assert_eq!(
             &get(&format!("{}/moved", url)).await.unwrap()[..],

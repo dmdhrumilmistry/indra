@@ -6,7 +6,7 @@
 # %LOCALAPPDATA%\Programs\indra (or $env:INDRA_INSTALL_DIR), adds that folder
 # to your PATH, and tells you the one command to run next. Run it again to update.
 #
-# Settings (all optional): $env:INDRA_VERSION = "indra-v0.2.0", $env:INDRA_INSTALL_DIR,
+# Settings (all optional): $env:INDRA_VERSION = "0.7.0", $env:INDRA_INSTALL_DIR,
 # $env:INDRA_NO_MODIFY_PATH = "1", $env:INDRA_RELEASES_URL, $env:INDRA_DOWNLOAD_URL,
 # $env:INDRA_NO_COMPLETIONS = "1" (no Tab completion), $env:INDRA_AUTO_UPDATE = "1"
 # (keep indra up to date by itself).
@@ -23,14 +23,17 @@ $headers = @{ "User-Agent" = "indra-installer" }
 if (-not [Environment]::Is64BitOperatingSystem) { throw "indra needs 64-bit Windows." }
 $asset = "indra-x86_64-pc-windows-msvc.exe"
 
-# The newest indra-v* release (the repository has other releases too).
-$tag = $env:INDRA_VERSION
-if (-not $tag) {
-  $releases = Invoke-RestMethod -Uri "$($api)?per_page=50" -Headers $headers
-  $tag = ($releases | Where-Object { $_.tag_name -like "indra-v*" -and -not $_.draft } | Select-Object -First 1).tag_name
-  if (-not $tag) { throw "No indra release found yet." }
+# The release asked for, else the newest (tags v0.7.0, or indra-v0.6.0 and
+# older; GitHub lists the newest first).
+$releases = Invoke-RestMethod -Uri "$($api)?per_page=50" -Headers $headers
+$tags = @($releases | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^(indra-)?v[0-9]' } | ForEach-Object { $_.tag_name })
+if ($env:INDRA_VERSION) {
+  $want = $env:INDRA_VERSION -replace '^indra-v', '' -replace '^v', ''
+  $tag = $tags | Where-Object { $_ -eq "v$want" -or $_ -eq "indra-v$want" } | Select-Object -First 1
+} else {
+  $tag = $tags | Select-Object -First 1
 }
-if ($tag -notlike "indra-v*") { $tag = "indra-v$tag" }
+if (-not $tag) { throw "No indra release $($env:INDRA_VERSION) found." }
 
 $base = if ($env:INDRA_DOWNLOAD_URL) { $env:INDRA_DOWNLOAD_URL } else { "https://github.com/$repo/releases/download" }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("indra-" + [Guid]::NewGuid())

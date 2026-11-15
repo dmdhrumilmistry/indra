@@ -8,7 +8,7 @@
 # tells you the one command to run next. Run it again to update.
 #
 # Settings (all optional):
-#   INDRA_VERSION=indra-v0.2.0     a specific release instead of the newest
+#   INDRA_VERSION=0.7.0            a specific release instead of the newest
 #   INDRA_INSTALL_DIR=/usr/local/bin   where to put it
 #   INDRA_NO_MODIFY_PATH=1         do not add the folder to your shell's PATH
 #   INDRA_NO_COMPLETIONS=1         do not set up Tab completion for your shell
@@ -52,15 +52,18 @@ asset="indra-$target"
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t indra)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# Which release: the one asked for, else the newest indra-v* (the repository
-# also has other releases, so "latest" is not enough).
-tag="${INDRA_VERSION:-}"
-if [ -z "$tag" ]; then
-  fetch "$API?per_page=50" "$tmp/releases.json" || fail "cannot reach GitHub to find the newest release"
-  tag=$(tr ',' '\n' < "$tmp/releases.json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(indra-v[^"]*\)".*/\1/p' | head -n 1)
-  [ -n "$tag" ] || fail "no indra release found yet"
+# Which release: the one asked for, else the newest (tags v0.7.0, or
+# indra-v0.6.0 and older; GitHub lists the newest first).
+fetch "$API?per_page=50" "$tmp/releases.json" || fail "cannot reach GitHub to find the release"
+tags=$(tr ',' '\n' < "$tmp/releases.json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(\(indra-\)\{0,1\}v[0-9][^"]*\)".*/\1/p')
+want="${INDRA_VERSION:-}"
+if [ -z "$want" ]; then
+  tag=$(printf '%s\n' "$tags" | head -n 1)
+else
+  want="${want#indra-v}"; want="${want#v}"
+  tag=$(printf '%s\n' "$tags" | grep -x -e "v$want" -e "indra-v$want" | head -n 1)
 fi
-case "$tag" in indra-v*) ;; *) tag="indra-v$tag" ;; esac
+[ -n "$tag" ] || fail "no indra release ${INDRA_VERSION:-found yet}"
 
 base="${INDRA_DOWNLOAD_URL:-https://github.com/$REPO/releases/download}/$tag"
 say "Installing indra $tag for $target ..."
