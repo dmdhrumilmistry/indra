@@ -452,7 +452,7 @@ fn a_machine_joins_with_one_code_runs_jobs_and_can_be_removed() {
     );
     let log = std::fs::read_to_string(h.dir.join("join.log")).unwrap();
     assert!(
-        log.contains(&format!("Joined {} as '{}'", hub_url, name)),
+        log.contains(&format!("Joining {} and staying connected", hub_url)),
         "{}",
         log
     );
@@ -474,6 +474,50 @@ fn a_machine_joins_with_one_code_runs_jobs_and_can_be_removed() {
         (p["status"] != "running").then_some(p)
     });
     assert_eq!(p["status"], "exited", "{}", p);
+
+    // Where agents work is set from the console, anywhere on the machine
+    // (not where indra runs): browsed over the link, kept by the machine.
+    let other = h.dir.join("node-home").join("projects").join("app");
+    std::fs::create_dir_all(&other).unwrap();
+    let other = std::fs::canonicalize(&other).unwrap().display().to_string();
+    let (s, body) = http(
+        h.port,
+        "GET",
+        &format!(
+            "/api/nodes/{}/dirs?path={}",
+            name,
+            h.dir.join("node-home").join("projects").display()
+        ),
+        "",
+    );
+    assert_eq!(s, 200, "{}", body);
+    assert_eq!(json(&body)["dirs"], serde_json::json!(["app"]), "{}", body);
+    let put = |list: &str| {
+        http(
+            h.port,
+            "PUT",
+            &format!("/api/nodes/{}/folders", name),
+            &format!(r#"{{"folders":[{}]}}"#, list),
+        )
+    };
+    let (s, body) = put(r#""/no/such/folder""#);
+    assert_eq!(s, 400, "{}", body);
+    let (s, body) = put(&format!("{:?}", other));
+    assert_eq!(s, 200, "{}", body);
+    let (_, body) = http(h.port, "GET", "/api/nodes", "");
+    let v = json(&body);
+    let n = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["name"] == name.as_str())
+        .unwrap();
+    assert_eq!(n["targets"], serde_json::json!([other]), "{}", n);
+    let mut c = Command::new(INDRA);
+    c.args(["node", "folders"]);
+    env(&mut c);
+    let out = String::from_utf8_lossy(&c.output().unwrap().stdout).to_string();
+    assert_eq!(out.trim(), other, "kept on the machine");
 
     // The code worked once.
     let mut again = Command::new(INDRA);

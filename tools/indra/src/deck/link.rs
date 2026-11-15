@@ -373,6 +373,13 @@ impl NodeLink {
         })
     }
 
+    /// New folders the node accepted (from the console).
+    pub fn set_targets(&self, list: &[String]) {
+        if let Some(h) = self.hello.lock().unwrap().as_mut() {
+            h["targets"] = json!(list);
+        }
+    }
+
     /// The targets the node reported (used when the hub's config lists none).
     pub fn targets(&self) -> Vec<String> {
         self.hello
@@ -930,6 +937,8 @@ struct NodeState {
     hub: Mutex<Option<String>>,
     /// STUN/TURN servers the hub announced.
     ice: Mutex<Vec<IceServer>>,
+    /// Folders agents may work in here (the console can change them).
+    targets: Mutex<Vec<String>>,
 }
 
 #[cfg(feature = "webrtc")]
@@ -1038,6 +1047,7 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
     }
     let settings = Arc::new(settings);
     let state = Arc::new(NodeState::default());
+    *state.targets.lock().unwrap() = targets.clone();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(u64, u64)>();
     let mut backoff = 1u64;
     let mut away_since: Option<u64> = None;
@@ -1079,11 +1089,23 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
                             format!("the hub cannot add this machine: {}", why)
                         });
                     }
-                    if status == 401 && key.is_some() {
+                    // Removed in the console: stop for good.
+                    if status == 410 && key.is_some() {
                         return Err(format!(
-                            "the hub no longer knows this machine as '{}' ({}): join again with a new code (Machines > Add a machine)",
-                            name, why
+                            "this machine ('{}') was removed from {}: to add it again, join with a new code (Machines > Add a machine)",
+                            name, base
                         ));
+                    }
+                    // Not known right now (the hub may run with another
+                    // indra.toml for a while): keep trying, slowly.
+                    if status == 401 && key.is_some() {
+                        eprintln!(
+                            "indra: {} does not know this machine as '{}' ({}); trying again every minute (`indra node leave` stops this)",
+                            base, name, why
+                        );
+                        away_since.get_or_insert(now());
+                        tokio::time::sleep(jitter(60)).await;
+                        continue;
                     }
                 }
                 eprintln!(
@@ -1107,13 +1129,17 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
         let mut peer: NodePeer = None;
         let hello = json!({
             "t": "hello", "version": env!("CARGO_PKG_VERSION"), "info": crate::deck::nodes::local_info(&settings),
-            "targets": targets, "webrtc": o.webrtc && cfg!(feature = "webrtc"),
+            "targets": state.targets.lock().unwrap().clone(), "webrtc": o.webrtc && cfg!(feature = "webrtc"),
             "jobs": state.jobs.lock().unwrap().keys().collect::<Vec<_>>(),
         });
-        if sink
-            .send(Message::Text(hello.to_string().into()))
-            .await
-            .is_err()
+        // Only joining (`indra join` hands over to the background link): no
+        // hello, so the hub does not take this short connection as the one
+        // to send jobs to.
+        if !o.once
+            && sink
+                .send(Message::Text(hello.to_string().into()))
+                .await
+                .is_err()
         {
             tokio::time::sleep(jitter(backoff)).await;
             continue;
@@ -1134,7 +1160,7 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
                     Some(Ok(Message::Text(t))) => {
                         last_seen = now();
                         let t = t.to_string();
-                        node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &mut name, &targets, &mut peer, &inbound_tx).await;
+                        node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &mut name, &mut peer, &inbound_tx).await;
                         if o.once && key.is_some() && code.is_none() {
                             return Ok(());
                         }
@@ -1144,7 +1170,7 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
                 },
                 Some(t) = inbound.recv() => {
                     last_seen = now();
-                    node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &mut name, &targets, &mut peer, &inbound_tx).await;
+                    node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &mut name, &mut peer, &inbound_tx).await;
                         if o.once && key.is_some() && code.is_none() {
                             return Ok(());
                         }
@@ -1212,7 +1238,6 @@ async fn node_frame(
     code: &mut Option<String>,
     hub: &str,
     name: &mut String,
-    targets: &[String],
     peer: &mut NodePeer,
     _inbound: &mpsc::UnboundedSender<String>,
 ) -> Option<()> {
@@ -1232,7 +1257,7 @@ async fn node_frame(
                 hub: hub.into(),
                 name: name.clone(),
                 key: k.clone(),
-                targets: targets.to_vec(),
+                targets: state.targets.lock().unwrap().clone(),
             };
             match save(&saved) {
                 Ok(p) => eprintln!("indra: joined as {}; the key is in {}", name, p.display()),
@@ -1268,6 +1293,29 @@ async fn node_frame(
                 "run_files" => serde_json::from_value::<crate::deck::nodes::RunFilesReq>(args)
                     .map_err(|e| format!("bad run_files request: {}", e))
                     .and_then(crate::deck::nodes::run_files),
+                // The console's folder browser: folder names only, never files.
+                "dirs" => crate::deck::nodes::list_dirs(args.get("path").and_then(Value::as_str)),
+                // The console sets the folders agents may work in here.
+                "set_folders" => {
+                    let want: Vec<String> = args
+                        .get("folders")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    crate::deck::nodes::check_folders(&want).and_then(|list| {
+                        if let Some(mut sv) = saved().filter(|sv| sv.hub == hub && sv.name == *name)
+                        {
+                            sv.targets = list.clone();
+                            save(&sv)?;
+                        }
+                        *state.targets.lock().unwrap() = list.clone();
+                        Ok(json!(list))
+                    })
+                }
                 other => Err(format!("unknown request {:?}", other)),
             };
             let f = match r {

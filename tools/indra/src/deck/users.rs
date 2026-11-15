@@ -355,6 +355,10 @@ pub fn needed(method: &str, path: &str) -> Role {
     {
         return Role::Admin;
     }
+    // Browsing a machine's folders, and changing where agents work.
+    if under("/api/nodes") && (path.ends_with("/dirs") || path.ends_with("/folders")) {
+        return Role::Admin;
+    }
     if read {
         return Role::Viewer;
     }
@@ -369,6 +373,7 @@ pub fn needed(method: &str, path: &str) -> Role {
         "/api/tools/skills",
         "/api/tools/site",
         "/api/nodes/enrol",
+        "/api/ollama/default",
         "/api/workflow-files",
     ]
     .iter()

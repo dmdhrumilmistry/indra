@@ -55,6 +55,11 @@ nav a.on { background: var(--accent); color: var(--accent-fg); }
 .cmdbox { position: relative; }
 .cmdbox pre { margin: 0; padding-right: 72px; white-space: pre-wrap; word-break: break-all; }
 .cmdbox button { position: absolute; top: 6px; right: 6px; }
+.folders .folder { justify-content: space-between; flex-wrap: nowrap; }
+.folders .folder .cmd { overflow-wrap: anywhere; }
+.browser { display: grid; gap: 8px; }
+.dirlist { display: flex; flex-wrap: wrap; gap: 4px; max-height: 260px; overflow: auto; }
+.dirlist .dir { font-family: var(--mono, monospace); font-size: 12px; }
 .joined { border-left: 3px solid var(--ok, #2f8f5b); }
 .side-foot { margin-top: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 6px; font-size: 12px; }
 main { overflow: auto; padding: 24px 28px 48px; }

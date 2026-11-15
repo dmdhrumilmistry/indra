@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -341,6 +341,85 @@ pub const RUN_FILE_MAX: u64 = 4 << 20;
 /// One run's text files on this machine, for the hub to open a copy:
 /// `{files: [{rel, text}], skipped: [rel]}`. Binary and oversized files are
 /// skipped, never sent partially.
+/// A folder as agents get it: absolute and canonical (no `\\?\` on Windows).
+pub fn clean_dir(p: &Path) -> Result<String, String> {
+    let c = std::fs::canonicalize(p).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{}: no such folder on this machine", p.display()),
+        _ => format!("{}: {}", p.display(), e),
+    })?;
+    if !c.is_dir() {
+        return Err(format!("{} is not a folder", p.display()));
+    }
+    let s = c.display().to_string();
+    Ok(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
+}
+
+/// Folders to work in, checked: each exists here, no duplicates.
+pub fn check_folders(want: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in want.iter().map(|w| w.trim()).filter(|w| !w.is_empty()) {
+        let p = if let Some(rest) = w.strip_prefix("~") {
+            crate::paths::home()
+                .ok_or("no home folder")?
+                .join(rest.trim_start_matches(['/', '\\']))
+        } else {
+            PathBuf::from(w)
+        };
+        if !p.is_absolute() {
+            return Err(format!(
+                "{}: give the full path (e.g. D:\\work or /home/me/code)",
+                w
+            ));
+        }
+        let c = clean_dir(&p)?;
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// The folder browser: the folders in `path` (default: the home folder),
+/// its parent, and where to start (home, and the drives on Windows).
+/// Names of folders only; files are not listed.
+pub fn list_dirs(path: Option<&str>) -> Result<Value, String> {
+    let home = crate::paths::home();
+    let dir = match path.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => home.clone().ok_or("no home folder")?,
+    };
+    let here = clean_dir(&dir)?;
+    let mut dirs: Vec<String> = std::fs::read_dir(&here)
+        .map_err(|e| format!("{}: {}", here, e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.') && !n.starts_with('$'))
+        .collect();
+    dirs.sort_by_key(|a| a.to_lowercase());
+    let more = dirs.len() > 500;
+    dirs.truncate(500);
+    let mut roots: Vec<Value> = home
+        .iter()
+        .map(|h| json!({ "label": "Home", "path": h.display().to_string() }))
+        .collect();
+    if cfg!(windows) {
+        for d in b'C'..=b'Z' {
+            let r = format!("{}:\\", d as char);
+            if Path::new(&r).is_dir() {
+                roots.push(json!({ "label": r, "path": r }));
+            }
+        }
+    } else {
+        roots.push(json!({ "label": "/", "path": "/" }));
+    }
+    let parent = Path::new(&here).parent().map(|p| p.display().to_string());
+    Ok(json!({
+        "path": here, "parent": parent, "dirs": dirs, "more": more, "roots": roots,
+        "sep": std::path::MAIN_SEPARATOR.to_string(),
+    }))
+}
+
 pub fn run_files(r: RunFilesReq) -> Result<Value, String> {
     if r.name.is_empty() || r.name.contains(['/', '\\']) || r.name.starts_with('.') {
         return Err("bad run name".into());
@@ -703,7 +782,8 @@ pub async fn run_job(
 }
 
 /// Claude Code's permission modes.
-pub const PERMISSION_MODES: [&str; 6] = [
+pub const PERMISSION_MODES: [&str; 7] = [
+    "default",
     "manual",
     "acceptEdits",
     "auto",
@@ -747,6 +827,51 @@ pub struct AgentOpts {
 
 /// Where Ollama listens unless a profile says otherwise.
 pub const OLLAMA_URL: &str = "http://localhost:11434";
+
+fn prefs_path() -> PathBuf {
+    crate::paths::data_dir().join("prefs.json")
+}
+
+/// This machine's Ollama server when a profile names none: the one saved in
+/// the console (Tools > Local models > Save as default), else localhost.
+pub fn default_ollama_url() -> String {
+    saved_ollama_url().unwrap_or_else(|| OLLAMA_URL.to_string())
+}
+
+/// The Ollama server saved in the console, if one was.
+pub fn saved_ollama_url() -> Option<String> {
+    std::fs::read_to_string(prefs_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            v.get("ollama_url")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .filter(|u| !u.trim().is_empty())
+}
+
+/// Save (or with `None`, forget) this machine's default Ollama server.
+pub fn set_default_ollama_url(url: Option<&str>) -> Result<(), String> {
+    let p = prefs_path();
+    let mut v: Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    match url.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(u) => v["ollama_url"] = json!(u.trim_end_matches('/')),
+        None => {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("ollama_url");
+            }
+        }
+    }
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap_or_default())
+        .map_err(|e| format!("{}: {}", p.display(), e))
+}
 /// The providers a profile can name.
 pub const PROVIDERS: [&str; 2] = ["anthropic", "ollama"];
 
@@ -856,7 +981,8 @@ impl AgentOpts {
         self.ollama_url
             .as_deref()
             .filter(|u| !u.trim().is_empty())
-            .unwrap_or(OLLAMA_URL)
+            .map(String::from)
+            .unwrap_or_else(default_ollama_url)
             .trim_end_matches('/')
             .to_string()
     }
@@ -1326,5 +1452,37 @@ mod tests {
         );
         assert!(a.contains(&"BatchMode=yes".to_string()));
         assert!(a.windows(2).any(|w| w[0] == "-p" && w[1] == "2222"));
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn folders_are_checked_and_browsed_by_name_only() {
+        let dir = std::env::temp_dir().join(format!("indra-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("b-app")).unwrap();
+        std::fs::create_dir_all(dir.join("A-app")).unwrap();
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+        std::fs::write(dir.join("file.txt"), "x").unwrap();
+        let a = dir.join("A-app").display().to_string();
+        // Real folders, made absolute and canonical, once each.
+        let got = check_folders(&[a.clone(), format!("  {}  ", a), String::new()]).unwrap();
+        assert_eq!(got, vec![clean_dir(&dir.join("A-app")).unwrap()]);
+        assert!(check_folders(&["relative/dir".into()])
+            .unwrap_err()
+            .contains("full path"));
+        assert!(check_folders(&[dir.join("nope").display().to_string()])
+            .unwrap_err()
+            .contains("no such folder"));
+        assert!(check_folders(&[dir.join("file.txt").display().to_string()]).is_err());
+        // The browser: folders only, sorted, no hidden ones, a way up.
+        let v = list_dirs(Some(&dir.display().to_string())).unwrap();
+        assert_eq!(v["dirs"], json!(["A-app", "b-app"]), "{}", v);
+        assert!(v["parent"].is_string());
+        assert_eq!(v["roots"][0]["label"], "Home");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

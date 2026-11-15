@@ -106,6 +106,17 @@ their section; nothing is deleted, items are checked off with the change that di
       **Remove** in the console
 - [x] Joining works on a console that listens on the network (its settings are locked there:
       "Add a machine" used to fail without a visible error)
+- [x] Folders agents work in are changed from the console for every machine (this one too):
+      a folder browser over the machine's link (names only), checked and kept by the machine
+- [x] Machines reconnect after the hub or the machine was down; a machine the hub does not know
+      keeps retrying (the hub may run with another config), and stops only when removed; a
+      supervisor restarts a background link that failed (Windows, Linux without systemd)
+- [x] Blank selects everywhere: a select set to a value it has no option for (Claude's `default`
+      permission mode) now shows that value
+- [x] Workflow step Output stays open while the page refreshes
+- [x] The process page lists the agent's MCP servers and says how to fix one that failed or
+      needs a login
+- [x] The default Ollama server can be saved (Tools > Local models > Save as default)
 - [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options

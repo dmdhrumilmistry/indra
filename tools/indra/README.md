@@ -842,7 +842,9 @@ indra join http://192.168.1.20:7878 ABCDE-FGHJK   # optional: --name build-box -
 its system, CPUs and installed agents, lets agents work in the folder it ran in, and keeps the
 link running in the background, started again at log-in or boot (a systemd user service on Linux,
 a launchd agent on macOS, a sign-in entry on Windows; `--foreground` stays in the terminal). The
-console shows the machine as soon as it joins. On the machine, `indra node status` says which hub
+console shows the machine as soon as it joins. The folders agents work in are changed on its card
+(**Change**, with a folder browser that walks the machine's folders over its link); they need
+not be where indra is installed. On the machine, `indra node status` says which hub
 it joined and how its link runs, `indra node folders` lists or changes the folders agents may use,
 and `indra node leave` undoes it all. **Remove** on its card in the console disconnects it and
 deletes its key. The step-by-step guide, with troubleshooting, is

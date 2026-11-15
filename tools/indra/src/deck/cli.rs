@@ -805,6 +805,9 @@ pub enum NodeCmd {
     },
     /// Which hub this machine joined, and whether its link runs by itself
     Status,
+    /// Keep `node connect` running, restarting it if it fails (background links use this)
+    #[command(hide = true)]
+    Supervise,
     /// The folders agents may work in here: list them, or set them (restarts the link)
     Folders {
         /// New folders (replace the current ones)
@@ -869,6 +872,21 @@ pub fn run_join(a: JoinArgs) -> Result<ExitCode, String> {
         ));
     }
     let info = nodes::local_info(&s);
+    if a.foreground {
+        // One connection: join and stay on it.
+        println!("Joining {} and staying connected in this terminal (Ctrl+C stops it; `indra node connect` starts it again) ...", hub);
+        return run_link(
+            s,
+            crate::deck::link::ConnectOpts {
+                hub: Some(hub),
+                name: a.name.clone(),
+                code: Some(a.code.clone()),
+                targets,
+                webrtc: !a.no_webrtc,
+                once: false,
+            },
+        );
+    }
     println!("Joining {} ...", hub);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -924,16 +942,6 @@ pub fn run_join(a: JoinArgs) -> Result<ExitCode, String> {
         }
     );
     println!("  folders  {}", saved.targets.join(", "));
-    if a.foreground {
-        println!("\nStaying connected in this terminal (Ctrl+C stops it; `indra node connect` starts it again).");
-        return run_link(
-            s,
-            crate::deck::link::ConnectOpts {
-                webrtc: !a.no_webrtc,
-                ..Default::default()
-            },
-        );
-    }
     match crate::deck::autostart::install(a.config.as_deref()) {
         Ok(how) => {
             println!("  runs as  {}", how);
@@ -963,7 +971,7 @@ fn run_link(s: config::Settings, o: crate::deck::link::ConnectOpts) -> Result<Ex
         .map_err(|e| e.to_string())?;
     match rt.block_on(crate::deck::link::connect(s, o)) {
         // Removed on the hub: nothing to do, and no restart (see autostart).
-        Err(e) if e.contains("no longer knows") => {
+        Err(e) if e.contains("was removed from") => {
             eprintln!("indra: {}", e);
             Ok(ExitCode::SUCCESS)
         }
@@ -1105,6 +1113,7 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
                 },
             )
         }
+        NodeCmd::Supervise => crate::deck::autostart::supervise(opts.config.as_deref()),
         NodeCmd::Status => {
             let Some(sv) = crate::deck::link::saved() else {
                 println!("This machine has not joined a hub. In the hub's console: Machines > Add a machine, then run the command it shows here.");

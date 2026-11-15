@@ -35,8 +35,9 @@ The console waits on the same page and shows the machine as soon as it joins: it
 CPUs and the agents installed on it (Claude Code, Codex, Gemini). Click **Run an agent there**.
 
 The machine names itself after its computer name, and agents work in the folder where you ran the
-command. To choose either, open **Options: name and folder** before copying the command, or
-pass them to `indra join`:
+command. That is only a starting point: change it any time from the console (see
+[Where agents work](#where-agents-work)). To choose either up front, open **Options: name and
+folder** before copying the command, or pass them to `indra join`:
 
 ```bash
 indra join http://192.168.1.20:7878 ABCDE-FGHJK --name win-box --target D:\work
@@ -64,10 +65,39 @@ The code works once, for an hour. Typing it in lower case is fine.
   No administrator rights are needed on any of them. Pass `--foreground` to stay in the
   terminal instead.
 
+**If a machine or the hub goes down, they find each other again by themselves.** The link
+reconnects as soon as the hub answers (it retries every few seconds, then every minute). If the
+link process itself stops, the background service starts it again (systemd and launchd do; on
+Windows, and on Linux without systemd, a small supervisor does). If the hub is restarted with a
+different `indra.toml` that does not list the machine, the machine keeps trying once a minute
+and reconnects when the hub is back on its own settings. It stops only when you remove it in the
+console, or run `indra node leave` on it.
+
 The link is outbound only: the machine connects to the hub, so it needs no open port and no SSH
 account, and works from behind a home router. Hub and machine then talk directly over an
 encrypted WebRTC channel when they can, and through the hub when they cannot. If the network
 drops, the machine reconnects by itself and running agents lose no output.
+
+## Where agents work
+
+Each machine has a list of folders agents may work in. Agents start only in those folders, and
+they do not have to be where indra is installed or where you ran the join command.
+
+To change them, click **Change** next to **Folders agents work in** on the machine's card:
+
+- **Browse...** walks the machine's folders (it shows folder names only, never files). Open
+  the one you want and click **Use this folder**. **Up** goes one level up; **Home** and, on
+  Windows, each drive (`C:\`, `D:\`) jump straight there.
+- Or type a full path (`D:\code\my-app`, `/home/me/code/my-app`) and click **Add**.
+- **Remove** takes a folder off the list. **Save** applies the change.
+
+The machine checks that each folder exists, keeps the list itself (so it survives restarts, and
+`indra node folders` on it shows the same list), and the console can then start agents there.
+For this computer (**local**), the list starts as the folders indra was started with (`--target`,
+or the folder you ran `indra serve` in). Saving an empty list goes back to those.
+
+Only admins can browse or change folders. A machine that is offline cannot be browsed; on it,
+`indra node folders D:\code\my-app` does the same.
 
 ## Day to day
 

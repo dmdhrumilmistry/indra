@@ -136,3 +136,11 @@ each step as well.
 - Nodes need an indra built from the same version as the hub to understand these fields.
 - `GET /api/ollama` (models and pulls), `GET /api/ollama/check?model=` and
   `POST /api/ollama/pull {model}` are the console's API for this.
+
+## A default Ollama server
+
+If Ollama runs on another machine (a GPU box), type its address under **More > Tools > Local
+models (Ollama)** and click **Save as default**. Agents set to run on Ollama then use that server
+whenever their profile names none, and the model list shows its models. Leave the address empty
+and save to go back to `http://localhost:11434`. The default is kept in indra's data folder, so it
+can be saved even when the console's settings are locked.
