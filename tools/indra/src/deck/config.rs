@@ -37,6 +37,10 @@ pub struct ConfigFile {
     pub marketplace: Vec<MarketplaceCfg>,
     /// The browser terminal.
     pub terminal: TerminalCfg,
+    /// Credentials agents run with, instead of each machine's own login.
+    pub account: Vec<crate::deck::accounts::AccountCfg>,
+    /// How a launch picks among the accounts.
+    pub routing: crate::deck::accounts::RoutingCfg,
 }
 
 /// `[terminal]`: what the browser terminal starts.
@@ -1022,6 +1026,10 @@ pub struct ProfileCfg {
     /// The Ollama server, if not http://localhost:11434.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ollama_url: Option<String>,
+    /// Run with this account (or "login": the machine's own login) instead of
+    /// letting routing choose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 impl ProfileCfg {
@@ -1179,6 +1187,8 @@ pub struct Settings {
     pub teams: Vec<TeamCfg>,
     pub marketplaces: Vec<MarketplaceCfg>,
     pub terminal: TerminalCfg,
+    pub accounts: Vec<crate::deck::accounts::AccountCfg>,
+    pub routing: crate::deck::accounts::RoutingCfg,
     /// Workflow shell steps may run on this machine.
     pub shell_steps: bool,
     /// Workflow files in repositories that could not be used, and why.
@@ -2095,6 +2105,17 @@ pub fn build_settings(
             }
         }
     }
+    crate::deck::accounts::check(&file.account, &file.routing)?;
+    for p in &file.profile {
+        if let Some(a) = p.account.as_deref().filter(|a| *a != "login") {
+            if !file.account.iter().any(|x| x.name == a) {
+                return Err(format!(
+                    "profile '{}' uses account '{}', which is not defined (or use \"login\" for the machine's own)",
+                    p.name, a
+                ));
+            }
+        }
+    }
     unique("team", file.team.iter().map(|t| t.name.as_str()))?;
     for t in &file.team {
         let what = format!("team '{}'", t.name);
@@ -2402,6 +2423,8 @@ pub fn build_settings(
         marketplaces: file.marketplace.clone(),
         teams,
         terminal: file.terminal.clone(),
+        accounts: file.account.clone(),
+        routing: file.routing.clone(),
         shell_steps: file.local.shell_steps.unwrap_or(true),
         workflow_errors,
         repo_dirs,

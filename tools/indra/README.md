@@ -612,6 +612,53 @@ indra secret rm jira
 - **Redacted.** The agent's live feed and log show `[secret:jira]` instead of the value.
 - **Audited.** Each delivery is appended to `secrets/audit.log` (secret, profile, node, process).
 
+### Accounts and usage
+
+**By default nothing needs setting up:** an agent uses the login its CLI already has on the
+machine it runs on (Claude Code logged in, `codex login`, ...), and indra counts what each of
+those logins spends. **Accounts** (the **Accounts** page; added under **Settings > Accounts**)
+give agents credentials from here instead:
+
+```toml
+[[account]]
+name       = "work"
+credential = "secret:anthropic-work"   # set it in Settings > Secrets (never the key itself)
+kind       = "oauth_token"             # a Claude subscription token (`claude setup-token`); default api_key
+daily_runs = 40                        # limits are optional: daily_usd, monthly_usd, daily_runs
+
+[[account]]
+name       = "team-api"
+credential = "secret:anthropic-team"   # an API key
+daily_usd  = 25
+
+[[account]]
+name       = "codex"
+agent      = "codex"                   # claude (default) | codex | gemini | any runner (with env = "VAR")
+credential = "secret:openai"
+
+[routing]                              # all optional; these are the defaults
+strategy          = "most_remaining"   # | round_robin | in_order (by priority)
+fallback_to_login = true               # all used up: the machine's own login (false: refuse)
+cooldown_minutes  = 60                 # rest after a usage limit, unless the agent names its reset
+```
+
+- **Credentials on every node.** The credential goes in the agent's environment
+  (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `env`),
+  resolved on the hub and sent with the job, so a remote node needs no login of its own. It is
+  redacted from everything the agent prints. A profile's own environment wins.
+- **Routing.** Each launch (Launch, workflows, the board, plans) picks an account for its agent and
+  node: the one a profile pins (`account = "work"` on the profile, or `"login"` for the machine's
+  own), else by `strategy`: `most_remaining` takes the account with the most left of its tightest
+  limit, then the one used least today. An account can be kept to some `nodes`, or turned off with
+  `disabled`. A local model (a profile on Ollama) uses no account.
+- **Usage.** Runs and cost (as agents report it: Claude Code reports each run's cost;
+  subscriptions report none, so limit those by `daily_runs`) are counted per account and per
+  machine login, by day and month, on the **Accounts** page and with `indra accounts`.
+- **Usage limits.** When an agent fails saying it hit a limit ("usage limit reached", "rate limit",
+  429, "insufficient quota"...), its account rests until the reset time the agent gives, or
+  `cooldown_minutes`, and routing moves on; **Let it run again** on the Accounts page ends the rest.
+  Each process page shows the account it ran with, and why routing chose it.
+
 ### Pivot
 
 On a process page, **Pivot this agent** gives it a new instruction without losing its work:

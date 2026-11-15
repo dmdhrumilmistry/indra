@@ -98,7 +98,12 @@ impl App {
         ));
         let market = crate::deck::market::Market::open(&settings.data_dir);
         let users = crate::deck::users::Users::open(&settings.data_dir);
+        let data_dir = settings.data_dir.clone();
         let shared = config::Shared::new(settings);
+        procs.set_accounts(Arc::new(crate::deck::accounts::Accounts::new(
+            shared.clone(),
+            data_dir,
+        )));
         let engine = Engine::new(procs.clone(), shared.clone());
         Arc::new(App {
             settings: shared,
@@ -1839,6 +1844,33 @@ async fn board_get(State(app): State<Arc<App>>) -> Json<Value> {
     }))
 }
 
+/// Accounts and the machines' own logins: what each used today and this
+/// month, its limits, and whether routing can give it runs.
+async fn accounts_get(State(app): State<Arc<App>>) -> Json<Value> {
+    match app.procs.accounts() {
+        Some(a) => {
+            a.sync(&app.procs, crate::deck::runs::now());
+            Json(a.view(crate::deck::runs::now()))
+        }
+        None => Json(json!({ "accounts": [] })),
+    }
+}
+
+/// Let an account that hit a usage limit take runs again now.
+async fn accounts_wake(
+    State(app): State<Arc<App>>,
+    UrlPath(key): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let a = app
+        .procs
+        .accounts()
+        .ok_or_else(|| not_found("no accounts here"))?;
+    if !a.wake(&key) {
+        return Err(not_found("no such account"));
+    }
+    Ok(Json(a.view(crate::deck::runs::now())))
+}
+
 #[derive(Deserialize)]
 struct NewBoard {
     name: String,
@@ -3143,6 +3175,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/board/items/{id}/run", post(board_run))
         .route("/api/board/import", post(board_import))
         .route("/api/boards", post(boards_create))
+        .route("/api/accounts", get(accounts_get))
+        .route("/api/accounts/{key}/wake", post(accounts_wake))
         .route(
             "/api/boards/{id}",
             axum::routing::put(boards_update).delete(boards_delete),
@@ -3269,6 +3303,8 @@ mod tests {
             teams: vec![],
             marketplaces: vec![],
             terminal: Default::default(),
+            accounts: vec![],
+            routing: Default::default(),
             shell_steps: true,
             workflow_errors: vec![],
             repo_dirs: vec![],

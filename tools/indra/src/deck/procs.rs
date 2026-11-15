@@ -93,6 +93,8 @@ pub struct ProcView {
     pub memory: Vec<crate::deck::knowledge::MemRef>,
     /// It is asked for learnings before it finishes.
     pub reflect: bool,
+    /// The account it runs with (`login:<agent>@<node>`: the machine's own login).
+    pub account: Option<String>,
     /// none | asked | received
     pub reflection: &'static str,
     /// Tokens in its context at the last turn, and its model's window.
@@ -202,6 +204,8 @@ pub struct Proc {
     memory: Vec<crate::deck::knowledge::MemRef>,
     /// Ask it for learnings before closing its input.
     reflect: bool,
+    /// The account it runs with (`login:<agent>@<node>`: the machine's own).
+    account: Option<String>,
 }
 
 fn now() -> u64 {
@@ -289,6 +293,7 @@ impl Proc {
             pending: st.pending.clone(),
             memory: self.memory.clone(),
             reflect: self.reflect,
+            account: self.account.clone(),
             reflection: match st.reflect_state {
                 0 => "none",
                 1 => "asked",
@@ -910,6 +915,8 @@ pub struct Procs {
     vault: Arc<crate::deck::secrets::Vault>,
     /// Nodes that dialled in (`indra node connect`).
     links: Arc<crate::deck::link::Links>,
+    /// Accounts and routing (set by the console and `indra run`).
+    accounts: std::sync::OnceLock<Arc<crate::deck::accounts::Accounts>>,
 }
 
 /// Extra launch options: a pivot's session and parent, and the agent options.
@@ -959,6 +966,7 @@ impl Procs {
             log_dir,
             vault: Arc::new(crate::deck::secrets::Vault::open(secrets)),
             links: Arc::new(crate::deck::link::Links::default()),
+            accounts: std::sync::OnceLock::new(),
         })
     }
 
@@ -1117,9 +1125,71 @@ impl Procs {
         self.start_with(l, StartOpts::default())
     }
 
+    /// Route launches through these accounts.
+    pub fn set_accounts(&self, a: Arc<crate::deck::accounts::Accounts>) {
+        let _ = self.accounts.set(a);
+    }
+
+    pub fn accounts(&self) -> Option<&Arc<crate::deck::accounts::Accounts>> {
+        self.accounts.get()
+    }
+
     /// Start, optionally continuing an earlier session (a pivot) and
-    /// recording the process it came from.
-    pub fn start_with(self: &Arc<Self>, l: Launch, opts: StartOpts) -> Result<u64, String> {
+    /// recording the process it came from. The agent gets an account's
+    /// credential when routing picks one (see `deck::accounts`).
+    pub fn start_with(self: &Arc<Self>, l: Launch, mut opts: StartOpts) -> Result<u64, String> {
+        let pick = match self.accounts.get() {
+            // A local model costs nothing and needs no credential.
+            Some(acc) if opts.agent.provider.as_deref() != Some("ollama") => {
+                let (name, command, format) = match &l {
+                    Launch::Local { runner, .. } => (
+                        runner.name.clone(),
+                        runner.command.clone(),
+                        runner.format.clone(),
+                    ),
+                    Launch::Remote { runner, .. } => {
+                        (runner.to_string(), runner.to_string(), String::new())
+                    }
+                };
+                if name == crate::deck::config::SHELL_RUNNER {
+                    None
+                } else {
+                    let node = match &l {
+                        Launch::Local { .. } => crate::deck::nodes::LOCAL.to_string(),
+                        Launch::Remote { node, .. } => node.name.clone(),
+                    };
+                    let agent = crate::deck::accounts::agent_of(&name, &command, &format);
+                    acc.sync(self, now());
+                    let pin = opts.profile.as_deref().and_then(|p| acc.pin_of(p));
+                    let p = acc.pick(&agent, &node, pin.as_deref(), now())?;
+                    // The profile's own environment wins.
+                    if let Some((var, val)) = &p.env {
+                        opts.agent
+                            .env
+                            .entry(var.clone())
+                            .or_insert_with(|| val.clone());
+                    }
+                    Some(p)
+                }
+            }
+            _ => None,
+        };
+        let id = self.start_plain(l, opts, pick.as_ref().map(|p| p.key.clone()))?;
+        if let (Some(p), Some(acc)) = (pick, self.accounts.get()) {
+            acc.started(id, &p.key, now());
+            if let Some(pr) = self.get(id) {
+                pr.push("system", format!("account: {} ({})", p.key, p.why), None);
+            }
+        }
+        Ok(id)
+    }
+
+    fn start_plain(
+        self: &Arc<Self>,
+        l: Launch,
+        opts: StartOpts,
+        account: Option<String>,
+    ) -> Result<u64, String> {
         // Resolve the launch into a program, its arguments, and what the UI shows.
         struct Plan {
             program: PathBuf,
@@ -1283,6 +1353,7 @@ impl Procs {
                 ctl: Mutex::new(Some(ctl_tx)),
                 memory: opts.memory.clone(),
                 reflect: opts.reflect,
+                account: account.clone(),
             });
             let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
             self.vault
@@ -1352,6 +1423,7 @@ impl Procs {
             ctl: Mutex::new((plan.job.is_some() || interactive).then(|| ctl_tx.clone())),
             memory: opts.memory.clone(),
             reflect: opts.reflect,
+            account: account.clone(),
         });
         let used: Vec<String> = redact.iter().map(|(_, n)| n.clone()).collect();
         self.vault
@@ -1771,6 +1843,7 @@ mod tests {
             ctl: Mutex::new(None),
             memory: vec![],
             reflect: false,
+            account: None,
         };
         for l in [
             r#"{"type":"system","subtype":"init","model":"m1","tools":[],"session_id":"4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"}"#,

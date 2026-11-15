@@ -2325,7 +2325,8 @@
         ? termLink(p.status === "running" ? "Fork in terminal" : "Open in terminal", { what: "agent", proc: p.id })
         : null;
       if (shellBtn) shellBtn.title = p.status === "running" ? "Opens a branch of its session (--fork-session), so the agent is not disturbed" : "Continues its session interactively";
-      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null, shellBtn, stop]));
+      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null,
+        p.account ? h("a", { class: "pill", href: "#/accounts", title: "The account it runs with", text: /^login:/.test(p.account) ? "this machine's login" : "account " + p.account }) : null, shellBtn, stop]));
       top.appendChild(h("div", { class: "cmd", text: p.prompt }));
       top.appendChild(lineage);
       agentsBox.textContent = "";
@@ -2596,6 +2597,46 @@
       title.focus();
     });
     load(); every(3000, function () { if (!document.querySelector(".lane.over")) load(); });
+  }
+
+  // ---- accounts: what each set of credentials used, and what routing gives it ------
+  function pageAccounts(m) {
+    m.appendChild(header("Accounts", "The credentials agents run with, what each used today and this month, and which routing can still give runs to.",
+      [canEdit() ? h("a", { class: "btn", href: "#/settings/accounts", text: "Add or edit accounts" }) : null]));
+    var top = h("div"), box = h("div");
+    m.appendChild(top); m.appendChild(box);
+    function money(x) { return "$" + (x || 0).toFixed(2); }
+    function bar(f) { var b = h("div", { class: "meter" }, h("i")); b.firstChild.style.width = Math.round((f == null ? 1 : f) * 100) + "%"; if (f != null && f < 0.2) b.classList.add("low"); return b; }
+    function load() {
+      api("/api/accounts").then(function (d) {
+        top.textContent = ""; box.textContent = "";
+        var r = d.routing || {};
+        var own = (d.accounts || []).filter(function (a) { return !a.login; });
+        top.appendChild(h("p", { class: "muted" }, own.length
+          ? "Routing: " + ({ most_remaining: "the account with the most left", round_robin: "round robin", in_order: "in order of priority" })[r.strategy] + ". When all are used up: " + (r.fallback_to_login ? "the machine's own login." : "the launch fails.") + " After a usage limit an account rests " + r.cooldown_minutes + " minutes (or until the reset the agent names)."
+          : "No accounts yet: every agent uses the login its CLI has on the machine it runs on, and the usage of each such login is counted below. Add accounts to run agents with credentials from here (remote nodes then need no login), with limits and routing between them."));
+        if (!(d.accounts || []).length) { box.appendChild(empty("Nothing has run yet.")); return; }
+        box.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, ["Account", "Agent", "Credential", "Today", "This month", "Left", "Status", ""].map(function (t) { return h("th", { text: t }); }))),
+          h("tbody", null, d.accounts.map(function (a) {
+            var lim = a.limits || {};
+            return h("tr", null,
+              h("td", null, h("b", { text: a.login ? "this machine's login" : a.name }), a.login ? h("div", { class: "muted small", text: a.key.replace(/^login:/, "") }) : a.description ? h("div", { class: "muted small", text: a.description }) : null),
+              h("td", { text: a.agent }),
+              h("td", { class: "muted small", text: a.login ? "the CLI's own login" : (a.credential ? "secret " + a.credential : "") + (a.env ? " in " + a.env : "") }),
+              h("td", { text: a.today.runs + " runs, " + money(a.today.usd) + (lim.daily_usd ? " of " + money(lim.daily_usd) : "") + (lim.daily_runs ? " (of " + lim.daily_runs + " runs)" : "") }),
+              h("td", { text: money(a.month_usd) + (lim.monthly_usd ? " of " + money(lim.monthly_usd) : "") }),
+              h("td", null, a.login ? h("span", { class: "muted", text: "no limit" }) : bar(a.left)),
+              h("td", null, h("span", { class: "pill " + (a.status === "ready" ? "ok" : a.status === "off" ? "" : "warn"), text: a.status }), a.why ? h("div", { class: "muted small", text: a.why }) : null,
+                a.last_limit ? h("div", { class: "muted small clip1", title: a.last_limit, text: "last limit: " + a.last_limit }) : null),
+              h("td", null, a.cooldown_until && !S.ov.read_only ? h("button", { type: "button", onclick: function () {
+                api("/api/accounts/" + encodeURIComponent(a.key) + "/wake", { method: "POST" }).then(function () { toast("It can take runs again"); load(); }).catch(function (e) { toast(e.message, true); });
+              } }, "Let it run again") : null));
+          })))));
+        box.appendChild(h("p", { class: "muted small", text: "Costs are what agents report (Claude Code reports each run's cost; subscriptions and some agents report none, so count runs for them). An account hits its limit when its agent fails saying so." }));
+      }).catch(function (e) { box.textContent = ""; box.appendChild(empty(e.message)); });
+    }
+    load(); every(5000, load);
   }
 
   // ---- workflow editor: a graph of tasks, dragged and connected -------------------
@@ -3014,7 +3055,7 @@
   // Each section of the config file has a schema; forms are built from it, and
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
-  var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Saved tasks"],
+  var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Saved tasks"], ["accounts", "Accounts"],
     ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
@@ -3051,6 +3092,20 @@
   ];
 
   var SCHEMA = {
+    account: { tab: "accounts", noun: "account", fields: function (c) { return [
+      { k: "name", label: "Name", req: true, help: "A profile can pin it (Account on the profile); otherwise routing chooses." },
+      { k: "description", label: "Description" },
+      { k: "agent", label: "Agent", type: "select", options: [["", "Claude Code"], ["codex", "Codex"], ["gemini", "Gemini CLI"]].concat(cfgRunnerNames(c).filter(function (r) { return ["claude", "codex", "gemini"].indexOf(r) < 0; }).map(function (r) { return [r, r + " (runner)"]; })) },
+      { k: "credential", label: "Credential", req: true, placeholder: "secret:anthropic-work", help: "A secret reference: add the key in the Secrets tab first. Claude subscription: run `claude setup-token` and store the token; API keys work for every agent. The value goes only to the agent, also on remote nodes, which then need no login of their own." },
+      { k: "kind", label: "Kind", type: "select", options: [["", "API key"], ["oauth_token", "Claude subscription token (claude setup-token)"]] },
+      { k: "env", label: "Environment variable", placeholder: "by agent: ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, GEMINI_API_KEY", help: "Only for other agents, or to override." },
+      { k: "daily_usd", label: "Daily limit (USD)", type: "number", placeholder: "none" },
+      { k: "monthly_usd", label: "Monthly limit (USD)", type: "number", placeholder: "none" },
+      { k: "daily_runs", label: "Daily limit (runs)", type: "number", placeholder: "none", help: "For subscriptions, which report no cost: how many agent runs a day." },
+      { k: "nodes", label: "Only on nodes", type: "list", placeholder: "every node", help: "One per line; empty: any node, local included." },
+      { k: "priority", label: "Priority", type: "number", placeholder: "0", help: "With in-order routing, lower goes first." },
+      { k: "disabled", label: "Turned off (routing skips it)", type: "bool" }]; },
+      summary: function (a) { return (a.agent || "claude") + ", " + (a.credential || "") + (a.daily_usd ? ", $" + a.daily_usd + "/day" : "") + (a.monthly_usd ? ", $" + a.monthly_usd + "/month" : "") + (a.daily_runs ? ", " + a.daily_runs + " runs/day" : "") + (a.disabled ? " (off)" : ""); } },
     component: { tab: "components", noun: "saved task", fields: function (c) { return [
       { k: "name", label: "Name", req: true, help: "A task saved for reuse: drag it into any workflow from the editor's palette. A task's own fields override it, and a change here reaches every workflow that uses it." },
       { k: "description", label: "Description" },
@@ -3082,6 +3137,8 @@
       { k: "name", label: "Name", req: true, help: "Pick it on Launch, in presets, in workflow tasks and on the board." },
       { k: "description", label: "Description" },
       { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") },
+      { k: "account", label: "Account", type: "select", options: [["", "Automatic (routing picks, else this machine's login)"], ["login", "The machine's own login"]].concat((c.config.account || []).map(function (a) { return [a.name, a.name]; })),
+        help: "Which credentials its agents use. Automatic: the account with the most left (Settings > Accounts), or each machine's own CLI login when there are none." },
       { k: "model", label: "Model", list: "models", placeholder: "default", help: "An alias (opus, sonnet, haiku) or a full model id; for Ollama, the local model's name (the list shows what your Ollama server has)." },
       { k: "provider", label: "Runs on", type: "select", options: [["", "Anthropic, or however the runner is set up"], ["ollama", "Ollama: the whole agent on the model above"]],
         help: "Ollama works with Claude Code (0.14+ serves its API) and Codex (--oss). indra sets the base URL and maps opus, sonnet and haiku to the model above, so agent files that name them run locally too." },
@@ -3307,7 +3364,7 @@
       }
       ({ general: general, profiles: function () { list("profile", c.config.builtins === false ? [] : c.builtin.profiles); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
     }
 
     function general() {
@@ -3318,12 +3375,16 @@
         { k: "read_only", label: "Start read-only (no launching, no editing)", type: "bool", help: "Used the next time indra serve starts." },
         { k: "webrtc", label: "Let nodes that dial in use a direct WebRTC channel (else everything goes over their WebSocket)", type: "bool" },
         { k: "ice_servers", label: "STUN servers for WebRTC", type: "list", placeholder: "stun:stun.l.google.com:19302", help: "One URL per line. TURN servers with a username and credential go in indra.toml as [[server.ice]] (see the nodes guide)." },
+        { k: "strategy", label: "Accounts: routing", type: "select", options: [["", "Most left (default)"], ["round_robin", "Round robin"], ["in_order", "In order (by priority)"]], help: "How a launch picks among the accounts for its agent (Settings > Accounts)." },
+        { k: "fallback_to_login", label: "Accounts: when all are used up, use the machine's own login", type: "bool" },
+        { k: "cooldown_minutes", label: "Accounts: rest after a usage limit (minutes)", type: "number", placeholder: "60", help: "When the agent does not say when its limit resets." },
         { k: "shell", label: "Terminal: shell", placeholder: "your login shell ($SHELL)", help: "What a browser terminal starts, e.g. /bin/zsh, fish or pwsh. Installed: " + ((S.ov && S.ov.shells) || []).join(", ") + "." },
         { k: "shell_args", label: "Terminal: shell arguments", type: "list", placeholder: "-l", help: "One per line, e.g. -l for a login shell." },
         { k: "shells", label: "Terminal: more shells to offer", type: "list", placeholder: "/opt/homebrew/bin/fish", help: "Besides /etc/shells; the terminal's New form lists them." }];
-      var term = cf.terminal || {};
+      var term = cf.terminal || {}, rt = cf.routing || {};
       var vals = { builtins: cf.builtins !== false, max_parallel: cf.local.max_parallel, bind: cf.server.bind, read_only: !!cf.server.read_only,
-        webrtc: cf.server.webrtc !== false, ice_servers: cf.server.ice_servers, shell: term.shell, shell_args: term.args, shells: term.shells };
+        webrtc: cf.server.webrtc !== false, ice_servers: cf.server.ice_servers, shell: term.shell, shell_args: term.args, shells: term.shells,
+        strategy: rt.strategy, fallback_to_login: rt.fallback_to_login !== false, cooldown_minutes: rt.cooldown_minutes };
       var form = itemForm(fields, vals, "General", function (o) {
         // One section at a time; each save returns the version the next one needs.
         return saveSection("builtins", o.builtins ? null : false, "Saved")
@@ -3338,6 +3399,10 @@
           .then(function () {
             var t = {}; if (o.shell) t.shell = o.shell; if (o.shell_args && o.shell_args.length) t.args = o.shell_args; if (o.shells && o.shells.length) t.shells = o.shells;
             return saveSection("terminal", Object.keys(t).length ? t : null);
+          })
+          .then(function () {
+            var r = {}; if (o.strategy) r.strategy = o.strategy; if (!o.fallback_to_login) r.fallback_to_login = false; if (o.cooldown_minutes) r.cooldown_minutes = o.cooldown_minutes;
+            return saveSection("routing", Object.keys(r).length ? r : null);
           });
       }, function () { render(); });
       if (!c.editable) Array.prototype.forEach.call(form.querySelectorAll("input,select,textarea,button"), function (x) { x.disabled = true; });
@@ -3621,6 +3686,7 @@
         proc: function () { pageProc(m, arg); },
         settings: function () { pageSettings(m, arg); },
         board: function () { pageBoard(m); },
+        accounts: function () { pageAccounts(m); },
         wfedit: function () { pageWorkflowEditor(m, arg); },
         terminal: function () { pageTerminal(m); },
         delegate: function () { pageDelegate(m); },

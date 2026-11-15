@@ -694,7 +694,12 @@ pub fn run_workflow(a: RunArgs) -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?;
     rt.block_on(async move {
         let procs = crate::deck::procs::Procs::new(s.data_dir.join("logs"));
-        let engine = workflows::Engine::new(procs.clone(), config::Shared::new((*s).clone()));
+        let shared = config::Shared::new((*s).clone());
+        procs.set_accounts(std::sync::Arc::new(crate::deck::accounts::Accounts::new(
+            shared.clone(),
+            s.data_dir.clone(),
+        )));
+        let engine = workflows::Engine::new(procs.clone(), shared);
         let mut given = std::collections::BTreeMap::new();
         for kv in &a.inputs {
             let (k, v) = kv
@@ -792,6 +797,79 @@ pub struct NodeArgs {
     /// Config file on this machine (its runners are the only ones it will run)
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
+}
+
+/// `indra accounts`: what each account (and each machine's own login) used.
+#[derive(Args)]
+pub struct AccountsArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+    /// Print JSON
+    #[arg(long)]
+    json: bool,
+}
+
+pub fn run_accounts(a: AccountsArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, None, false)?;
+    let data = s.data_dir.clone();
+    let acc = crate::deck::accounts::Accounts::new(config::Shared::new(s), data);
+    let v = acc.view(crate::deck::runs::now());
+    if a.json {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let rows = v["accounts"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("No accounts and no runs yet: agents use each machine's own CLI login.");
+        println!("Add [[account]] in indra.toml (or Settings > Accounts) to run them with credentials from here.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "{:<24} {:<8} {:>6} {:>10} {:>10}  STATUS",
+        "ACCOUNT", "AGENT", "RUNS", "TODAY", "MONTH"
+    );
+    for r in rows {
+        let name = if r["login"] == true {
+            format!(
+                "login ({})",
+                r["key"].as_str().unwrap_or("").trim_start_matches("login:")
+            )
+        } else {
+            r["name"].as_str().unwrap_or("").to_string()
+        };
+        let lim = |k: &str| {
+            r["limits"][k]
+                .as_f64()
+                .map(|x| format!("/{:.0}", x))
+                .unwrap_or_default()
+        };
+        println!(
+            "{:<24} {:<8} {:>6} {:>10} {:>10}  {}{}",
+            name,
+            r["agent"].as_str().unwrap_or(""),
+            r["today"]["runs"].as_u64().unwrap_or(0),
+            format!(
+                "${:.2}{}",
+                r["today"]["usd"].as_f64().unwrap_or(0.0),
+                lim("daily_usd")
+            ),
+            format!(
+                "${:.2}{}",
+                r["month_usd"].as_f64().unwrap_or(0.0),
+                lim("monthly_usd")
+            ),
+            r["status"].as_str().unwrap_or(""),
+            r["why"]
+                .as_str()
+                .map(|w| format!(" ({})", w))
+                .unwrap_or_default()
+        );
+    }
+    println!(
+        "\nrouting: {}",
+        v["routing"]["strategy"].as_str().unwrap_or("")
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `indra mcp`: the MCP server for designing workflows (stdio).

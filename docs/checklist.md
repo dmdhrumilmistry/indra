@@ -96,6 +96,9 @@ their section; nothing is deleted, items are checked off with the change that di
       steps dragged from the palette failed with "has no target")
 - [x] Releases are `v<version>` (no `indra-` prefix); installers and `indra update` read both
 - [x] Each release is published to crates.io (`cargo install indra`) with `CARGO_REGISTRY_TOKEN`
+- [x] Accounts: credentials from the hub for agents on any node, usage per account and per
+      machine login, limits, cooldown after usage limits, routing (most left by default), the
+      Accounts page and `indra accounts`
 
 ## Not planned yet (the docs say so)
 

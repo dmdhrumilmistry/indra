@@ -433,3 +433,7 @@ fieldset label.check { font-weight: 400; align-items: center; }
 .gnode.stopstep.failure { border-left-color: var(--bad); }
 .edges .edge.implicit { stroke-dasharray: 3 5; opacity: .7; }
 .edges .edge.implicit.failure { stroke: var(--bad); }
+
+.meter { width: 90px; height: 8px; border-radius: 4px; background: var(--sunk); overflow: hidden; border: 1px solid var(--line); }
+.meter i { display: block; height: 100%; background: var(--ok); }
+.meter.low i { background: var(--warn); }

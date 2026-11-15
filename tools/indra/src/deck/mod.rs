@@ -1,6 +1,7 @@
 //! `indra serve` and friends: a local web console that views, monitors and
 //! runs AI agent harnesses (the security harness by default).
 
+pub mod accounts;
 pub mod attach;
 pub mod board;
 pub mod claude;
