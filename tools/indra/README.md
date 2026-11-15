@@ -850,6 +850,13 @@ and `indra node leave` undoes it all. **Remove** on its card in the console disc
 deletes its key. The step-by-step guide, with troubleshooting, is
 [Adding machines](../../docs/guides/machines.md).
 
+Many machines at once: **Add many machines** makes an enrollment key (valid up to a year, an
+optional machine limit, revocable; the hub keeps only its SHA-256) with ready-made scripts for
+Jamf, Intune and Linux. Organization-wide settings come from `defaults.toml` (under the user's) and
+`managed.toml` (enforced) in `/Library/Application Support/indra`, `/etc/indra` or
+`C:\ProgramData\indra`; a `[join]` section there lets `indra join` run with no arguments. See
+[Rolling out with MDM](../../docs/guides/mdm.md).
+
 Joining works when the console listens on the network (`--bind 0.0.0.0:7878`) even though its
 settings are then locked against browser edits: a joining machine adds only its name to
 `indra.toml`, never a command. A console started with `--read-only` or `--lock-config` refuses

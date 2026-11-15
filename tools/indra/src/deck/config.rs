@@ -41,6 +41,50 @@ pub struct ConfigFile {
     pub account: Vec<crate::deck::accounts::AccountCfg>,
     /// How a launch picks among the accounts.
     pub routing: crate::deck::accounts::RoutingCfg,
+    /// The hub `indra join` joins when given no hub and code (an
+    /// organization's defaults.toml or managed.toml, deployed by MDM).
+    #[serde(skip_serializing_if = "JoinCfg::is_empty")]
+    pub join: JoinCfg,
+}
+
+/// `[join]`: which hub this machine joins, for `indra join` without arguments.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct JoinCfg {
+    /// The hub's console URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub: Option<String>,
+    /// An enrollment key from the hub (Machines > Add many machines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Folders agents may work in (default: the user's home folder).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
+}
+
+impl JoinCfg {
+    pub fn is_empty(&self) -> bool {
+        self == &JoinCfg::default()
+    }
+}
+
+/// A user's indra.toml text with the organization's defaults.toml under it
+/// and managed.toml over it (see [`crate::deck::managed`]).
+pub fn parse_layered(text: &str) -> Result<ConfigFile> {
+    let user: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    let layers = crate::deck::managed::layers()?;
+    if layers.defaults.is_none() && layers.managed.is_none() {
+        return toml::from_str(text).map_err(|e| e.to_string());
+    }
+    toml::Value::Table(crate::deck::managed::apply(user, &layers))
+        .try_into()
+        .map_err(|e: toml::de::Error| {
+            format!(
+                "with the organization's settings ({}): {}",
+                crate::deck::managed::system_dir().display(),
+                e
+            )
+        })
 }
 
 /// `[terminal]`: what the browser terminal starts.
@@ -1819,15 +1863,32 @@ pub fn load(opts: LoadOptions) -> Result<Settings> {
             .into_iter()
             .find(|p| p.is_file()),
     };
-    let file: ConfigFile = match &path {
-        Some(p) => {
-            let text = std::fs::read_to_string(p)
-                .map_err(|e| format!("cannot read {}: {}", p.display(), e))?;
-            toml::from_str(&text).map_err(|e| format!("{}: {}", p.display(), e))?
-        }
-        None => ConfigFile::default(),
-    };
+    let file = load_file(path.as_deref())?;
     build_settings(&opts, path, &file)
+}
+
+/// A config file (or none) with the organization's settings applied.
+pub fn load_file(path: Option<&Path>) -> Result<ConfigFile> {
+    let text = match path {
+        Some(p) => {
+            std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {}", p.display(), e))?
+        }
+        None => String::new(),
+    };
+    parse_layered(&text).map_err(|e| match path {
+        Some(p) => format!("{}: {}", p.display(), e),
+        None => e,
+    })
+}
+
+/// The config file `load` would read for these options, if any.
+pub fn config_path(opts: &LoadOptions) -> Option<PathBuf> {
+    match &opts.config {
+        Some(p) => p.is_file().then(|| p.clone()),
+        None => default_config_paths(&opts.cwd)
+            .into_iter()
+            .find(|p| p.is_file()),
+    }
 }
 
 /// What a repository's `.indra/workflows/*.toml` may hold.

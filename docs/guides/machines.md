@@ -139,6 +139,12 @@ removed: join it again with a new code.
 restart its link (`indra node connect`, or sign out and in again). The background service uses
 the `PATH` from when you joined, so install agents before joining, or join again afterwards.
 
+## Many machines at once
+
+For a whole team or fleet, use **Machines > Add many machines** instead: one enrollment key that
+many machines join with, and ready-made scripts for Jamf, Microsoft Intune and Linux. Settings can
+be given to every machine the same way. See [Rolling out with MDM](mdm.md).
+
 ## Do I still need SSH?
 
 No. Joining replaces it. SSH remains as an option for machines you already reach that way and
