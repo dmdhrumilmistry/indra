@@ -9,6 +9,7 @@ pub mod claude;
 pub mod cli;
 pub mod confedit;
 pub mod config;
+pub mod cron;
 pub mod delegate;
 pub mod discover;
 pub mod enroll;

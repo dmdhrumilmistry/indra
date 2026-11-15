@@ -335,6 +335,7 @@ pub fn to_workflow(d: &Delegation, plan: &Plan, settings: &Settings) -> Workflow
     }
     WorkflowCfg {
         inputs: vec![],
+        schedule: None,
         builtin: false,
         source: None,
         values: Default::default(),

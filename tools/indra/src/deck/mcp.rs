@@ -25,6 +25,7 @@ skill, a shell command, or another workflow, in a target directory on a node.
 [[workflow]]
 name = "ci-fix"                       # letters, digits, - and _
 description = "Test, and let an agent fix failures"
+schedule = "0 9 * * 1-5"              # optional: runs by itself (cron, the hub's local time)
 
 [[workflow.input]]                    # asked for when it runs
 name = "branch"                       # used as {input.branch} in prompts
@@ -40,9 +41,14 @@ run = "cargo test 2>&1"               # a SHELL STEP: bash (sh), PowerShell on W
 allow_failure = true                  # its failure does not fail the workflow
 
 [[workflow.task]]
-id = "fix"
+id = "passed"
 needs = ["test"]
-when = "test.failed"                  # a CONDITION; false: the step is skipped
+if = "test.succeeded"                 # an IF STEP: runs nothing, answers yes or no
+
+[[workflow.task]]
+id = "fix"
+needs = ["passed"]
+branch = "no"                         # runs only when the If answered no
 profile = "worker"                    # how the agent runs (see Profiles below)
 prompt = """Tests failed on {input.branch}:
 {steps.test.output}
@@ -68,8 +74,8 @@ run = "echo \"failed: $INDRA_STATUS_RETEST\""
 
 [[workflow.task]]
 id = "nothing-to-do"
-needs = ["test"]
-when = "test.succeeded"
+needs = ["passed"]
+branch = "yes"                        # the other side of the If
 stop = "success"                      # a STOP STEP: ends the workflow here, as success
 prompt = "Tests pass; nothing to fix."  # (or "failure"); steps not started are skipped
 
@@ -91,9 +97,16 @@ Step fields:
   one step), component = "<saved task>" (fields left empty come from it).
 - profile, runner (default claude), model, provider ("anthropic" | "ollama"),
   retries (extra attempts after a failure).
-- Control flow: when, on ("success" default | "failure" | "always"),
-  allow_failure, foreach, until, max_runs, and stop = "success" | "failure"
-  (a step that only ends the workflow when reached; prompt is its message).
+- Control flow: on ("success" default | "failure" | "always"), allow_failure,
+  foreach, until, max_runs, stop = "success" | "failure" (a step that only ends
+  the workflow when reached; prompt is its message), if = "<condition>" (an If
+  step: it runs nothing and answers "yes" or "no"), branch = "yes" | "no" (on a
+  step after an If: run only on that answer; the other side is skipped, and a
+  step both sides lead to runs after whichever side ran), and when (a
+  condition on the step itself; prefer an If step, which the editor draws).
+- Workflow: schedule = "<cron>" (minute hour day month weekday, e.g.
+  "0 9 * * 1-5", "@daily") makes `indra serve` run it by itself; inputs take
+  their defaults, so give required inputs a default.
 
 Prompts may use {target}, {node}, {input.NAME}, {item} (in a foreach copy) and
 {steps.ID.output}, {steps.ID.exit_code}, {steps.ID.status} (an earlier step's
@@ -108,7 +121,7 @@ command): they read environment variables instead.
 - A command runs in its target, succeeds with exit code 0, and its output is
   what later conditions see.
 
-Conditions (when, until):
+Conditions (if, when, until):
 - <step>.succeeded | failed | skipped | status | output | exit_code,
   input.<name>, and in until: self.<the same fields> (this step's last run).
 - ==, !=, contains, <, <=, >, >= (numbers), and, or, not, ( ).

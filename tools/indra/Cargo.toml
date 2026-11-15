@@ -1,6 +1,6 @@
 [package]
 name = "indra"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Run, watch and orchestrate AI coding agents (Claude Code, Codex, Gemini, Ollama) across machines: a web console, workflows with conditions and loops, boards, an MCP server and graph memory, in one binary."
@@ -49,6 +49,11 @@ webrtc = ["dep:webrtc"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Workflow schedules (cron) run in the hub's local time: unix asks libc,
+# Windows asks the OS through `time`.
+[target.'cfg(windows)'.dependencies]
+time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

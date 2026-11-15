@@ -127,6 +127,10 @@ their section; nothing is deleted, items are checked off with the change that di
       until closed; Sign out and Theme on phones; waiting approvals in the tab title; confirms for
       Stop, Cancel and Discard; a focus ring; a warning (and admins only) for bypassPermissions;
       outside links http(s) only; plain, consistent names; Run again for workflows
+- [x] Workflows, simpler: schedules (cron, local time; the Start block and `schedule`), If steps
+      with Yes and No edges (`if` and `branch`; a step both sides reach runs after the side that
+      ran), For each and Repeat until as bands on a step with a loop-back arrow, link conditions
+      on the arrow; conditions picked from lists; the old Conditions and loops form is gone
 - [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options
