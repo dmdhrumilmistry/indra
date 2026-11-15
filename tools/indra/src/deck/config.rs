@@ -195,6 +195,11 @@ pub struct WorkflowCfg {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// Run it by itself on this cron schedule (`minute hour day month
+    /// weekday`, the hub's local time), e.g. "0 9 * * 1-5". `indra serve`
+    /// runs it; its inputs take their defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
     /// Harness whose name is recorded with each task (default: the first).
     #[serde(default)]
     pub harness: Option<String>,
@@ -657,6 +662,16 @@ pub struct TaskCfg {
     /// started are skipped and running ones stopped. `prompt` is its message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<String>,
+    /// An If step: it runs nothing, checks this condition (like `when`) and
+    /// answers "yes" or "no"; the steps after it say which answer they
+    /// follow with `branch`.
+    #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// After an If step: run only when it answered this ("yes" or "no").
+    /// The other side is skipped, and a step both sides lead to runs after
+    /// whichever side ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// The loop item this copy runs for (set when a `foreach` is expanded).
     #[serde(skip)]
     pub item: Option<String>,
@@ -837,6 +852,10 @@ pub fn expand_workflow(
                         .map(|c| crate::deck::flow::rename(c, &names));
                     x.until = x
                         .until
+                        .as_deref()
+                        .map(|c| crate::deck::flow::rename(c, &names));
+                    x.check = x
+                        .check
                         .as_deref()
                         .map(|c| crate::deck::flow::rename(c, &names));
                     out.push(x);
@@ -1312,7 +1331,7 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
                 t.id, t.node
             )));
         }
-        if t.prompt.trim().is_empty() && t.run.is_none() && t.stop.is_none() {
+        if t.prompt.trim().is_empty() && t.run.is_none() && t.stop.is_none() && t.check.is_none() {
             return Err(at(format!("task '{}' has an empty prompt", t.id)));
         }
         if t.target.trim().is_empty() {
@@ -1327,6 +1346,9 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
         }
     }
     validate_flow(w).map_err(at)?;
+    if let Some(sc) = &w.schedule {
+        crate::deck::cron::Cron::parse(sc).map_err(|e| at(format!("schedule: {}", e)))?;
+    }
     // Kahn's algorithm: whatever cannot be ordered is on a cycle.
     let mut done: Vec<&str> = Vec::new();
     loop {
@@ -1447,6 +1469,35 @@ fn validate_flow(w: &WorkflowCfg) -> std::result::Result<(), String> {
         }
         if let Some(c) = &t.when {
             known(flow::check(c, &ids, &inputs, false).map_err(at)?)?;
+        }
+        if let Some(c) = &t.check {
+            known(flow::check(c, &ids, &inputs, false).map_err(at)?)?;
+            if t.run.is_some()
+                || t.skill.is_some()
+                || t.workflow.is_some()
+                || t.foreach.is_some()
+                || t.until.is_some()
+                || t.stop.is_some()
+            {
+                return Err(at(
+                    "an If step only checks its condition: no run, skill, workflow, loop or stop"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(b) = &t.branch {
+            if !["yes", "no"].contains(&b.as_str()) {
+                return Err(at(format!("branch must be yes or no, not {:?}", b)));
+            }
+            let after_if = t
+                .needs
+                .iter()
+                .any(|n| w.tasks.iter().any(|x| &x.id == n && x.check.is_some()));
+            if !after_if {
+                return Err(at(
+                    "branch needs an If step among the steps it follows".into()
+                ));
+            }
         }
         if let Some(c) = &t.until {
             known(flow::check(c, &ids, &inputs, true).map_err(at)?)?;

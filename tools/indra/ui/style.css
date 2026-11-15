@@ -471,3 +471,36 @@ dialog.ask h3 { margin-top: 0; }
 /* One clear focus ring for keyboard users, everywhere. */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .bcard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Workflow graph: If blocks, loops, branches, schedules. */
+.gnode.ifstep { border-left-color: #d08a1f; border-radius: 14px; background: color-mix(in srgb, #d08a1f 8%, var(--bg)); }
+.gnode.ifstep b::before { content: "\25C7  "; color: #d08a1f; }
+.gnode.ifstep small:first-of-type { white-space: normal; }
+.port.out.yes { top: 46%; border-color: var(--ok); }
+.port.out.no { top: 80%; border-color: var(--bad); }
+.port.out.yes:hover { background: var(--ok); }
+.port.out.no:hover { background: var(--bad); }
+.plabel { position: absolute; right: 10px; font-size: 10.5px; font-weight: 600; transform: translateY(-50%); }
+.plabel.yes { top: 46%; color: var(--ok); }
+.plabel.no { top: 80%; color: var(--bad); }
+.gnode .band { margin: -8px -12px 6px; padding: 3px 10px; font-size: 11px; border-bottom: 1px dashed var(--line); color: var(--accent); cursor: pointer; border-radius: 9px 9px 0 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.gnode .band + .band { margin-top: 0; border-radius: 0; }
+.gnode .band:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.gnode.looped { box-shadow: 4px 4px 0 -1px var(--bg), 4px 4px 0 0 var(--line); }
+.gnode.looped.sel { box-shadow: 0 0 0 2px var(--accent), 4px 4px 0 1px var(--line); }
+.edges .edge.yes { stroke: var(--ok); }
+.edges .edge.no { stroke: var(--bad); }
+.edges .edge.loopback { stroke: var(--accent); stroke-dasharray: 4 3; }
+.edges .elabel { font-size: 11px; font-weight: 600; fill: var(--muted); paint-order: stroke; stroke: var(--panel); stroke-width: 4px; }
+.edges .elabel.yes { fill: var(--ok); } .edges .elabel.no, .edges .elabel.failure { fill: var(--bad); }
+.gnode.gend.click { cursor: pointer; }
+.gnode.gend small { display: block; font-size: 10.5px; }
+.cond { display: grid; gap: 6px; }
+.cond .condrow { flex-wrap: wrap; gap: 6px; }
+.cond .condrow > * { flex: 1 1 110px; min-width: 0; }
+.sched { flex-wrap: wrap; gap: 6px; }
+.gnode.ifstep { padding-right: 40px; }
+.gnode.gstart { max-width: 150px; }
+.inspector { overflow-wrap: anywhere; }
+.inspector select, .inspector input, .inspector textarea { max-width: 100%; }

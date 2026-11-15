@@ -1009,6 +1009,21 @@ the selected step, or the Delete key (**Undo** brings it back); remove an arrow 
 and pressing Delete. Saving writes the same `[[workflow]]` TOML, with each step's position, so
 `indra run` and the text editor keep working.
 
+Decisions, loops and schedules are drawn in the graph too:
+
+- **If** (from the palette) checks something and has a green **Yes** and a red **No** edge: drag
+  each to the step that runs on that answer. Its question is picked from lists (a step before it
+  succeeded, failed, its output contains a text, its exit code is a number, or an input is a value),
+  or written by hand. A step both sides lead to runs after whichever side ran.
+- **For each** and **Repeat until** are dropped on a step. They show on it as a band ("for each:
+  api, web", "repeat until its output contains PASS, at most 3"), Repeat with an arrow back to the
+  step's start; click the band to change or remove the loop.
+- **Click an arrow** to choose when the next step runs: when this one succeeds, when it fails, or
+  either way.
+- **Click Start** to schedule the workflow: only when started, every hour, every day, every weekday
+  or every week at a time, or any cron schedule. Start then shows it ("weekdays 09:00"), and so
+  does the workflow's card.
+
 **Skills as steps.** A step can run one of the harness's skills instead of a free prompt: drag it
 from **Skills** in the palette, or write `skill = "<name>"`. For Claude Code it runs as the
 skill's slash command, `/<skill> <prompt>`, so `prompt` holds the skill's arguments (default
@@ -1064,6 +1079,46 @@ A command cannot contain `{input.}`, `{item}` or `{steps.}`; agent prompts can (
 writes an earlier step's result into the prompt). A node refuses shell steps with
 `[local] shell_steps = false` in its own `indra.toml`.
 
+**Schedules.** `schedule` runs a workflow by itself while `indra serve` runs, in that computer's
+local time: standard cron (`minute hour day month weekday`), with ranges, lists, steps, names
+(`mon`, `jan`) and `@hourly`, `@daily`, `@weekly`, `@monthly`. Its inputs take their defaults, so
+give required ones a default; a run that cannot start is logged.
+
+```toml
+[[workflow]]
+name     = "nightly"
+schedule = "0 2 * * 1-5"                 # 02:00 on weekdays
+```
+
+**If steps.** An If step runs nothing: it checks a condition and answers `yes` or `no`. A step
+after it says which answer it follows with `branch`; the other side is skipped (without failing
+the workflow), and a step that both sides lead to runs after the side that ran.
+
+```toml
+[[workflow.task]]
+id    = "passed"
+needs = ["test"]
+if    = "test.output contains 'test result: ok'"
+
+[[workflow.task]]
+id     = "ship"
+needs  = ["passed"]
+branch = "yes"
+run    = "make release"
+
+[[workflow.task]]
+id      = "fix"
+needs   = ["passed"]
+branch  = "no"
+profile = "worker"
+prompt  = "The tests fail:\n{steps.test.output}\nFix the code."
+
+[[workflow.task]]
+id    = "report"
+needs = ["ship", "fix"]                  # after whichever side ran
+run   = "echo done"
+```
+
 **Conditions and failure handling.**
 
 ```toml
@@ -1092,7 +1147,8 @@ on    = "always"                         # once they finish, however they went
 run   = "rm -rf target/tmp"
 ```
 
-- `when` is a condition on earlier steps and inputs: `<step>.succeeded`, `.failed`, `.skipped`,
+- `when` is a condition on the step itself (the If step above is the same, drawn in the graph):
+  a condition on earlier steps and inputs: `<step>.succeeded`, `.failed`, `.skipped`,
   `.status`, `.output`, `.exit_code`, and `input.<name>`, with `==`, `!=`, `contains`, `<`, `<=`,
   `>`, `>=`, `and`, `or`, `not` and parentheses. False: the step is skipped. A step it reads must
   run before it (in its `needs`, directly or through others), so its result is known.

@@ -1871,11 +1871,14 @@
           var formBox = h("div");
           defsBox.appendChild(h("div", { class: "card" },
             h("div", { class: "row" }, h("h4", { text: d.name }), h("span", { class: "pill", text: d.task.length + (d.task.length === 1 ? " task" : " tasks") }),
-              d.builtin ? h("span", { class: "pill", text: "built in" }) : d.source ? h("span", { class: "pill ok", title: d.source, text: "in a repository" }) : h("span", { class: "pill", title: "In this machine's indra.toml", text: "local" })),
+              d.builtin ? h("span", { class: "pill", text: "built in" }) : d.source ? h("span", { class: "pill ok", title: d.source, text: "in a repository" }) : h("span", { class: "pill", title: "In this machine's indra.toml", text: "local" }),
+              d.schedule ? h("span", { class: "pill run", title: "Runs by itself while the console runs (" + d.schedule + ")", text: "\u23f0 " + (d.schedule_text || d.schedule) }) : null),
             d.description ? h("p", { class: "muted", text: d.description }) : null,
             d.source ? h("p", { class: "muted small clip1", title: d.source }, h("code", { text: d.source })) : null,
             h("ul", { class: "links" }, d.task.map(function (t) {
-              return h("li", null, h("b", { text: t.id }), h("span", { class: "muted", text: "  on " + t.node + ((t.needs || []).length ? ", after " + t.needs.join(", ") : "") }));
+              var how = t["if"] != null ? "  If " + condText(t["if"]) + "?" : "  on " + (t.node || "local") + (t.branch ? " (on " + (t.branch === "yes" ? "Yes" : "No") + ")" : "") +
+                (t.foreach != null ? ", for each item" : "") + (t.until != null ? ", repeated" : "");
+              return h("li", null, h("b", { text: t.id }), h("span", { class: "muted", text: how + ((t.needs || []).length ? ", after " + t.needs.join(", ") : "") }));
             })),
             (d.input || []).length ? h("p", { class: "muted small", text: "Inputs: " + d.input.map(function (i) { return (i.label || i.name) + (i.required ? " *" : ""); }).join(", ") }) : null,
             h("div", { class: "row" }, h("button", { class: "primary", type: "button", disabled: ov.read_only, onclick: function (e) {
@@ -1952,7 +1955,8 @@
           dag.appendChild(h("div", { class: "dag-col" }, h("h3", { text: ci === 0 ? "Start" : "Step " + (ci + 1) }), col.map(function (t) {
             return h("div", { class: "card task " + t.state },
               h("div", { class: "row" }, h("b", { text: t.id }), wfPill(t.state), t.allow_failure ? h("span", { class: "pill", title: "Its failure does not fail the workflow", text: "may fail" }) : null),
-              h("div", { class: "muted", text: t.node + "  -  " + (t.run ? "command" : t.runner) }),
+              t["if"] != null ? h("div", null, h("span", { class: "muted", text: "If " + condText(t["if"]) + "? " }), t.output ? h("span", { class: "pill " + (t.output === "yes" ? "ok" : "bad"), text: t.output === "yes" ? "Yes" : "No" }) : null)
+                : h("div", { class: "muted", text: t.node + "  -  " + (t.run ? "command" : t.runner) + (t.branch ? "  (on " + (t.branch === "yes" ? "Yes" : "No") + ")" : "") }),
               t.run ? h("div", { class: "cmd small", text: "$ " + t.run }) : null,
               h("div", { class: "cmd small", text: t.target }),
               t.item ? h("div", { class: "muted", text: "item: " + t.item }) : null,
@@ -2980,8 +2984,121 @@
   // The palette adds blank tasks, components (reusable tasks) and other
   // workflows (run as one step). Saving writes ordinary [[workflow]] TOML,
   // positions included, so `indra run` and the text editor keep working.
+  // ---- conditions and schedules, in plain words -------------------------------------
+  // A condition in indra's syntax, read back as the few simple shapes the
+  // builder offers (anything else stays "written by hand").
+  function parseCond(c) {
+    c = (c || "").trim(); var m;
+    if (!c) return { subj: "", test: "succeeded", val: "" };
+    if ((m = /^([A-Za-z0-9_-]+)\.(succeeded|failed|skipped)$/.exec(c))) return { subj: m[1], test: m[2], val: "" };
+    if ((m = /^not ([A-Za-z0-9_-]+)\.output contains '([^']*)'$/.exec(c))) return { subj: m[1], test: "lacks", val: m[2] };
+    if ((m = /^([A-Za-z0-9_-]+)\.output contains '([^']*)'$/.exec(c))) return { subj: m[1], test: "contains", val: m[2] };
+    if ((m = /^([A-Za-z0-9_-]+)\.exit_code (==|!=) (-?\d+)$/.exec(c))) return { subj: m[1], test: m[2] === "==" ? "exit" : "exitnot", val: m[3] };
+    if ((m = /^input\.([A-Za-z0-9_]+) (==|!=) '([^']*)'$/.exec(c))) return { subj: "input." + m[1], test: m[2] === "==" ? "is" : "isnot", val: m[3] };
+    return { custom: c };
+  }
+  function buildCond(x) {
+    var v = (x.val || "").replace(/'/g, "");
+    if (x.subj.indexOf("input.") === 0) return x.subj + (x.test === "isnot" ? " != '" : " == '") + v + "'";
+    switch (x.test) {
+      case "contains": return x.subj + ".output contains '" + v + "'";
+      case "lacks": return "not " + x.subj + ".output contains '" + v + "'";
+      case "exit": return x.subj + ".exit_code == " + (parseInt(v, 10) || 0);
+      case "exitnot": return x.subj + ".exit_code != " + (parseInt(v, 10) || 0);
+      default: return x.subj + "." + x.test;
+    }
+  }
+  function condText(c) {
+    var x = parseCond(c);
+    if (x.custom) return x.custom;
+    if (!x.subj) return "(set the condition)";
+    var who = x.subj === "self" ? "its output" : x.subj.indexOf("input.") === 0 ? "input " + x.subj.slice(6) : x.subj;
+    return { succeeded: who + " succeeded", failed: who + " failed", skipped: who + " was skipped",
+      contains: (x.subj === "self" ? "its output" : who + "'s output") + " contains \"" + x.val + "\"", lacks: (x.subj === "self" ? "its output" : who + "'s output") + " lacks \"" + x.val + "\"",
+      exit: who + " exit code is " + x.val, exitnot: who + " exit code is not " + x.val, is: who + " is \"" + x.val + "\"", isnot: who + " is not \"" + x.val + "\"" }[x.test] || c;
+  }
+  // Pick a subject (an earlier step, an input, or "self"), a test and a value;
+  // or write the condition by hand. onChange gets the condition text.
+  function condEditor(expr, subjects, inputs, selfOnly, onChange) {
+    var x = parseCond(expr);
+    var box = h("div", { class: "cond" });
+    function draw() {
+      box.textContent = "";
+      if (x.custom != null) {
+        var raw = h("input", { type: "text", value: x.custom, placeholder: "e.g. test.failed and input.fix == 'yes'" });
+        raw.addEventListener("input", function () { x.custom = raw.value; onChange(raw.value.trim()); });
+        box.appendChild(raw);
+        box.appendChild(h("button", { type: "button", class: "ghost small", onclick: function () { x = parseCond(""); draw(); } }, "Use the simple form"));
+        return;
+      }
+      var subj = h("select", { "aria-label": "What to check" }, (selfOnly ? [["self", "this step"]] : subjects.map(function (id) { return [id, "step " + id]; }).concat(inputs.map(function (n) { return ["input." + n, "input " + n]; })))
+        .map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
+      if (!x.subj) x.subj = selfOnly ? "self" : subjects[subjects.length - 1] || (inputs[0] ? "input." + inputs[0] : "");
+      subj.value = x.subj;
+      var isInput = x.subj.indexOf("input.") === 0;
+      var tests = isInput ? [["is", "is"], ["isnot", "is not"]] : (selfOnly ? [] : [["succeeded", "succeeded"], ["failed", "failed"], ["skipped", "was skipped"]]).concat([["contains", "output contains"], ["lacks", "output does not contain"], ["exit", "exit code is"], ["exitnot", "exit code is not"]]);
+      if (!tests.some(function (t) { return t[0] === x.test; })) x.test = tests[0][0];
+      var test = h("select", { "aria-label": "Test" }, tests.map(function (t) { return h("option", { value: t[0], text: t[1] }); }));
+      test.value = x.test;
+      var needsVal = ["contains", "lacks", "exit", "exitnot", "is", "isnot"].indexOf(x.test) >= 0;
+      var val = h("input", { type: "text", value: x.val || "", placeholder: /exit/.test(x.test) ? "0" : "text", "aria-label": "Value", hidden: !needsVal });
+      function emit() { onChange(x.subj ? buildCond(x) : ""); }
+      subj.addEventListener("change", function () { x.subj = subj.value; draw(); emit(); });
+      test.addEventListener("change", function () { x.test = test.value; draw(); emit(); });
+      val.addEventListener("input", function () { x.val = val.value; emit(); });
+      if (!subjects.length && !inputs.length && !selfOnly) box.appendChild(h("p", { class: "muted small", text: "Link a step into this If first: it checks the steps before it." }));
+      else box.appendChild(h("div", { class: "row condrow" }, subj, test, val));
+      box.appendChild(h("button", { type: "button", class: "ghost small", onclick: function () { x = { custom: x.subj ? buildCond(x) : "" }; draw(); } }, "Write it by hand"));
+    }
+    draw();
+    if (!expr && x.subj) onChange(buildCond(x));
+    return box;
+  }
+  // When a workflow runs by itself: a few plain choices, or cron.
+  function scheduleEditor(spec, onChange) {
+    var m = /^(\d+) (\d+) \* \* (\*|1-5|[0-6])$/.exec(spec || ""), hourly = /^(\d+) \* \* \* \*$/.exec(spec || "");
+    var mode = !spec ? "manual" : hourly ? "hourly" : m ? (m[3] === "*" ? "daily" : m[3] === "1-5" ? "weekdays" : "weekly") : "custom";
+    var time = h("input", { type: "time", value: m ? ("0" + m[2]).slice(-2) + ":" + ("0" + m[1]).slice(-2) : "09:00", "aria-label": "At" });
+    var day = h("select", { "aria-label": "Day" }, ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map(function (d, i) { return h("option", { value: String(i), text: d }); }));
+    day.value = m && /^[0-6]$/.test(m[3]) ? m[3] : "1";
+    var cron = h("input", { type: "text", value: mode === "custom" ? spec : "", placeholder: "minute hour day month weekday, e.g. 0 9 * * 1-5" });
+    var pick = h("select", { "aria-label": "Runs" }, [["manual", "Only when started (Run, indra run)"], ["hourly", "Every hour"], ["daily", "Every day at"], ["weekdays", "Every weekday at"], ["weekly", "Every week on"], ["custom", "On a cron schedule"]]
+      .map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
+    pick.value = mode;
+    var box = h("div", { class: "row sched" });
+    function value() {
+      var t = (time.value || "09:00").split(":"), hh = parseInt(t[0], 10) || 0, mm = parseInt(t[1], 10) || 0;
+      switch (pick.value) {
+        case "hourly": return "0 * * * *";
+        case "daily": return mm + " " + hh + " * * *";
+        case "weekdays": return mm + " " + hh + " * * 1-5";
+        case "weekly": return mm + " " + hh + " * * " + day.value;
+        case "custom": return cron.value.trim();
+        default: return "";
+      }
+    }
+    function draw() {
+      box.textContent = "";
+      box.appendChild(pick);
+      if (pick.value === "weekly") box.appendChild(day);
+      if (["daily", "weekdays", "weekly"].indexOf(pick.value) >= 0) box.appendChild(time);
+      if (pick.value === "custom") box.appendChild(cron);
+    }
+    [pick, time, day].forEach(function (el) { el.addEventListener("change", function () { draw(); onChange(value()); }); });
+    cron.addEventListener("input", function () { onChange(value()); });
+    draw();
+    return box;
+  }
+  function schedText(spec) {
+    if (!spec) return "";
+    var m = /^(\d+) (\d+) \* \* (\*|1-5|[0-6])$/.exec(spec), at = m ? ("0" + m[2]).slice(-2) + ":" + ("0" + m[1]).slice(-2) : "";
+    if (/^\d+ \* \* \* \*$/.test(spec)) return "every hour";
+    if (m) return m[3] === "*" ? "every day " + at : m[3] === "1-5" ? "weekdays " + at : ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][+m[3]] + " " + at;
+    return "cron " + spec;
+  }
+
   function pageWorkflowEditor(m, name) {
-    var c = null, wf = null, original = name || null, sel = null, selEdge = null, dirty = false, skills = [];
+    var c = null, wf = null, original = name || null, sel = null, selEdge = null, selLoop = null, dirty = false, skills = [];
     // Where the workflow lives: { kind: "config" } (this machine's indra.toml) or
     // { kind: "repo", repo: dir, file: path } (committed with a repository).
     var loc = { kind: "config" }, was = null;
@@ -2994,7 +3111,7 @@
     var status = h("span", { class: "muted small" });
     var save = h("button", { class: "primary", type: "button" }, "Save");
     var layoutBtn = h("button", { type: "button" }, "Tidy layout");
-    m.appendChild(header(original ? "Edit workflow " + original : "New workflow", "Drag tasks, skills, saved tasks and workflows in from the left. Drag from a step's right edge to another step to make the second run after the first. Select a step or an arrow and press Delete (or its \u00d7) to remove it.", [status, layoutBtn, save]));
+    m.appendChild(header(original ? "Edit workflow " + original : "New workflow", "Drag steps in from the left and link them: drag from a step's right edge to the next step. An If has a Yes and a No edge; drop For each or Repeat on a step to loop it; click Start to schedule the workflow. Select a step or an arrow and press Delete (or its \u00d7) to remove it.", [status, layoutBtn, save]));
     m.appendChild(h("div", { class: "wfedit" }, palette, scroller, inspector));
     m.appendChild(modelList() || h("span"));
 
@@ -3033,10 +3150,12 @@
       return false;
     }
     // The Start and End blocks sit left and right of the steps (drawn only).
-    var OX = 130;
+    var OX = 190;
+    function isIf(t) { return t && t["if"] != null; }
     function kind(t) {
+      if (isIf(t)) return "If " + condText(t["if"]);
       var k = t.stop ? "stop: end as " + t.stop : t.workflow ? "workflow " + t.workflow : t.run ? "$ " + t.run.split("\n")[0] : t.skill ? "skill " + t.skill : t.component ? "saved task " + t.component : "task";
-      var flow = [t.on && t.on !== "success" ? "on " + t.on : "", t.when ? "if" : "", t.foreach ? "for each" : "", t.until ? "until" : ""].filter(Boolean);
+      var flow = [t.on && t.on !== "success" ? "on " + t.on : "", t.when ? "only if" : ""].filter(Boolean);
       return flow.length ? k + "  [" + flow.join(", ") + "]" : k;
     }
 
@@ -3045,18 +3164,24 @@
       while (svg.firstChild) svg.removeChild(svg.firstChild);
       var maxX = 900, maxY = 500;
       wf.task.forEach(function (t) {
-        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (t.stop ? " stopstep " + t.stop : t.workflow ? " sub" : t.run ? " cmdstep" : t.skill ? " skill" : t.component ? " comp" : "") + (t.on === "failure" ? " onfail" : ""), tabindex: "0", "data-id": t.id },
+        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (isIf(t) ? " ifstep" : "") + (t.foreach != null ? " looped" : "") + (t.stop ? " stopstep " + t.stop : t.workflow ? " sub" : t.run ? " cmdstep" : t.skill ? " skill" : t.component ? " comp" : "") + (t.on === "failure" ? " onfail" : ""), tabindex: "0", "data-id": t.id },
           h("button", { type: "button", class: "gdel", title: "Delete this step", "aria-label": "Delete step " + t.id }, "\u00d7"),
+          t.foreach != null ? h("div", { class: "band each", "data-loop": "foreach", title: "Runs once per item: click to change" }, "\u21bb for each: " + (String(t.foreach).trim() || "(add items)")) : null,
+          t.until != null ? h("div", { class: "band until", "data-loop": "until", title: "Runs again until this holds: click to change" }, "\u21ba repeat until " + condText(t.until) + ", at most " + (t.max_runs || 3)) : null,
           h("span", { class: "port in", title: "runs after" }),
           h("b", { text: t.id }), h("small", { text: kind(t) }),
-          h("small", { class: "muted", text: t.stop ? (t.when ? "if " + t.when : "always, once reached") : [t.node || "local", t.profile || t.runner || ""].filter(Boolean).join(" - ") }),
-          h("span", { class: "port out", title: "drag to the task that runs after this one" }));
+          isIf(t) ? null : h("small", { class: "muted", text: t.stop ? (t.when ? "if " + t.when : "always, once reached") : [t.node || "local", t.profile || t.runner || ""].filter(Boolean).join(" - ") }),
+          isIf(t) ? [h("span", { class: "port out yes", "data-branch": "yes", title: "Yes: drag to the step that runs when the answer is yes" }), h("span", { class: "plabel yes", text: "Yes" }),
+            h("span", { class: "port out no", "data-branch": "no", title: "No: drag to the step that runs when the answer is no" }), h("span", { class: "plabel no", text: "No" })]
+            : h("span", { class: "port out", title: "drag to the task that runs after this one" }));
         n.style.left = (t.pos[0] + OX) + "px"; n.style.top = t.pos[1] + "px";
         canvas.appendChild(n);
         maxX = Math.max(maxX, t.pos[0] + OX + 400); maxY = Math.max(maxY, t.pos[1] + 260);
         n.addEventListener("pointerdown", function (e) {
           if (e.target.classList.contains("gdel")) { e.stopPropagation(); e.preventDefault(); removeTask(t.id); return; }
-          if (e.target.classList.contains("out")) return connect(e, t);
+          if (e.target.classList.contains("out")) return connect(e, t, e.target.getAttribute("data-branch"));
+          var band = e.target.closest(".band");
+          if (band) { e.preventDefault(); e.stopPropagation(); selectLoop(t.id, band.getAttribute("data-loop")); return; }
           select(t.id); e.preventDefault(); n.focus({ preventScroll: true });
           var sx = e.clientX, sy = e.clientY, ox = t.pos[0], oy = t.pos[1];
           try { n.setPointerCapture(e.pointerId); } catch (x) { /* a synthetic or ended pointer */ }
@@ -3079,17 +3204,23 @@
       if (!wf.task.length) return;
       function midY(list) { return list.length ? list.reduce(function (a, t) { return a + t.pos[1]; }, 0) / list.length + 22 : 40; }
       var right = Math.max.apply(null, wf.task.map(function (t) { return t.pos[0]; })) + OX + 250;
-      [["__start", "Start", 16, midY(roots())], ["__end", "End", right, midY(leaves())]].forEach(function (x) {
+      [["__start", "Start", 16, midY(roots()) - (wf.schedule ? 10 : 0)], ["__end", "End", right, midY(leaves())]].forEach(function (x) {
         var n = h("div", { class: "gnode gend " + (x[0] === "__start" ? "gstart" : "gfinish"), "data-id": x[0], title: x[0] === "__start" ? "Steps that need nothing start here" : "The workflow ends when every step has finished (or a stop step ends it)" },
-          h("b", { text: x[1] }));
+          h("b", { text: x[1] }), x[0] === "__start" ? h("small", { class: "muted", text: wf.schedule ? "\u23f0 " + schedText(wf.schedule) : "click to schedule" }) : null);
         n.style.left = x[2] + "px"; n.style.top = x[3] + "px";
+        if (x[0] === "__start") {
+          n.classList.add("click"); n.title = "When the workflow runs: click to schedule it";
+          n.addEventListener("pointerdown", function (e) { e.stopPropagation(); sel = null; selEdge = null; selLoop = null; draw(); inspect(); });
+        }
         canvas.appendChild(n);
       });
       var w = Math.max(parseInt(canvas.style.width, 10) || 0, right + 120);
       canvas.style.width = w + "px"; svg.setAttribute("width", w);
     }
-    function center(id, side) {
+    function center(id, side, branch) {
       var n = canvas.querySelector('.gnode[data-id="' + CSS.escape(id) + '"]'); if (!n) return null;
+      var port = branch && n.querySelector(".port.out." + branch);
+      if (port) return { x: n.offsetLeft + n.offsetWidth, y: n.offsetTop + port.offsetTop + port.offsetHeight / 2 };
       return { x: n.offsetLeft + (side === "out" ? n.offsetWidth : 0), y: n.offsetTop + n.offsetHeight / 2 };
     }
     function path(a, b) { var dx = Math.max(40, Math.abs(b.x - a.x) / 2); return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " " + (b.x - dx) + "," + b.y + " " + b.x + "," + b.y; }
@@ -3103,22 +3234,39 @@
       roots().forEach(function (t) { line(center("__start", "out"), center(t.id, "in"), "implicit"); });
       leaves().forEach(function (t) { line(center(t.id, "out"), center("__end", "in"), "implicit" + (t.stop ? " " + t.stop : "")); });
       wf.task.forEach(function (t) {
+        // Repeat until: an arrow from its end back to its start.
+        if (t.until != null) {
+          var nd = canvas.querySelector('.gnode[data-id="' + CSS.escape(t.id) + '"]');
+          if (nd) {
+            var lx = nd.offsetLeft, rx = lx + nd.offsetWidth, ty = nd.offsetTop + 8;
+            var lp = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            lp.setAttribute("d", "M" + rx + "," + ty + " C" + (rx + 30) + "," + (ty - 46) + " " + (lx - 30) + "," + (ty - 46) + " " + lx + "," + ty);
+            lp.setAttribute("class", "edge loopback"); svg.appendChild(lp);
+          }
+        }
         (t.needs || []).forEach(function (from) {
-          var a = center(from, "out"), b = center(t.id, "in"); if (!a || !b) return;
+          var src = task(from), br = isIf(src) ? (t.branch || "yes") : null;
+          var a = center(from, "out", br), b = center(t.id, "in"); if (!a || !b) return;
           var on = selEdge && selEdge[0] === from && selEdge[1] === t.id;
           var hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
           hit.setAttribute("d", path(a, b)); hit.setAttribute("class", "hit");
           hit.addEventListener("pointerdown", function (e) { e.stopPropagation(); selEdge = [from, t.id]; sel = null; inspect(); edges(); });
           var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-          p.setAttribute("d", path(a, b)); p.setAttribute("class", "edge" + (on ? " on" : "") + (t.on === "failure" ? " fail" : t.on === "always" ? " always" : ""));
+          p.setAttribute("d", path(a, b)); p.setAttribute("class", "edge" + (on ? " on" : "") + (br ? " " + br : "") + (t.on === "failure" ? " fail" : t.on === "always" ? " always" : ""));
           svg.appendChild(p); svg.appendChild(hit);
+          if (br || (t.on && t.on !== "success")) {
+            var lb = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            lb.setAttribute("x", (a.x + b.x) / 2); lb.setAttribute("y", (a.y + b.y) / 2 - 6); lb.setAttribute("class", "elabel " + (br || t.on));
+            lb.textContent = br ? (br === "yes" ? "Yes" : "No") : t.on === "failure" ? "if it fails" : "either way";
+            svg.appendChild(lb);
+          }
         });
       });
     }
-    function connect(e, from) {
+    function connect(e, from, branch) {
       e.preventDefault(); e.stopPropagation();
       var line = document.createElementNS("http://www.w3.org/2000/svg", "path"); line.setAttribute("class", "edge draft"); svg.appendChild(line);
-      var a = center(from.id, "out"), box = canvas.getBoundingClientRect();
+      var a = center(from.id, "out", branch), box = canvas.getBoundingClientRect();
       function mv(ev) { line.setAttribute("d", path(a, { x: ev.clientX - box.left, y: ev.clientY - box.top })); }
       function up(ev) {
         document.removeEventListener("pointermove", mv); document.removeEventListener("pointerup", up); line.remove();
@@ -3128,7 +3276,9 @@
         if (!to || to.id === from.id) return;
         if ((to.needs || []).indexOf(from.id) >= 0) return;
         if (reaches(to.id, from.id)) { toast("That would make a loop: " + from.id + " already runs after " + to.id, true); return; }
-        to.needs = (to.needs || []).concat([from.id]); changed(); draw(); select(to.id);
+        to.needs = (to.needs || []).concat([from.id]);
+        if (branch) to.branch = branch;
+        changed(); draw(); select(to.id);
       }
       document.addEventListener("pointermove", mv); document.addEventListener("pointerup", up);
     }
@@ -3136,31 +3286,69 @@
       var gone = task(id); if (!gone) return;
       var before = JSON.parse(JSON.stringify(wf.task));
       wf.task = wf.task.filter(function (t) { return t.id !== id; });
-      wf.task.forEach(function (t) { t.needs = (t.needs || []).filter(function (n) { return n !== id; }); });
+      wf.task.forEach(function (t) { if ((t.needs || []).indexOf(id) >= 0) unlink(id, t.id); });
       sel = null; changed(); draw(); inspect();
       toastAction("Deleted step " + id, "Undo", function () { wf.task = before; sel = id; changed(); draw(); inspect(); });
     }
-    function select(id) { sel = id; selEdge = null; Array.prototype.forEach.call(canvas.querySelectorAll(".gnode"), function (n) { n.classList.toggle("sel", n.getAttribute("data-id") === id); }); edges(); inspect(); }
+    // Remove a link; a step no longer after an If loses its Yes/No side.
+    function unlink(from, to) {
+      var t = task(to); if (!t) return;
+      t.needs = (t.needs || []).filter(function (n) { return n !== from; });
+      if (t.branch && !t.needs.some(function (n) { return isIf(task(n)); })) delete t.branch;
+    }
+    function selectLoop(id, which) { sel = id; selEdge = null; selLoop = which; Array.prototype.forEach.call(canvas.querySelectorAll(".gnode"), function (n) { n.classList.toggle("sel", n.getAttribute("data-id") === id); }); edges(); inspect(); }
+    function select(id) { sel = id; selEdge = null; selLoop = null; Array.prototype.forEach.call(canvas.querySelectorAll(".gnode"), function (n) { n.classList.toggle("sel", n.getAttribute("data-id") === id); }); edges(); inspect(); }
     document.addEventListener("keydown", function onKey(e) {
       if (!document.body.contains(canvas)) { document.removeEventListener("keydown", onKey); return; }
       var typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
       if (sel && !selEdge && (e.key === "Delete" || e.key === "Backspace") && !typing) { removeTask(sel); e.preventDefault(); return; }
       if (selEdge && (e.key === "Delete" || e.key === "Backspace") && !typing) {
-        var t = task(selEdge[1]); if (t) t.needs = t.needs.filter(function (n) { return n !== selEdge[0]; });
+        unlink(selEdge[0], selEdge[1]);
         selEdge = null; changed(); draw(); inspect(); e.preventDefault();
       }
     });
-    scroller.addEventListener("pointerdown", function (e) { if (e.target === canvas || e.target === svg || e.target === scroller) { sel = null; selEdge = null; draw(); inspect(); } });
+    scroller.addEventListener("pointerdown", function (e) { if (e.target === canvas || e.target === svg || e.target === scroller) { sel = null; selEdge = null; selLoop = null; draw(); inspect(); } });
 
     function field(label, el, help) { return h("label", null, label, help ? h("small", { text: help }) : null, el); }
     function inspect() {
       inspector.textContent = "";
       if (selEdge) {
-        inspector.appendChild(h("h3", { text: "Link" }));
-        inspector.appendChild(h("p", { text: selEdge[1] + " runs after " + selEdge[0] + "." }));
-        inspector.appendChild(h("button", { type: "button", class: "danger", onclick: function () {
-          var t = task(selEdge[1]); t.needs = t.needs.filter(function (n) { return n !== selEdge[0]; }); selEdge = null; changed(); draw(); inspect();
-        } }, "Remove link"));
+        var lt = task(selEdge[1]), lf = task(selEdge[0]);
+        var lbox = h("div", { class: "form" }, h("h3", { text: "Link" }));
+        if (isIf(lf)) {
+          var side = h("select", null, h("option", { value: "yes", text: "when the answer is Yes" }), h("option", { value: "no", text: "when the answer is No" }));
+          side.value = lt.branch || "yes";
+          side.addEventListener("change", function () { lt.branch = side.value; changed(); draw(); });
+          lbox.appendChild(field(selEdge[1] + " runs", side, "The If asks: " + condText(lf["if"]) + "?"));
+        } else {
+          var when = h("select", null, h("option", { value: "", text: "when it succeeds" }), h("option", { value: "failure", text: "when it fails (to report or fix)" }), h("option", { value: "always", text: "either way, once it is done (to clean up)" }));
+          when.value = lt.on || "";
+          when.addEventListener("change", function () { if (when.value) lt.on = when.value; else delete lt.on; changed(); draw(); });
+          lbox.appendChild(field(selEdge[1] + " runs after " + selEdge[0], when, (lt.needs || []).length > 1 ? "For every step " + selEdge[1] + " runs after." : null));
+        }
+        lbox.appendChild(h("button", { type: "button", class: "danger", onclick: function () { unlink(selEdge[0], selEdge[1]); selEdge = null; changed(); draw(); inspect(); } }, "Remove link"));
+        inspector.appendChild(lbox);
+        return;
+      }
+      // The loop on a step: what it repeats over, or until when.
+      if (sel && selLoop && task(sel)) {
+        var lt2 = task(sel), lb2 = h("div", { class: "form" });
+        if (selLoop === "foreach") {
+          var items = h("textarea", { placeholder: "api, web, worker\n(one per line, or commas; or {input.NAME})" }); items.value = lt2.foreach == null ? "" : Array.isArray(lt2.foreach) ? lt2.foreach.join("\n") : String(lt2.foreach);
+          items.addEventListener("input", function () { lt2.foreach = items.value; changed(); });
+          items.addEventListener("change", draw);
+          lb2.appendChild(h("h3", { text: "For each" }));
+          lb2.appendChild(field("Items", items, sel + " runs once per item, side by side. Use {item} in its prompt or folder ($INDRA_ITEM in a command)."));
+          lb2.appendChild(h("button", { type: "button", class: "danger", onclick: function () { delete lt2.foreach; selLoop = null; changed(); draw(); inspect(); } }, "Remove the loop"));
+        } else {
+          lb2.appendChild(h("h3", { text: "Repeat until" }));
+          lb2.appendChild(field(sel + " runs again until", condEditor(lt2.until || "", [], [], true, function (v) { lt2.until = v; changed(); draw(); }), "Checked after each run that succeeds."));
+          var mx = h("input", { type: "number", min: "1", max: "20", value: String(lt2.max_runs || 3) });
+          mx.addEventListener("input", function () { lt2.max_runs = Math.max(1, Math.min(20, Number(mx.value) || 3)); changed(); draw(); });
+          lb2.appendChild(field("At most (runs)", mx));
+          lb2.appendChild(h("button", { type: "button", class: "danger", onclick: function () { delete lt2.until; delete lt2.max_runs; selLoop = null; changed(); draw(); inspect(); } }, "Remove the loop"));
+        }
+        inspector.appendChild(lb2);
         return;
       }
       var t = sel && task(sel);
@@ -3174,7 +3362,9 @@
         where.value = loc.kind === "repo" ? loc.repo : "config";
         where.addEventListener("change", function () { loc = where.value === "config" ? { kind: "config" } : { kind: "repo", repo: where.value, file: loc.kind === "repo" && loc.repo === where.value ? loc.file : null }; changed(); inspect(); });
         var file = loc.kind === "repo" ? (loc.file || (((c.repo.repos || []).find(function (r) { return r.dir === loc.repo; }) || {}).folder + "/" + (wf.name || "workflow") + ".toml")) : c.path;
+        var sch = scheduleEditor(wf.schedule || "", function (v) { if (v) wf.schedule = v; else delete wf.schedule; changed(); drawEnds(); edges(); });
         inspector.appendChild(h("div", { class: "form" }, h("h3", { text: "Workflow" }), field("Name", nm, "Run it with `indra run <name>` or from the Workflows page."), field("Description", ds),
+          field("Runs", sch, "On a schedule it runs by itself while the console (indra serve) runs, in this computer's time; its inputs take their defaults."),
           field("Saved in", where, "In a repository it is a file in .indra/workflows/: commit it, and everyone with that repository gets the workflow (workflows as code). Steps with no target run in that repository."),
           h("p", { class: "muted small" }, "File: ", h("code", { text: file || "" })),
           h("p", { class: "muted small", text: wf.task.length + " steps. Select a step to edit it." })));
@@ -3188,7 +3378,7 @@
         wf.task.forEach(function (x) { x.needs = (x.needs || []).map(function (n) { return n === t.id ? v : n; }); });
         t.id = v; sel = v; changed(); draw();
       });
-      f.appendChild(h("div", { class: "row inspect-head" }, h("h3", { text: t.stop ? "Stop step" : t.workflow ? "Sub-workflow step" : t.run != null ? "Command step" : t.skill ? "Skill step" : "Task" }),
+      f.appendChild(h("div", { class: "row inspect-head" }, h("h3", { text: isIf(t) ? "If" : t.stop ? "Stop step" : t.workflow ? "Sub-workflow step" : t.run != null ? "Command step" : t.skill ? "Skill step" : "Task" }),
         h("button", { type: "button", class: "danger small", title: "Delete this step (or press Delete)", onclick: function () { removeTask(t.id); } }, "Delete step")));
       f.appendChild(field("Id", idIn));
       function sel_(k, options, blank, help) {
@@ -3203,7 +3393,17 @@
         el.addEventListener("change", draw);
         return el;
       }
-      if (t.stop) {
+      // The steps before this one (what a condition may read), and the inputs.
+      function earlier(id) {
+        var seen = {}, stack = (task(id).needs || []).slice(), out = [];
+        while (stack.length) { var x = stack.pop(); if (seen[x]) continue; seen[x] = 1; out.push(x); var tt = task(x); if (tt) stack = stack.concat(tt.needs || []); }
+        return out.filter(function (x) { var tt = task(x); return tt && !isIf(tt) && tt.foreach == null; });
+      }
+      var inputNames = (wf.input || []).map(function (i) { return i.name; });
+      if (isIf(t)) {
+        f.appendChild(field("Asks", condEditor(t["if"], earlier(t.id), inputNames, false, function (v) { t["if"] = v; changed(); draw(); select(t.id); }),
+          "Drag from Yes (green) to what runs when the answer is yes, and from No (red) to what runs when it is no. A step both sides lead to runs after whichever side ran."));
+      } else if (t.stop) {
         f.appendChild(field("Ends the workflow as", sel_("stop", ["success", "failure"], null),
           "When this step is reached (after the steps before it, and only if its condition holds), the workflow ends at once: steps not yet started are skipped and running ones are stopped."));
         f.appendChild(field("Only if", text("when", false, "e.g. scan.output contains 'no findings'"), "Without a condition it ends the workflow as soon as it is reached."));
@@ -3238,24 +3438,12 @@
         if (t.run == null) f.appendChild(field(t.skill ? "Arguments" : "Prompt", text("prompt", true, t.skill ? "{target}" : cc && cc.prompt ? cc.prompt : "What should the agent do? {target}, {node}, {input.NAME}, {item} and {steps.STEP.output} are filled in."),
           t.skill ? "Default {target}: the directory it runs in." : "{steps.STEP.output} is an earlier step's result (it must run before this one)."));
         f.appendChild(field("Retries", text("retries", false, cc && cc.retries ? String(cc.retries) : "0")));
-        // Control flow.
-        var flowBox = h("details", { class: "flowbox", open: t.when || t.on || t.foreach || t.until || t.allow_failure ? "" : null }, h("summary", { text: "Conditions and loops" }));
-        flowBox.appendChild(field("Runs", sel_("on", ["failure", "always"], "when the steps before it succeed"),
-          "On failure: only if a step before it failed (to report or fix). Always: once they finish, however they went (to clean up)."));
-        flowBox.appendChild(field("Only if", text("when", false, "e.g. test.failed and input.fix == 'true'"),
-          "A condition on earlier steps (STEP.succeeded, .failed, .skipped, .output contains 'x', .exit_code != 0) and inputs (input.NAME); and, or, not. False: the step is skipped."));
         var af = h("input", { type: "checkbox" }); af.checked = !!t.allow_failure;
         af.addEventListener("change", function () { if (af.checked) t.allow_failure = true; else delete t.allow_failure; changed(); draw(); select(t.id); });
-        flowBox.appendChild(h("label", { class: "check" }, af, " Its failure does not fail the workflow (what follows still runs; STEP.failed tells)"));
-        var fe = h("input", { type: "text", placeholder: "api, web, worker  or  {input.services}" });
-        fe.value = t.foreach == null ? "" : Array.isArray(t.foreach) ? t.foreach.join(", ") : t.foreach;
-        fe.addEventListener("input", function () { if (fe.value.trim()) t.foreach = fe.value; else delete t.foreach; changed(); });
-        fe.addEventListener("change", draw);
-        flowBox.appendChild(field("For each", fe, "One copy per item, in parallel ({item} in the prompt and target, $INDRA_ITEM in a command); separate with commas or new lines."));
-        flowBox.appendChild(field("Repeat until", text("until", false, "e.g. self.output contains 'PASS'"), "Runs again after a success until this holds (self.output, self.exit_code)."));
-        var mr = text("max_runs", false, "3"); mr.addEventListener("input", function () { if (mr.value.trim()) t.max_runs = Number(mr.value) || 3; else delete t.max_runs; });
-        flowBox.appendChild(field("At most (runs)", mr));
-        f.appendChild(flowBox);
+        f.appendChild(h("label", { class: "check" }, af, " Keep going if this step fails"));
+        f.appendChild(h("p", { class: "muted small", text: "To loop it, drop For each or Repeat until on it; to choose what follows, add an If; to run it when a step fails, click the arrow into it." }));
+        if (t.when) f.appendChild(h("div", { class: "note" }, "Only if: " + condText(t.when) + " ",
+          h("button", { type: "button", class: "ghost small", title: "Conditions are If blocks now: add one before this step", onclick: function () { delete t.when; changed(); draw(); select(t.id); } }, "Remove")));
       }
       f.appendChild(h("p", { class: "muted small", text: (t.needs || []).length ? "Runs after: " + t.needs.join(", ") : "Runs first (nothing before it)." }));
       f.appendChild(h("div", { class: "row" },
@@ -3276,7 +3464,16 @@
     }
 
     var pendingComps = [];
+    // A loop goes onto a step (the one dropped on, or the selected one).
+    function addLoop(which, onto) {
+      var t = onto && task(onto);
+      if (!t || isIf(t) || t.stop || t.workflow) { toast("Drop " + (which === "foreach" ? "For each" : "Repeat until") + " on a task or command step", true); return; }
+      if (which === "foreach") { if (t.foreach == null) t.foreach = ""; }
+      else if (t.until == null) { t.until = ""; t.max_runs = t.max_runs || 3; }
+      changed(); draw(); selectLoop(t.id, which);
+    }
     function add(spec, x, y) {
+      if (spec.loop) { addLoop(spec.loop, sel); return; }
       // Not on top of another step: move down (then right) to a free spot.
       function taken(px, py) { return wf.task.some(function (o) { return o.pos && Math.abs(o.pos[0] - px) < 200 && Math.abs(o.pos[1] - py) < 110; }); }
       for (var tries = 0; taken(x, y) && tries < 60; tries++) { y += 130; if (tries % 5 === 4) { y -= 650; x += 280; } }
@@ -3286,6 +3483,7 @@
       if (spec.skill) t.skill = spec.skill;
       if (spec.run != null) { t.run = spec.run; t.id = uniqueId("command"); }
       if (spec.stop) { t.stop = spec.stop; t.id = uniqueId("stop"); }
+      if (spec.check) { t["if"] = ""; t.id = uniqueId("if"); }
       wf.task.push(t); changed(); draw(); select(t.id);
     }
     function renderPalette() {
@@ -3300,7 +3498,11 @@
       palette.appendChild(h("h3", { text: "Add" }));
       palette.appendChild(item("Task", "an agent with a prompt", {}));
       palette.appendChild(item("Command", "a shell command (bash)", { run: "" }));
-      palette.appendChild(item("Stop", "end the workflow here (if...)", { stop: "success" }));
+      palette.appendChild(item("If", "check something, then Yes or No", { check: true }));
+      palette.appendChild(item("Stop", "end the workflow here", { stop: "success" }));
+      palette.appendChild(h("h3", { text: "Loops", title: "Drop one on a step" }));
+      palette.appendChild(item("For each", "drop on a step: once per item", { loop: "foreach" }));
+      palette.appendChild(item("Repeat until", "drop on a step: again until...", { loop: "until" }));
       palette.appendChild(h("h3", { text: "Skills", title: "Run one of the harness's skills as a step" }));
       if (!skills.length) palette.appendChild(h("p", { class: "muted small", text: "This harness has no skills." }));
       var sf = null;
@@ -3330,7 +3532,13 @@
     scroller.addEventListener("drop", function (e) {
       var d = e.dataTransfer.getData("application/x-indra"); if (!d) return;
       e.preventDefault(); var box = canvas.getBoundingClientRect();
-      add(JSON.parse(d), e.clientX - box.left - 90 - OX, e.clientY - box.top - 30);
+      var spec = JSON.parse(d);
+      if (spec.loop) {
+        var hit = document.elementFromPoint(e.clientX, e.clientY), node = hit && hit.closest(".gnode");
+        addLoop(spec.loop, node && node.getAttribute("data-id"));
+        return;
+      }
+      add(spec, e.clientX - box.left - 90 - OX, e.clientY - box.top - 30);
     });
     layoutBtn.addEventListener("click", function () { tidy(true); changed(); draw(); });
     save.addEventListener("click", function () {
@@ -3338,7 +3546,15 @@
       if (!wf.task.length) { toast("Add at least one step", true); return; }
       var clean = JSON.parse(JSON.stringify(wf));
       if (!clean.description) delete clean.description;
-      clean.task.forEach(function (t) { if (!t.needs || !t.needs.length) delete t.needs; if (!t.retries) delete t.retries; });
+      var problem = null;
+      clean.task.forEach(function (t) {
+        if (!t.needs || !t.needs.length) delete t.needs; if (!t.retries) delete t.retries;
+        if (t.foreach != null && !String(t.foreach).trim()) problem = problem || "For each on " + t.id + " has no items";
+        if (t.until != null && !String(t.until).trim()) problem = problem || "Repeat on " + t.id + " has no condition";
+        if (t["if"] != null && !String(t["if"]).trim()) problem = problem || "The If " + t.id + " has no condition";
+        if (t.branch && !(t.needs || []).some(function (n) { return clean.task.some(function (x) { return x.id === n && x["if"] != null; }); })) delete t.branch;
+      });
+      if (problem) { toast(problem + ": select it to finish it, or remove it.", true); return; }
       save.disabled = true;
       // Out of the config file, when it is in there under its old name.
       function dropFromConfig(cc) {

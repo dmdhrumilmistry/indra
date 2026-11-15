@@ -54,6 +54,16 @@ pub struct TaskRun {
     /// A stop step: "success" or "failure".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<String>,
+    /// An If step's condition (it answers "yes" or "no" in its output).
+    #[serde(rename = "if", skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// The answer of the If step before it that this step follows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Skipped because an If went the other way: a step that both sides
+    /// lead to still runs after the side that ran.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub off_branch: bool,
     pub node: String,
     pub target: String,
     pub runner: String,
@@ -108,6 +118,8 @@ struct Res {
     output: String,
     exit_code: Option<i32>,
     allow_failure: bool,
+    is_check: bool,
+    off_branch: bool,
 }
 
 fn snapshot(tasks: &[TaskRun]) -> HashMap<String, Res> {
@@ -121,6 +133,8 @@ fn snapshot(tasks: &[TaskRun]) -> HashMap<String, Res> {
                     output: t.output.clone().unwrap_or_default(),
                     exit_code: t.exit_code,
                     allow_failure: t.allow_failure,
+                    is_check: t.check.is_some(),
+                    off_branch: t.off_branch,
                 },
             )
         })
@@ -404,6 +418,8 @@ impl Engine {
                             output: t.output.clone().unwrap_or_default(),
                             exit_code: t.exit_code,
                             allow_failure: t.allow_failure,
+                            is_check: false,
+                            off_branch: false,
                         };
                         !holds(u, &snap, &inputs, Some(&me))
                     });
@@ -465,11 +481,43 @@ impl Engine {
             let done =
                 |n: &String| matches!(state(n), "succeeded" | "failed" | "skipped" | "cancelled");
             // Failed, but allowed to: what follows on success still runs.
+            // A side an If did not take counts as done: a step both sides
+            // lead to runs after the side that ran.
+            let off = |n: &String| {
+                snap.get(n)
+                    .is_some_and(|x| x.state == "skipped" && x.off_branch)
+            };
             let ok = |n: &String| {
                 state(n) == "succeeded"
                     || (state(n) == "failed" && snap.get(n).is_some_and(|x| x.allow_failure))
+                    || off(n)
             };
             let all_done = t.needs.iter().all(done);
+            // Which side of an If this step is on, once its If answered.
+            if let Some(b) = t.branch.as_deref() {
+                let other_way = t.needs.iter().any(|n| {
+                    snap.get(n)
+                        .is_some_and(|x| x.is_check && x.state == "succeeded" && x.output != b)
+                });
+                if other_way {
+                    t.state = "skipped";
+                    t.off_branch = true;
+                    t.error = Some(format!(
+                        "the If before it answered the other way (it runs on \"{}\")",
+                        b
+                    ));
+                    t.ended = Some(now());
+                    continue;
+                }
+            }
+            // Everything it follows was on a side not taken: so is it.
+            if !t.needs.is_empty() && t.needs.iter().all(off) {
+                t.state = "skipped";
+                t.off_branch = true;
+                t.error = Some("on a side of an If that was not taken".into());
+                t.ended = Some(now());
+                continue;
+            }
             let go: Result<bool, &str> = match t.on.as_str() {
                 "failure" if all_done => {
                     if t.needs.iter().any(|n| state(n) == "failed") {
@@ -504,6 +552,23 @@ impl Engine {
                     t.ended = Some(now());
                 }
             }
+        }
+
+        // An If step runs nothing: it checks its condition and answers.
+        let snap2 = snapshot(&r.tasks);
+        for t in r
+            .tasks
+            .iter_mut()
+            .filter(|t| t.state == "queued" && t.check.is_some())
+        {
+            let c = t.check.clone().unwrap_or_default();
+            let yes = holds(&c, &snap2, &inputs, None);
+            t.state = "succeeded";
+            t.started = Some(now());
+            t.ended = Some(now());
+            t.output = Some(if yes { "yes" } else { "no" }.into());
+            t.exit_code = Some(0);
+            t.runs = 1;
         }
 
         // A stop step that is reached ends the workflow: nothing else starts,
@@ -784,6 +849,9 @@ fn task_run(t: &TaskCfg) -> TaskRun {
         exit_code: None,
         runs: 0,
         stop: t.stop.clone(),
+        check: t.check.clone(),
+        branch: t.branch.clone(),
+        off_branch: false,
         node: t.node.clone(),
         target: t.target.clone(),
         runner: t.runner.clone(),
@@ -855,6 +923,7 @@ pub fn fan_out(runner: &str, prompt: &str, targets: &[(String, String)]) -> Work
         .collect();
     WorkflowCfg {
         inputs: vec![],
+        schedule: None,
         builtin: false,
         source: None,
         values: Default::default(),
@@ -892,6 +961,7 @@ mod tests {
 
     fn wf(tasks: Vec<TaskCfg>) -> WorkflowCfg {
         WorkflowCfg {
+            schedule: None,
             inputs: vec![],
             builtin: false,
             source: None,

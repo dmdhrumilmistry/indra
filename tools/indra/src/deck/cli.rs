@@ -369,6 +369,8 @@ async fn serve(
             saving: std::sync::Mutex::new(()),
         }),
     );
+    // Workflows with a schedule run by themselves while the console runs.
+    web::start_scheduler(app.clone());
     app.shell
         .store(editing.shell, std::sync::atomic::Ordering::SeqCst);
     // Let `indra agents` / `indra attach` on this machine find the console.

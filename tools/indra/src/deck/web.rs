@@ -1625,6 +1625,44 @@ fn refresh_repo_workflows(app: &App) {
     let _ = reload_settings(app, c);
 }
 
+/// Run workflows that have a `schedule` when it comes due (checked every
+/// 15 s, at most once a minute each, in the hub's local time). A run that
+/// cannot start (an input with no default, say) is logged.
+pub fn start_scheduler(app: Arc<App>) {
+    tokio::spawn(async move {
+        let mut last: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            if app.settings().read_only {
+                continue;
+            }
+            refresh_repo_workflows(&app);
+            let minute = runs::now() / 60;
+            let when = crate::deck::cron::now_local();
+            for w in app.settings().workflows.iter() {
+                let Some(sc) = &w.schedule else { continue };
+                let Ok(c) = crate::deck::cron::Cron::parse(sc) else {
+                    continue;
+                };
+                if !c.matches(&when) || last.get(&w.name) == Some(&minute) {
+                    continue;
+                }
+                last.insert(w.name.clone(), minute);
+                match app.engine.start_with_inputs(&w.name, &Default::default()) {
+                    Ok(id) => eprintln!(
+                        "indra: started workflow '{}' (#{}) on its schedule",
+                        w.name, id
+                    ),
+                    Err(e) => eprintln!(
+                        "indra: workflow '{}' did not start on its schedule: {}",
+                        w.name, e
+                    ),
+                }
+            }
+        }
+    });
+}
+
 async fn workflows_list(State(app): State<Arc<App>>) -> Json<Value> {
     refresh_repo_workflows(&app);
     let defs: Vec<Value> = app
@@ -1635,6 +1673,9 @@ async fn workflows_list(State(app): State<Arc<App>>) -> Json<Value> {
             let mut v = json!(w);
             v["builtin"] = json!(w.builtin);
             v["source"] = json!(w.source.as_ref().map(|p| p.display().to_string()));
+            if let Some(sc) = &w.schedule {
+                v["schedule_text"] = json!(crate::deck::cron::describe(sc));
+            }
             v
         })
         .collect();

@@ -589,3 +589,78 @@ fn profiles_reach_remote_agents_over_the_control_channel() {
         log
     );
 }
+
+/// An If step answers yes or no; the side not taken is skipped, and a step
+/// both sides lead to runs after the side that ran.
+#[test]
+fn if_steps_take_one_side_and_the_sides_meet_again() {
+    let e = Env::new("ifs");
+    let hub = e.hub(
+        "[[workflow]]\nname = \"gate\"\n\
+         [[workflow.task]]\nid = \"test\"\ntarget = \"local-web\"\nrun = \"echo tests FAILED\"\n\
+         [[workflow.task]]\nid = \"passed\"\ntarget = \"local-web\"\nneeds = [\"test\"]\nif = \"test.output contains 'PASSED'\"\n\
+         [[workflow.task]]\nid = \"ship\"\ntarget = \"local-web\"\nneeds = [\"passed\"]\nbranch = \"yes\"\nrun = \"echo shipping\"\n\
+         [[workflow.task]]\nid = \"fix\"\ntarget = \"local-web\"\nneeds = [\"passed\"]\nbranch = \"no\"\nrun = \"echo fixing\"\n\
+         [[workflow.task]]\nid = \"after-ship\"\ntarget = \"local-web\"\nneeds = [\"ship\"]\nrun = \"echo never\"\n\
+         [[workflow.task]]\nid = \"report\"\ntarget = \"local-web\"\nneeds = [\"after-ship\", \"fix\"]\nrun = \"echo report\"\n",
+    );
+    let out = e
+        .indra(&["run", "gate", "--config", hub.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}\n{}",
+        text,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let state = |id: &str| {
+        text.lines()
+            .rev()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .unwrap_or("")
+            .to_string()
+    };
+    for (id, want) in [
+        ("test", "succeeded"),
+        ("passed", "succeeded"),
+        ("ship", "skipped"),
+        ("after-ship", "skipped"),
+        ("fix", "succeeded"),
+        ("report", "succeeded"),
+    ] {
+        assert_eq!(state(id), want, "{}: {}", id, text);
+    }
+    // A branch must follow an If, and an If runs nothing itself.
+    let bad = e.hub(
+        "[[workflow]]\nname = \"bad\"\n\
+         [[workflow.task]]\nid = \"a\"\ntarget = \"local-web\"\nrun = \"true\"\n\
+         [[workflow.task]]\nid = \"b\"\ntarget = \"local-web\"\nneeds = [\"a\"]\nbranch = \"yes\"\nrun = \"true\"\n",
+    );
+    let out = e
+        .indra(&["run", "bad", "--config", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("branch needs an If step"),
+        "{:?}",
+        out
+    );
+    let bad = e.hub(
+        "[[workflow]]\nname = \"bad\"\nschedule = \"every day\"\n\
+         [[workflow.task]]\nid = \"a\"\ntarget = \"local-web\"\nrun = \"true\"\n",
+    );
+    let out = e
+        .indra(&["run", "bad", "--config", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("schedule"),
+        "{:?}",
+        out
+    );
+}
