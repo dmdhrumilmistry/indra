@@ -111,7 +111,7 @@ pub fn notice(st: &mut State, at: u64) -> Option<String> {
     if let Some(to) = st.updated.take() {
         st.noticed = at;
         return Some(format!(
-            "indra updated itself to {} (restart a running `indra serve` to use it; `indra update --auto off` stops this)",
+            "indra updated itself to {} (restart a running `indra serve`, or run `indra node restart` on a machine joined to a hub, to use it; `indra update --auto off` stops this)",
             to
         ));
     }
@@ -424,6 +424,11 @@ async fn go(a: UpdateArgs) -> Result<ExitCode, String> {
     }
     let exe = install(&tag).await?;
     println!("Updated indra {} -> {} ({})", here, tag, exe.display());
+    if crate::deck::link::saved().is_some() {
+        println!(
+            "This machine is connected to a hub: run `indra node restart` so the link uses the new version (agents running here stop)."
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

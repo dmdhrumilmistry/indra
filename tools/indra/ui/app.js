@@ -1769,6 +1769,11 @@
     }
     // Where agents work on a machine: a list to edit, and a folder browser
     // that walks the machine's folders (names only) over its link.
+    function olderThan(a, b) {
+      var x = String(a || "").split(/[.-]/).map(Number), y = String(b || "").split(/[.-]/).map(Number);
+      for (var k = 0; k < 3; k++) { if ((x[k] || 0) !== (y[k] || 0)) return (x[k] || 0) < (y[k] || 0); }
+      return false;
+    }
     function folderEditor(n, box) {
       var list = n.targets.slice();
       var listBox = h("div", { class: "files" }), err = h("div", { class: "note bad", role: "alert", hidden: true });
@@ -1838,6 +1843,8 @@
               return h("div", { class: "stat" }, h("b", { class: "small", text: x[1] }), h("span", { text: x[0] }));
             })) : h("div", { class: "note bad" }, n.ssh ? (n.error || "not checked yet") : "Not connected. It reconnects by itself when it is back on. On that machine, `indra node status` says why, and `indra node connect` starts the link.",
               !n.ssh && canJoin() ? h("div", { class: "row" }, h("button", { type: "button", class: "ghost", title: "If it left or was reinstalled: a new command to join again", onclick: function () { addMachine(); } }, "Get a new join command")) : null),
+          ok && n.kind !== "local" && i.version && olderThan(i.version, S.ov.version) ? h("div", { class: "note warn" },
+            "This machine runs indra " + i.version + " and the hub " + S.ov.version + ", so some things here will not work. On it, run ", h("code", { text: "indra update" }), ", then ", h("code", { text: "indra node restart" }), ".") : null,
           meter(n.running, n.max_parallel),
           ok ? [h("h3", { text: "Agents installed" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (not installed)") }); }))] : null,
           h("div", { class: "row" }, h("h3", { text: "Folders agents work in" }),

@@ -312,6 +312,11 @@ impl NodeLink {
         let r = tokio::time::timeout(std::time::Duration::from_secs(secs), rx).await;
         self.reqs.lock().unwrap().remove(&id);
         match r {
+            // A node on an older indra does not know newer requests.
+            Ok(Ok(Err(e))) if e.starts_with("unknown request") => Err(format!(
+                "{} runs an older indra that cannot do this yet. On it, run `indra update`, then `indra node restart`",
+                self.name
+            )),
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err(format!("node '{}' went away", self.name)),
             Err(_) => Err(format!(

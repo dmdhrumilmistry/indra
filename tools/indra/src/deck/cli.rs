@@ -847,6 +847,9 @@ pub enum NodeCmd {
         /// New folders (replace the current ones)
         dirs: Vec<String>,
     },
+    /// Restart the link to the hub, e.g. after `indra update`, so it runs the new version.
+    /// Agents running on this machine stop.
+    Restart,
     /// Stop the link and forget the hub (remove the machine in the hub's console too)
     Leave,
 }
@@ -1241,6 +1244,19 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
             } else {
                 println!("The next `indra node connect` uses them.");
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        NodeCmd::Restart => {
+            let sv = crate::deck::link::saved()
+                .ok_or("this machine has not joined a hub: `indra join <hub-url> <code>`")?;
+            let how = crate::deck::autostart::install(opts.config.as_deref())?;
+            println!(
+                "Restarted the link to {} as '{}' with indra {} ({}).",
+                sv.hub,
+                sv.name,
+                env!("CARGO_PKG_VERSION"),
+                how
+            );
             Ok(ExitCode::SUCCESS)
         }
         NodeCmd::Leave => {
