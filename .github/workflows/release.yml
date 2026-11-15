@@ -4,7 +4,9 @@ name: release
 # a pushed v<version> tag) tests it on Linux, macOS and Windows, publishes the
 # prebuilt binaries to a GitHub release v<version>, marks it Latest, and
 # publishes the crate to crates.io when the CARGO_REGISTRY_TOKEN secret is set.
-# Run it with "latest" instead to only mark an existing release Latest.
+# Run it with "latest" instead to only mark an existing release Latest, or
+# "notes" to only rewrite existing releases' notes from CHANGELOG.md. Each
+# release page starts with its version's section of CHANGELOG.md.
 #
 # No third-party actions: the runners already ship rustup, and `gh` uploads the
 # release assets, so the only code that runs here is this repository's. It
@@ -21,6 +23,10 @@ on:
         default: ""
       latest:
         description: "Only mark the existing release v<version> (e.g. 0.6.0) as Latest (an old indra-v<version> one is renamed to v<version>); builds nothing."
+        required: false
+        default: ""
+      notes:
+        description: "Only rewrite the notes of existing releases from CHANGELOG.md (versions, comma separated, e.g. 0.9.0,0.8.1); builds nothing."
         required: false
         default: ""
 
@@ -44,7 +50,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     # Marking a release Latest needs no build.
-    if: inputs.latest == ''
+    if: inputs.latest == '' && inputs.notes == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -71,7 +77,7 @@ jobs:
   # the builds do not race to create several drafts.
   draft:
     name: draft release
-    if: inputs.latest == ''
+    if: inputs.latest == '' && inputs.notes == ''
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -82,32 +88,23 @@ jobs:
     env:
       TAG: ${{ inputs.release != '' && format('v{0}', inputs.release) || github.ref_name }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Create the draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           export GH_REPO="$GITHUB_REPOSITORY"
-          notes="One file, nothing else to install.
-
-          Linux and macOS:
-
-              curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
-
-          Windows (PowerShell):
-
-              irm https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.ps1 | iex
-
-          Then: \`indra serve --open\`. Already installed? \`indra update\`.
-
-          Or download the file for your machine below; each has a .sha256, and SHA256SUMS lists them all."
+          sh .github/release-notes.sh "$TAG" "$GITHUB_REPOSITORY" > notes.md
           # Run again for the same version: keep the release that is there.
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --draft --title "$TAG" --notes "$notes" --target "$GITHUB_SHA"
+            || gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"
 
   release:
     name: release (${{ matrix.target }})
     # A pushed v* tag, or Run workflow with a version.
-    if: inputs.latest == ''
+    if: inputs.latest == '' && inputs.notes == ''
     needs: draft
     runs-on: ${{ matrix.os }}
     env:
@@ -162,7 +159,7 @@ jobs:
   # scripts, so a pinned version installs the same way.
   checksums:
     name: checksums
-    if: inputs.latest == ''
+    if: inputs.latest == '' && inputs.notes == ''
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -196,7 +193,7 @@ jobs:
   # publish-new and publish-update scopes); without it this says so and stops.
   crates:
     name: crates.io
-    if: inputs.latest == ''
+    if: inputs.latest == '' && inputs.notes == ''
     needs: checksums
     runs-on: ubuntu-latest
     env:
@@ -247,3 +244,30 @@ jobs:
           fi
           gh release view "$TAG" --json tagName,isDraft,isPrerelease
           gh release edit "$TAG" --latest
+
+  # Rewrite existing releases' notes from CHANGELOG.md, without building.
+  notes:
+    name: release notes
+    if: inputs.notes != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rewrite the notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSIONS: ${{ inputs.notes }}
+        run: |
+          export GH_REPO="$GITHUB_REPOSITORY"
+          for v in $(printf '%s' "$VERSIONS" | tr ',' ' '); do
+            v="${v#v}"
+            sh .github/release-notes.sh "$v" "$GITHUB_REPOSITORY" > notes.md
+            gh release edit "v$v" --notes-file notes.md
+            echo "rewrote the notes of v$v"
+          done
