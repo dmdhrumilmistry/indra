@@ -121,6 +121,12 @@ their section; nothing is deleted, items are checked off with the change that di
       revoke; stored hashed) with ready-made scripts; organization settings in `defaults.toml`
       (under the user's) and `managed.toml` (enforced, shown in Settings); `[join]` lets
       `indra join` run with no arguments; joining again is a no-op
+- [x] Console review fixes: Board forms survive the refresh and cards move without dragging
+      (Move to); the Run an agent prompt is kept as a draft; leaving a page with unsaved changes
+      asks first; admin-only buttons show to admins only; passwords in masked dialogs; errors stay
+      until closed; Sign out and Theme on phones; waiting approvals in the tab title; confirms for
+      Stop, Cancel and Discard; a focus ring; a warning (and admins only) for bypassPermissions;
+      outside links http(s) only; plain, consistent names; Run again for workflows
 - [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options

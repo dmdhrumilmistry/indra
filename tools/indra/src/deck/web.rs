@@ -1021,6 +1021,26 @@ fn check_prompt(p: &str) -> ApiResult<&str> {
     Ok(p)
 }
 
+/// `POST /api/procs`: start an agent. Running one that never asks
+/// (bypassPermissions, from the launch or its profile) is as good as a shell
+/// on that machine, so it takes an admin, like the browser terminal.
+async fn proc_launch(
+    State(app): State<Arc<App>>,
+    axum::Extension(who): axum::Extension<crate::deck::users::Who>,
+    Json(r): Json<LaunchReq>,
+) -> ApiResult<Json<Value>> {
+    if who.role != crate::deck::users::Role::Admin {
+        let settings = app.settings();
+        let (_, agent) = resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
+        if agent.permission_mode.as_deref() == Some("bypassPermissions") {
+            return Err(forbidden(
+                "only admins can start an agent in bypassPermissions mode (it runs everything without asking)",
+            ));
+        }
+    }
+    proc_start(State(app), Json(r)).await
+}
+
 pub(crate) async fn proc_start(
     State(app): State<Arc<App>>,
     Json(r): Json<LaunchReq>,
@@ -3614,7 +3634,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/runs", get(runs_list))
         .route("/api/run", get(run_get))
         .route("/api/run/file", get(run_file))
-        .route("/api/procs", get(procs_list).post(proc_start))
+        .route("/api/procs", get(procs_list).post(proc_launch))
         .route("/api/nodes", get(nodes_list))
         .route("/api/nodes/enrol", post(node_enrol))
         .route("/api/nodes/enrol/{code}", get(node_enrol_status))

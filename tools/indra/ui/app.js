@@ -75,11 +75,14 @@
   }
   function bytes(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(1) + " GB"; }
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  // A short note at the corner. An error stays until it is closed (or the
+  // next note), so it is not missed; screen readers hear it at once.
   function toast(msg, bad) {
     Array.prototype.forEach.call(document.querySelectorAll(".toast"), function (x) { x.remove(); });
-    var t = h("div", { class: "toast" + (bad ? " bad" : ""), role: "status", text: msg });
+    var t = h("div", { class: "toast" + (bad ? " bad" : ""), role: bad ? "alert" : "status" }, h("span", { text: msg }),
+      bad ? h("button", { type: "button", class: "x", "aria-label": "Close", onclick: function () { t.remove(); } }, "x") : null);
     document.body.appendChild(t);
-    setTimeout(function () { t.remove(); }, bad ? 6000 : 2600);
+    if (!bad) setTimeout(function () { t.remove(); }, 2600);
   }
 
   // A toast with one button (e.g. Undo), shown a little longer.
@@ -139,10 +142,13 @@
         try { data = t ? JSON.parse(t) : null; } catch (e) { data = { error: t }; }
         if (r.status === 401) { authWall(); throw new Error("unauthorized"); }
         if (!r.ok) { var err = new Error((data && data.error) || r.statusText); err.status = r.status; throw err; }
+        if (init.method !== "GET") S.dirty = false;
         return data;
       });
     });
   }
+  // A link from outside data (a marketplace, a tracker): web addresses only.
+  function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
   function hq(extra) { var p = { h: S.h }; Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; }); return q(p); }
   function harness() { return S.ov && (S.ov.harnesses.find(function (x) { return x.name === S.h; }) || S.ov.harnesses[0]); }
 
@@ -188,12 +194,42 @@
     fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" }).then(function () { location.hash = ""; location.reload(); });
   }
 
+  // A small dialog with fields (passwords masked). `submit(values)` returns a
+  // promise; its error shows in the dialog, which stays open to try again.
+  function ask(title, fields, label, submit) {
+    var dlg = h("dialog", { class: "ask", "aria-label": title });
+    var inputs = fields.map(function (f) {
+      var el = h("input", { type: f.type || "text", required: f.optional ? null : true, minlength: f.min ? String(f.min) : null,
+        autocomplete: f.autocomplete || (f.type === "password" ? "new-password" : "off"), placeholder: f.placeholder || "" });
+      if (f.value) el.value = f.value;
+      return { f: f, el: el };
+    });
+    var err = h("div", { class: "note bad", role: "alert", hidden: true });
+    var go = h("button", { type: "submit", class: "primary" }, label);
+    var form = h("form", { class: "form", onsubmit: function (e) {
+      e.preventDefault();
+      var v = {}; inputs.forEach(function (x) { v[x.f.name] = x.el.value; });
+      go.disabled = true; err.hidden = true;
+      Promise.resolve().then(function () { return submit(v); }).then(function () { dlg.close(); dlg.remove(); })
+        .catch(function (x) { err.textContent = x.message; err.hidden = false; go.disabled = false; });
+    } }, h("h3", { text: title }), inputs.map(function (x) { return h("label", null, x.f.label, x.f.hint ? h("small", { text: x.f.hint }) : null, x.el); }), err,
+      h("div", { class: "row" }, go, h("button", { type: "button", onclick: function () { dlg.close(); dlg.remove(); } }, "Cancel")));
+    dlg.appendChild(form);
+    dlg.addEventListener("cancel", function () { dlg.remove(); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    if (inputs[0]) inputs[0].el.focus();
+  }
+
   function changeOwnPassword() {
-    var cur = window.prompt("Your current password:"); if (cur == null) return;
-    var next = window.prompt("New password (at least 10 characters):"); if (!next) return;
-    if (window.prompt("The new password again:") !== next) { toast("The two new passwords differ", true); return; }
-    api("/api/session/password", { method: "PUT", body: { current: cur, new: next } }).then(function () { toast("Password changed; sign in again"); setTimeout(signOut, 800); })
-      .catch(function (e) { toast(e.message, true); });
+    ask("Change your password", [
+      { name: "cur", label: "Current password", type: "password", autocomplete: "current-password" },
+      { name: "next", label: "New password", type: "password", min: 10, hint: "At least 10 characters." },
+      { name: "again", label: "New password again", type: "password", min: 10 }
+    ], "Change password", function (v) {
+      if (v.next !== v.again) throw new Error("The two new passwords differ.");
+      return api("/api/session/password", { method: "PUT", body: { current: v.cur, new: v.next } }).then(function () { toast("Password changed; sign in again"); setTimeout(signOut, 800); });
+    });
   }
 
   // ---- force-directed graph on a canvas ---------------------------------------
@@ -364,7 +400,8 @@
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
     var redraw = function () { g.redraw(); };
     mq.addEventListener("change", redraw);
-    S.cleanup.push(function () { mq.removeEventListener("change", redraw); });
+    window.addEventListener("indra-theme", redraw);
+    S.cleanup.push(function () { mq.removeEventListener("change", redraw); window.removeEventListener("indra-theme", redraw); });
     return g;
   }
   function linkList(title, items, onClick) {
@@ -393,8 +430,13 @@
     var ov = S.ov;
     m.appendChild(header("Home", "indra runs AI coding agents (Claude Code, Codex, Gemini) on your code, on this computer or others you add, and shows what they do and find."));
     m.appendChild(getStarted(ov));
-    m.appendChild(h("h2", { text: "Setups" }));
-    m.appendChild(h("p", { class: "muted small", text: "A setup (harness) is a set of agents, skills and prompts for one kind of work. Pick one; the menu on the left shows its parts." }));
+    var running = ov.procs.filter(function (p) { return p.status === "running"; });
+    m.appendChild(h("h2", { text: "Running now" }));
+    m.appendChild(running.length ? procTable(running) : empty("Nothing running. Start one with Run an agent."));
+    var about = h("details", { class: "card", keep: "home-about" }, h("summary", { text: "About this setup: agents, skills and what they are made of" }),
+      h("p", { class: "muted small", text: "A setup (harness) is a set of agents, skills and prompts for one kind of work. Pick one under Setup; More shows its parts." }));
+    m.appendChild(about);
+    m = about;
     var grid = h("div", { class: "grid" });
     ov.harnesses.forEach(function (x) {
       var c = x.counts;
@@ -421,9 +463,7 @@
     m.appendChild(h("div", { class: "chips" }, ov.runners.map(function (r) {
       return h("span", { class: "pill " + (r.available ? "ok" : ""), title: r.program || (r.command + " is not on PATH"), text: r.name + (r.available ? "" : " (not installed)") });
     })));
-    var running = ov.procs.filter(function (p) { return p.status === "running"; });
-    m.appendChild(h("h2", { text: "Running agents" }));
-    m.appendChild(running.length ? procTable(running) : empty("Nothing running. Start one with Run an agent."));
+
   }
 
   // A short checklist for new users; it ticks itself off and can be hidden.
@@ -452,7 +492,7 @@
     var titles = { agent: "Agents", skill: "Skills", prompt: "Prompts" };
     var subs = { agent: "Agent definitions: who does what, on which model, with which tools.",
       skill: "Skills the agents load. Click one to read or edit it.", prompt: "Reference documents and prompt files the harness uses." };
-    var ro = S.ov.read_only;
+    var ro = S.ov.read_only || !S.ov.is_admin;
     m.appendChild(header(titles[kind], subs[kind], ro ? null : [
       h("a", { class: "btn", href: "#/market", text: "From a marketplace" }),
       h("button", { type: "button", onclick: function () { importDefs(); } }, "Import .md"),
@@ -531,7 +571,7 @@
       m.appendChild(header(d.name, d.description, [
         h("span", { class: "pill", text: d.kind }), d.model ? h("span", { class: "pill", text: d.model }) : null,
         h("button", { type: "button", onclick: function () { saveFile(d.abs.split(/[\\/]/).pop(), ta.value, "text/markdown"); } }, "Download"),
-        S.ov.read_only ? null : h("button", { type: "button", class: "danger", onclick: function () {
+        (S.ov.read_only || !S.ov.is_admin) ? null : h("button", { type: "button", class: "danger", onclick: function () {
           if (!window.confirm("Delete " + d.path + "? This removes the file.")) return;
           api("/api/def" + hq({ id: d.id }), { method: "DELETE" }).then(function () {
             toast("Deleted " + d.path); location.hash = "#/" + ({ agent: "agents", skill: "skills", prompt: "prompts" }[d.kind] || "overview");
@@ -540,9 +580,9 @@
       var ta = h("textarea", { class: "code", spellcheck: "false", "aria-label": "File content", value: original });
       var save = h("button", { class: "primary", type: "button", disabled: true }, "Save");
       var revert = h("button", { type: "button", disabled: true }, "Revert");
-      var state = h("span", { class: "muted", text: S.ov.read_only ? "Read-only: editing is disabled." : "" });
-      if (S.ov.read_only) ta.readOnly = true;
-      function dirty() { var x = ta.value !== original; save.disabled = !x || S.ov.read_only; revert.disabled = !x; state.textContent = x ? "Unsaved changes" : ""; }
+      var state = h("span", { class: "muted", text: S.ov.read_only ? "Read-only: editing is disabled." : !S.ov.is_admin ? "Only admins can edit agents, skills and prompts." : "" });
+      if ((S.ov.read_only || !S.ov.is_admin)) ta.readOnly = true;
+      function dirty() { var x = ta.value !== original; save.disabled = !x || (S.ov.read_only || !S.ov.is_admin); revert.disabled = !x; state.textContent = x ? "Unsaved changes" : ""; }
       ta.addEventListener("input", dirty);
       ta.addEventListener("keydown", function (e) { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); if (!save.disabled) save.click(); } });
       revert.addEventListener("click", function () { ta.value = original; dirty(); });
@@ -839,6 +879,7 @@
             } }, "Accept into memory"),
             h("button", { type: "button", onclick: function () { patch().then(function () { toast("Saved"); }).catch(function (err) { toast(err.message, true); }); } }, "Save edits"),
             h("button", { type: "button", class: "danger", onclick: function () {
+              if (!window.confirm("Discard this learning? It is deleted, not added to memory.")) return;
               api("/api/learnings/" + l.id, { method: "DELETE" }).then(function () { load(); refreshOverview(); }).catch(function (err) { toast(err.message, true); });
             } }, "Discard")));
       }
@@ -962,7 +1003,7 @@
     function load() {
       api("/api/runs" + hq()).then(function (runs) {
         holder.textContent = "";
-        if (!runs.length) { holder.appendChild(empty("No runs yet. Start one from Launch, or run the harness from your agent.")); return; }
+        if (!runs.length) { holder.appendChild(empty("No results yet. They appear here when an agent or a review writes them: start one with Run an agent.")); return; }
         holder.appendChild(h("table", null,
           h("thead", null, h("tr", null, ["Run", "Progress", "Results", "By agent", "Updated"].map(function (t) { return h("th", { text: t }); }))),
           h("tbody", null, runs.map(function (r) {
@@ -1176,7 +1217,7 @@
   // ---- tools --------------------------------------------------------------------------
   // The review tooling and repository chores, the same as their CLI commands.
   function pageTools(m) {
-    var ro = S.ov.read_only;
+    var ro = S.ov.read_only || !S.ov.is_admin;
     m.appendChild(header("Tools", "The review cache, local metrics, the skills and the site: the same operations as indra review, indra skills and indra dev, from here."));
     var body = h("div", { class: "stack toolspage" });
     m.appendChild(ollamaCard()); m.appendChild(body);
@@ -1318,11 +1359,14 @@
       var node = h("select", { "aria-label": "Machine" }, nodes.map(function (n) {
         return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : n.info ? "" : "  (offline)") });
       }));
-      var runner = h("select", { "aria-label": "Runner" });
-      var target = h("select", { "aria-label": "Target" });
+      var runner = h("select");
+      var target = h("select");
       var presets = ov.presets.filter(function (p) { return !p.harness || p.harness === hs.name; });
       var preset = h("select", { "aria-label": "Start from" }, h("option", { value: "", text: "Write your own" }), presets.map(function (p, i) { return h("option", { value: String(i), text: p.name }); }));
       var prompt = h("textarea", { placeholder: "What should the agent do?", "aria-label": "Prompt" });
+      // A draft survives leaving the page (and switching setups) until it runs.
+      try { prompt.value = sessionStorage.getItem("indra.draft.launch") || ""; } catch (e) { /* storage off */ }
+      prompt.addEventListener("input", function () { try { sessionStorage.setItem("indra.draft.launch", prompt.value); } catch (e) { /* storage off */ } });
       var profiles = ov.profiles || [];
       var profile = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "None (runner defaults)" }),
         profiles.map(function (p) { return h("option", { value: p.name, text: p.name + (p.description ? "  -  " + p.description : "") }); }));
@@ -1414,7 +1458,7 @@
       });
       node.addEventListener("change", fillNode);
       [runner, target, prompt].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
-      var form = h("form", { class: "form", onsubmit: function (e) {
+      var form = h("form", { class: "form", "data-nodirty": "", onsubmit: function (e) {
         e.preventDefault(); go.disabled = true;
         var o = {};
         if (model.value.trim()) o.model = model.value.trim();
@@ -1423,11 +1467,12 @@
         if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
         if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
         api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
-          .then(function (r) { location.hash = "#/proc/" + r.id; })
+          .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } location.hash = "#/proc/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "What should it do?", h("small", { text: "Plain words are fine. {target} becomes the folder, {node} the machine." }), prompt),
-        h("div", { class: "fields" }, h("label", null, "Start from", preset), h("label", null, "Machine", node), h("label", null, "Agent", runner), h("label", { class: "wide" }, "Folder", target)),
+        h("div", { class: "fields" }, h("label", null, "Start from", preset), h("label", null, "Machine", node), h("label", null, "Agent", runner),
+          h("label", { class: "wide" }, h("span", null, "Folder ", S.ov.is_admin ? h("a", { href: "#/nodes", class: "small", title: "Add or change the folders agents may work in, on any machine", text: "(change folders)" }) : null), target)),
         note,
         h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, memory" }),
           h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
@@ -1447,14 +1492,13 @@
           h("label", null, "Command", h("small", { text: "Executed directly, never through a shell. On another machine the job travels as JSON over its link." }), preview),
           h("div", { class: "note", text: "The agent runs with that machine's user permissions and its agent CLI's own permission settings. Another machine runs only agents from its own configuration." })),
         h("div", { class: "row" }, go, canEdit() ? h("button", { type: "button", onclick: function () {
-          var name = window.prompt("Save this prompt as a preset named:");
-          if (!name || !name.trim()) return;
-          var p = { name: name.trim(), prompt: prompt.value, harness: hs.name };
-          if (runner.value) p.runner = runner.value;
-          if (profile.value) p.profile = profile.value;
-          addToSection("preset", p).then(function () { toast("Saved preset " + p.name); })
-            .catch(function (err) { toast(err.message, true); });
-        } }, "Save as preset") : null, h("a", { href: "#/workflows", text: "Or run on many folders at once" })));
+          ask("Save as a preset", [{ name: "name", label: "Name", hint: "It appears under Start from, for everyone using this console." }], "Save", function (v) {
+            var p = { name: v.name.trim(), prompt: prompt.value, harness: hs.name };
+            if (runner.value) p.runner = runner.value;
+            if (profile.value) p.profile = profile.value;
+            return addToSection("preset", p).then(function () { toast("Saved preset " + p.name); });
+          });
+        } }, "Save as preset") : null, h("a", { href: "#/workflows", onclick: function () { setTimeout(function () { var f = $("fanout"); if (f) f.scrollIntoView(); }, 600); }, text: "Or run on many folders at once" })));
       m.appendChild(form);
       fillNode();
     }).catch(function (e) { holder.textContent = e.message; });
@@ -1562,7 +1606,7 @@
     function addMachine() {
       if (stopPoll) stopPoll();
       addBox.textContent = "";
-      var card = h("div", { class: "card form" }, h("h2", { text: "Add a machine" }), h("p", { class: "muted", text: "Getting a code..." }));
+      var card = h("div", { class: "card form", "data-nodirty": "" }, h("h2", { text: "Add a machine" }), h("p", { class: "muted", text: "Getting a code..." }));
       addBox.appendChild(card);
       api("/api/nodes/enrol", { method: "POST", body: {} }).then(function (r) {
         card.textContent = "";
@@ -1641,7 +1685,7 @@
       var box = h("div", { class: "muted", text: "Loading..." }); runsBox.appendChild(box);
       api("/api/nodes/runs" + hq({ node: n.name })).then(function (runs) {
         box.textContent = ""; box.className = "tablewrap";
-        if (!runs.length) { box.appendChild(empty("No runs in this node's targets.")); return; }
+        if (!runs.length) { box.appendChild(empty("No results in this machine's folders yet.")); return; }
         box.appendChild(h("table", null, h("thead", null, h("tr", null, ["Run", "Progress", "Results", "By agent", "Updated"].map(function (t) { return h("th", { text: t }); }))),
           h("tbody", null, runs.map(function (r) {
             var groups = Object.keys(r.counts.by_group).map(function (g) { return g + " " + r.counts.by_group[g]; }).join(", ");
@@ -1728,7 +1772,8 @@
           ok ? h("div", { class: "stats" },
             [["computer", i.hostname], ["system", i.os + " " + i.arch], ["cpus", String(i.cpus)], ["indra", i.version]].map(function (x) {
               return h("div", { class: "stat" }, h("b", { class: "small", text: x[1] }), h("span", { text: x[0] }));
-            })) : h("div", { class: "note bad", text: n.ssh ? (n.error || "not checked yet") : "Not connected. On that machine: `indra node status` says why, `indra node connect` reconnects." }),
+            })) : h("div", { class: "note bad" }, n.ssh ? (n.error || "not checked yet") : "Not connected. It reconnects by itself when it is back on. On that machine, `indra node status` says why, and `indra node connect` starts the link.",
+              !n.ssh && canJoin() ? h("div", { class: "row" }, h("button", { type: "button", class: "ghost", title: "If it left or was reinstalled: a new command to join again", onclick: function () { addMachine(); } }, "Get a new join command")) : null),
           meter(n.running, n.max_parallel),
           ok ? [h("h3", { text: "Agents installed" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (not installed)") }); }))] : null,
           h("div", { class: "row" }, h("h3", { text: "Folders agents work in" }),
@@ -1745,7 +1790,7 @@
         canJoin() ? h("button", { type: "button", class: "primary", onclick: function () { addMachine(); } }, "Add a machine")
           : h("p", { class: "muted small", text: "Ask an admin of this console to add it." })));
     }
-    function load(force) { grid.textContent = ""; grid.appendChild(h("div", { class: "muted", text: "Checking nodes..." })); loadNodes(force).then(render).catch(function (e) { grid.textContent = e.message; }); }
+    function load(force) { grid.textContent = ""; grid.appendChild(h("div", { class: "muted", text: "Checking machines..." })); loadNodes(force).then(render).catch(function (e) { grid.textContent = e.message; }); }
     refresh.addEventListener("click", function () { load(true); });
     load(false);
   }
@@ -1758,7 +1803,7 @@
     var ov = S.ov, hs = harness();
     store("indra.seen.workflows", "1");
     var genBox = h("div");
-    m.appendChild(header("Workflows", "Multi-step work across nodes: agents, skills and shell commands in dependency order, with conditions, loops and retries. Run them here or with `indra run <name>`.",
+    m.appendChild(header("Workflows", "Several steps that run in order: agents, skills and commands, on any of your machines. Build one in the editor or describe it and let Claude build it; run it here or with `indra run <name>`.",
       [canEdit() && !ov.read_only ? h("button", { type: "button", onclick: function () { showGen(); } }, "Create with Claude") : null,
        canEdit() ? h("a", { class: "btn", href: "#/wfedit/", text: "New workflow" }) : null]));
     m.appendChild(genBox);
@@ -1846,35 +1891,35 @@
     loadRuns(); every(3000, loadRuns);
 
     if (ov.read_only || !hs) return;
-    m.appendChild(h("h2", { text: "Fan out" }));
+    m.appendChild(h("h2", { id: "fanout", text: "Run on many folders at once" }));
     var fan = h("div", { class: "card" }, h("p", { class: "muted", text: "Loading nodes..." }));
     m.appendChild(fan);
     loadNodes(false).then(function (nodes) {
       fan.textContent = "";
-      var prompt = h("textarea", { "aria-label": "Prompt", placeholder: "/indra full security review of {target}" });
-      prompt.value = "/indra full security review of {target}";
+      var prompt = h("textarea", { placeholder: "What should the agent do in each folder? {target} is the folder." });
       var names = {}; nodes.forEach(function (n) { runnersOn(n, ov).forEach(function (r) { names[r] = 1; }); });
-      var runner = h("select", { "aria-label": "Runner" }, Object.keys(names).map(function (r) { return h("option", { value: r, text: r }); }));
+      var runner = h("select", null, Object.keys(names).map(function (r) { return h("option", { value: r, text: r }); }));
       var fprofile = h("select", { "aria-label": "Profile" }, h("option", { value: "", text: "None" }), (ov.profiles || []).map(function (p) { return h("option", { value: p.name, text: p.name }); }));
       var boxes = [];
       var picks = h("div", { class: "picks" }, nodes.map(function (n) {
-        return h("fieldset", null, h("legend", null, n.name, " ", h("span", { class: "muted", text: n.error ? "(unreachable)" : "(" + n.running + "/" + n.max_parallel + " busy)" })),
+        return h("fieldset", null, h("legend", null, n.name, " ", h("span", { class: "muted", text: n.error ? "(offline)" : "(" + n.running + " of " + n.max_parallel + " running)" })),
           n.targets.length ? n.targets.map(function (t, i) {
             var cb = h("input", { type: "checkbox" }); boxes.push({ cb: cb, node: n.name, target: i });
             return h("label", { class: "pick" }, cb, h("span", { text: t }));
-          }) : h("p", { class: "muted", text: "no targets" }));
+          }) : h("p", { class: "muted", text: "no folders yet" }));
       }));
-      var go = h("button", { class: "primary", type: "submit" }, "Run on selected targets");
+      var go = h("button", { class: "primary", type: "submit" }, "Run in the chosen folders");
       fan.appendChild(h("form", { class: "form", onsubmit: function (e) {
         e.preventDefault();
         var targets = boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return { node: b.node, target: b.target }; });
-        if (!targets.length) { toast("Pick at least one target", true); return; }
+        if (!targets.length) { toast("Choose at least one folder", true); return; }
         go.disabled = true;
         api("/api/workflows/fanout", { method: "POST", body: { h: hs.name, runner: runner.value, prompt: prompt.value, targets: targets, profile: fprofile.value || null } })
           .then(function (r) { location.hash = "#/workflow/" + r.id; }).catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
-        h("label", null, "Prompt", h("small", { text: "Runs once per selected target, in parallel within each node's capacity." }), prompt),
-        h("div", { class: "row" }, h("label", null, "Runner", runner), h("label", null, "Profile", fprofile)), h("div", null, h("b", { text: "Targets" }), picks), h("div", { class: "row" }, go)));
+        h("p", { class: "muted small", text: "The same task in each folder you choose, side by side (as many at once as each machine allows)." }),
+        h("label", null, "What should it do?", prompt),
+        h("div", { class: "row" }, h("label", null, "Agent", runner), h("label", null, "Profile", fprofile)), h("div", null, h("b", { text: "Folders" }), picks), h("div", { class: "row" }, go)));
     }).catch(function (e) { fan.textContent = e.message; });
   }
 
@@ -1892,9 +1937,14 @@
       api("/api/workflows/" + id).then(function (r) {
         top.textContent = "";
         var cancel = h("button", { class: "danger", type: "button", disabled: r.status !== "running" || S.ov.read_only, onclick: function () {
+          if (!window.confirm("Cancel this workflow? Its running steps are stopped.")) return;
           cancel.disabled = true; api("/api/workflows/" + id + "/cancel", { method: "POST" }).then(function () { toast("Cancelling"); }).catch(function (e) { toast(e.message, true); });
-        } }, "Cancel");
-        top.appendChild(header("Workflow #" + r.id + " - " + r.name, "Started " + ago(r.started) + (r.ended ? ", finished " + ago(r.ended) : "") + (r.stopped_by ? ", ended early by step " + r.stopped_by : ""), [wfPill(r.status), cancel]));
+        } }, "Cancel workflow");
+        top.appendChild(header("Workflow #" + r.id + " - " + r.name, "Started " + ago(r.started) + (r.ended ? ", finished " + ago(r.ended) : "") + (r.stopped_by ? ", ended early by step " + r.stopped_by : ""), [wfPill(r.status), r.status === "running" ? cancel : (S.ov.read_only ? null : h("button", { type: "button", class: "primary", title: "Run this workflow again with the same inputs", onclick: function (e) {
+          e.target.disabled = true;
+          api("/api/workflows", { method: "POST", body: { name: r.name, inputs: r.inputs || {} } }).then(function (x) { location.hash = "#/workflow/" + x.id; })
+            .catch(function (err) { toast(err.message, true); e.target.disabled = false; });
+        } }, "Run again"))]));
         var lv = depth(r.tasks), cols = [];
         r.tasks.forEach(function (t) { (cols[lv[t.id]] = cols[lv[t.id]] || []).push(t); });
         dag.textContent = "";
@@ -1931,7 +1981,7 @@
   }
   function procTable(list) {
     return h("div", { class: "tablewrap" }, h("table", null,
-      h("thead", null, h("tr", null, ["#", "Status", "Node", "Runner", "Prompt", "Agents", "Cost", "Started"].map(function (t) { return h("th", { text: t }); }))),
+      h("thead", null, h("tr", null, ["#", "Status", "Machine", "Agent", "Task", "Subagents", "Cost", "Started"].map(function (t) { return h("th", { text: t }); }))),
       h("tbody", null, list.map(function (p) {
         var go = function () { location.hash = "#/proc/" + p.id; };
         return h("tr", { class: "click", tabindex: "0", onclick: go, onkeydown: function (e) { if (e.key === "Enter") go(); } },
@@ -1949,7 +1999,7 @@
   // installed where Claude Code, Codex or a harness will find them.
   function pageMarket(m, arg) {
     var parts = String(arg || "").split("/"), want = parts[0] || store("indra.market") || "", tab = parts[1] === "installed" ? "installed" : "browse";
-    var ro = S.ov.read_only, hs = harness();
+    var ro = S.ov.read_only || !S.ov.is_admin, hs = harness();
     m.appendChild(header("Marketplace", "Plugins, skills and agents from Claude Code plugin marketplaces and skill repositories, installed for Claude Code, Codex or a harness. Fetching happens only when you press Refresh."));
     var top = h("div"), tabs = h("div"), body = h("div", { class: "stack" });
     m.appendChild(top); m.appendChild(tabs); m.appendChild(body);
@@ -2022,7 +2072,7 @@
         var card = h("div", { class: "card form" },
           h("div", { class: "row" }, h("h2", { text: p.name }), p.version ? h("span", { class: "pill", text: "v" + p.version }) : null, p.category ? h("span", { class: "pill", text: p.category }) : null),
           p.description ? h("p", { text: p.description }) : null,
-          h("p", { class: "muted small" }, p.author ? "By " + p.author + ". " : "", p.homepage ? h("a", { href: p.homepage, target: "_blank", rel: "noopener noreferrer", text: "Homepage" }) : null),
+          h("p", { class: "muted small" }, p.author ? "By " + p.author + ". " : "", safeUrl(p.homepage) ? h("a", { href: safeUrl(p.homepage), target: "_blank", rel: "noopener noreferrer", text: "Homepage" }) : null),
           inside);
         detail.appendChild(card);
         if (ro) return;
@@ -2134,13 +2184,13 @@
     m.appendChild(header("Plan and delegate", "A strong model reads the code and writes a plan; cheaper models carry out each step; an optional reviewer checks the result. Each role is a profile, so any runner works: Claude Code, Codex, Gemini CLI, or a local model through Ollama."));
     m.appendChild(launchTabs("plan"));
     if (ov.read_only) { m.appendChild(h("div", { class: "note warn", text: "indra is running read-only, so launching is disabled." })); return; }
-    if (!hs) { m.appendChild(empty("No harness configured.")); return; }
+    if (!hs) { m.appendChild(empty("No project yet: start indra in your project's folder (cd my-project, then indra serve), or pass --target <folder>.")); return; }
     var profiles = (ov.profiles || []).map(function (p) { return p.name; }), teams = ov.teams || [];
     if (profiles.length < 1) {
       m.appendChild(h("div", { class: "note warn" }, "Plan and delegate needs profiles for its roles. ", canEdit() ? h("a", { href: "#/settings/teams", text: "Set up a team in Settings > Teams" }) : "Add [[profile]] and [[team]] sections to indra.toml.", " (templates included)."));
       return;
     }
-    var holder = h("div", { class: "muted", text: "Checking nodes..." }); m.appendChild(holder);
+    var holder = h("div", { class: "muted", text: "Checking machines..." }); m.appendChild(holder);
     loadNodes(false).then(function (nodes) {
       holder.remove();
       var sel = function (label, list, blank) { return h("select", { "aria-label": label }, blank ? h("option", { value: "", text: blank }) : null, list.map(function (x) { return h("option", { value: x, text: profileLabel(x) }); })); };
@@ -2163,8 +2213,8 @@
       }
       var teamNote = h("p", { class: "muted small" });
       team.addEventListener("change", fillTeam);
-      var node = h("select", { "aria-label": "Node" }, nodes.map(function (n) { return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : "") }); }));
-      var target = h("select", { "aria-label": "Target" });
+      var node = h("select", null, nodes.map(function (n) { return h("option", { value: n.name, text: n.name + (n.kind === "local" ? "  (this machine)" : "") }); }));
+      var target = h("select");
       function fillNode() { var n = nodes.find(function (x) { return x.name === node.value; }) || nodes[0]; target.textContent = ""; n.targets.forEach(function (t, i) { target.appendChild(h("option", { value: String(i), text: t })); }); }
       node.addEventListener("change", fillNode);
       var prompt = h("textarea", { placeholder: "What should be built or changed? The planner turns it into steps.", "aria-label": "Task" });
@@ -2179,7 +2229,7 @@
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "Task", prompt),
-        h("div", { class: "fields" }, h("label", null, "Node", node), h("label", { class: "wide" }, "Target", target)),
+        h("div", { class: "fields" }, h("label", null, "Machine", node), h("label", { class: "wide" }, "Folder", target)),
         h("label", null, "Team", h("small", { text: "A saved set of roles (Settings > Teams), or pick them here." }), team), teamNote,
         roleBox, opts2,
         h("label", { class: "check" }, review, h("span", null, h("b", { text: "Let me review the plan before it runs" }), h("small", { text: " - edit, drop or add steps first" }))),
@@ -2526,9 +2576,14 @@
         p.pending.forEach(function (a) {
           var answer = function (allow, always) {
             var body = { request_id: a.request_id, allow: allow, always: !!always };
-            if (!allow) { var why = window.prompt("Tell the agent why (optional):", ""); if (why === null) return; body.message = why; }
-            api("/api/procs/" + id + "/permission", { method: "POST", body: body })
-              .then(function () { toast(allow ? "Allowed" : "Denied"); refresh(); }).catch(function (e) { toast(e.message, true); });
+            var send = function () {
+              return api("/api/procs/" + id + "/permission", { method: "POST", body: body }).then(function () { toast(allow ? "Allowed" : "Denied"); refresh(); });
+            };
+            if (!allow) {
+              ask("Deny " + a.tool, [{ name: "why", label: "Tell the agent why (optional)", optional: true }], "Deny", function (v) { body.message = v.why; return send(); });
+              return;
+            }
+            send().catch(function (e) { toast(e.message, true); });
           };
           var input = JSON.stringify(a.input, null, 2);
           approvals.appendChild(h("div", { class: "ask" },
@@ -2577,6 +2632,7 @@
     function renderInfo(p) {
       top.textContent = "";
       var stop = h("button", { class: "danger", type: "button", disabled: p.status !== "running" || S.ov.read_only, onclick: function () {
+        if (!window.confirm("Stop this agent? What it is doing now is interrupted; its session can be continued later.")) return;
         stop.disabled = true;
         api("/api/procs/" + id + "/stop", { method: "POST" }).then(function () { toast("Stopping"); }).catch(function (e) { toast(e.message, true); });
       } }, "Stop");
@@ -2623,7 +2679,16 @@
   // Claude Code's permission modes, with what each means.
   var MODES = [["default", "default: ask before risky tools"], ["manual", "manual: ask before every tool"], ["acceptEdits", "acceptEdits: file edits run, the rest asks"],
     ["auto", "auto: Claude decides what is safe"], ["plan", "plan: read and plan, change nothing"],
-    ["dontAsk", "dontAsk: deny whatever would ask"], ["bypassPermissions", "bypassPermissions: run everything"]];
+    ["dontAsk", "dontAsk: deny whatever would ask"], ["bypassPermissions", "bypassPermissions: run everything, never ask (risky)"]];
+  // Picking "run everything" anywhere says what that means, next to the select.
+  document.addEventListener("change", function (e) {
+    var sel = e.target;
+    if (!sel || sel.tagName !== "SELECT" || !sel.querySelector('option[value="bypassPermissions"]')) return;
+    var next = sel.nextElementSibling, warn = next && next.classList.contains("bypass-warn") ? next : null;
+    if (sel.value === "bypassPermissions") {
+      if (!warn) sel.insertAdjacentElement("afterend", h("div", { class: "note bad bypass-warn", role: "alert", text: "The agent will run any command and edit any file without asking, as this machine's user. Use it only in a sandbox or a throwaway checkout." }));
+    } else if (warn) warn.remove();
+  });
   // Model suggestions: Claude's, then whatever the local Ollama server has.
   function modelList() {
     if ($("models")) return null;
@@ -2643,7 +2708,8 @@
   }
 
   // Whether this console may edit indra.toml (see Settings).
-  function canEdit() { return !!(S.ov && S.ov.settings && S.ov.settings.editable); }
+  // Editing settings, workflows and presets: admins, when the file can be edited.
+  function canEdit() { return !!(S.ov && S.ov.is_admin && S.ov.settings && S.ov.settings.editable); }
   // Append one item to a list section of indra.toml.
   function addToSection(section, item) {
     return api("/api/config").then(function (c) {
@@ -2758,7 +2824,7 @@
         board: h("select", null, (data.boards || []).map(function (b) { return h("option", { value: b.id, text: b.name }); })) };
       f.body.value = it.body || ""; f.profile.value = it.profile || ""; f.board.value = it.board || "main";
       detail.textContent = "";
-      detail.appendChild(h("form", { class: "form card", onsubmit: function (e) {
+      detail.appendChild(h("form", { class: "form card editing", onsubmit: function (e) {
         e.preventDefault();
         api("/api/board/items/" + it.id, { method: "PATCH", body: { title: f.title.value, body: f.body.value, labels: csv(f.labels.value), profile: f.profile.value, target: f.target.value.trim(), board: f.board.value } })
           .then(function (x) { toast("Saved #" + it.id); load(); showDetail(x); }).catch(function (err) { toast(err.message, true); });
@@ -2767,23 +2833,34 @@
         it.source ? h("p", { class: "muted small", text: "Changes stay on the board; the item in " + it.source.connector + " is not edited." }) : null,
         h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Save"), h("button", { type: "button", onclick: function () { showDetail(it); } }, "Cancel"))));
     }
-    function showDetail(it) {
-      open = it ? it.id : null; detail.textContent = "";
+    // The open item's panel, redrawn by the refresh only when the item changed
+    // and nobody is typing in it (an edit form or the Run row survives).
+    var shownSig = null;
+    function showDetail(it, fromRefresh) {
+      if (fromRefresh) {
+        var sig = JSON.stringify(it);
+        var a = document.activeElement;
+        if (sig === shownSig || detail.querySelector("form.editing") || (a && detail.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return;
+      }
+      open = it ? it.id : null; detail.textContent = ""; shownSig = it ? JSON.stringify(it) : null;
       if (!it) return;
       var src = it.source;
       detail.appendChild(h("div", { class: "card itemdetail" },
-        h("div", { class: "row" }, h("h2", { text: "#" + it.id + " " + it.title }), src ? h("a", { href: src.url, target: "_blank", rel: "noopener", text: src.connector + " " + src.key + (src.state ? " (" + src.state + ")" : "") }) : null,
+        h("div", { class: "row" }, h("h2", { text: "#" + it.id + " " + it.title }), src && safeUrl(src.url) ? h("a", { href: safeUrl(src.url), target: "_blank", rel: "noopener noreferrer", text: src.connector + " " + src.key + (src.state ? " (" + src.state + ")" : "") }) : null,
           h("button", { type: "button", class: "ghost", onclick: function () { showDetail(null); } }, "Close")),
         it.body ? h("pre", { class: "view small", text: it.body }) : h("p", { class: "muted", text: "No description." }),
         it.column !== "running" && !ro ? runForm(it) : null,
         it.proc_id ? h("p", null, h("a", { href: "#/proc/" + it.proc_id, text: "Open agent process #" + it.proc_id })) : null,
         it.result ? [h("h3", { text: "Result" }), h("pre", { class: "view small", text: it.result })] : null,
         it.notes.length ? [h("h3", { text: "History" }), h("ul", { class: "links" }, it.notes.slice().reverse().map(function (n) { return h("li", null, h("span", { class: "muted", text: ago(n.ts) + "  " }), n.text); }))] : null,
-        ro || it.column === "running" ? null : h("div", { class: "row" }, h("button", { type: "button", onclick: function () { editItem(it); } }, "Edit"), h("button", { type: "button", class: "danger", onclick: function () {
+        ro || it.column === "running" ? null : h("div", { class: "row" }, h("label", { class: "inline" }, "Move to ", (function () {
+            var mv = h("select", { onchange: function () { patch(it.id, { column: mv.value }); } }, COLS.filter(function (c) { return c[0] !== "running"; }).map(function (c) { return h("option", { value: c[0], text: c[1] }); }));
+            mv.value = it.column; return mv;
+          })()), h("button", { type: "button", onclick: function () { editItem(it); } }, "Edit"), h("button", { type: "button", class: "danger", onclick: function () {
           if (!window.confirm("Remove #" + it.id + " from the board? (Its tracker item is not touched.)")) return;
           api("/api/board/items/" + it.id, { method: "DELETE" }).then(function () { showDetail(null); load(); }).catch(function (e) { toast(e.message, true); });
         } }, "Remove from board"))));
-      detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      if (!fromRefresh) detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
     function card(it) {
       var c = h("div", { class: "bcard " + it.column, draggable: ro || it.column === "running" ? null : "true", tabindex: "0", role: "button",
@@ -2839,7 +2916,7 @@
         } }, "Import from " + c.name));
       });
       if (!data.connectors.length && canEdit()) importBox.appendChild(h("a", { href: "#/settings/connectors", text: "Connect Jira, ClickUp or GitHub" }));
-      if (open) { var it = data.items.find(function (x) { return x.id === open; }); if (it) showDetail(it); }
+      if (open) { var it = data.items.find(function (x) { return x.id === open; }); if (it) showDetail(it, true); }
     }
     function load() { return api("/api/board").then(function (d) { data = d; render(); }).catch(function (e) { lanes.textContent = e.message; }); }
     add.addEventListener("click", function () {
@@ -2921,7 +2998,7 @@
     m.appendChild(h("div", { class: "wfedit" }, palette, scroller, inspector));
     m.appendChild(modelList() || h("span"));
 
-    function changed() { dirty = true; status.textContent = "Unsaved changes"; }
+    function changed() { dirty = true; S.dirty = true; status.textContent = "Unsaved changes"; }
     function repoFiles() { return (c.repo && c.repo.files) || []; }
     function allWorkflows() {
       var out = (c.config.workflow || []).slice();
@@ -3183,7 +3260,10 @@
       f.appendChild(h("p", { class: "muted small", text: (t.needs || []).length ? "Runs after: " + t.needs.join(", ") : "Runs first (nothing before it)." }));
       f.appendChild(h("div", { class: "row" },
         !t.workflow && !t.stop && canEdit() ? h("button", { type: "button", title: "Keep this task's settings to drag into other workflows", onclick: function () {
-          var n = window.prompt("Save this task for reuse in other workflows, named:", t.id); if (!n) return;
+          ask("Save this step for reuse", [{ name: "n", label: "Name", value: t.id, hint: "It appears under Saved tasks in every workflow's palette." }], "Save", function (v) { return saveComp(v.n); });
+        } }, "Save for reuse") : null));
+      inspector.appendChild(f);
+      function saveComp(n) {
           var comp = { name: n.trim() }; ["prompt", "profile", "runner", "node", "target", "skill"].forEach(function (k) { if (t[k]) comp[k] = t[k]; }); if (t.retries) comp.retries = t.retries;
           if (loc.kind === "repo") {
             // Kept in the workflow's own file when it is saved.
@@ -3191,9 +3271,8 @@
             c.repo.files = repoFiles().concat([{ file: "", components: [comp], workflows: [] }]);
             t.component = comp.name; changed(); renderPalette(); toast("Saved task " + comp.name + " is kept with this workflow when you save it"); return;
           }
-          addToSection("component", comp).then(function (r) { c = r; toast("Saved task " + comp.name); renderPalette(); }).catch(function (e) { toast(e.message, true); });
-        } }, "Save for reuse") : null));
-      inspector.appendChild(f);
+          return addToSection("component", comp).then(function (r) { c = r; toast("Saved task " + comp.name); renderPalette(); });
+      }
     }
 
     var pendingComps = [];
@@ -3393,7 +3472,7 @@
       { k: "states", label: "States in the tracker", type: "kv", help: "running=In Progress, review=In Review, done=Done, failed=... one per line (GitHub: a label, or open/closed)." }]; },
       summary: function (x) { return x.kind + " " + x.project + (x.query ? " (" + x.query + ")" : "") + (x.auto_run ? ", auto-run" : ""); } },
     profile: { tab: "profiles", noun: "profile", fields: function (c) { return [
-      { k: "name", label: "Name", req: true, help: "Pick it on Launch, in presets, in workflow tasks and on the board." },
+      { k: "name", label: "Name", req: true, help: "Pick it on Run an agent, in presets, in workflow steps and on the board." },
       { k: "description", label: "Description" },
       { k: "runner", label: "Runner", type: "select", options: opts(cfgRunnerNames(c), "Whatever Launch has selected") },
       { k: "account", label: "Account", type: "select", options: [["", "Automatic (routing picks, else this machine's login)"], ["login", "The machine's own login"]].concat((c.config.account || []).map(function (a) { return [a.name, a.name]; })),
@@ -3470,7 +3549,7 @@
         { k: "profile", label: "Profile", type: "select", options: opts(cfgProfileNames(c), "None"), help: "Model, permission mode and the rest. Its runner, if it names one, replaces the runner above." },
         { k: "model", label: "Model", list: "models", placeholder: "the profile's", help: "This task's model, over the profile's; with Ollama, a local model's name." },
         { k: "provider", label: "Runs on", type: "select", options: [["", "the profile's choice"], ["anthropic", "Anthropic"], ["ollama", "Ollama (local model)"]] },
-        { k: "component", label: "Component", type: "select", options: opts((c.config.component || []).map(function (x) { return x.name; }), "None"), help: "Start from a reusable component; fields left empty come from it." },
+        { k: "component", label: "Saved task", type: "select", options: opts((c.config.component || []).map(function (x) { return x.name; }), "None"), help: "Start from a reusable component; fields left empty come from it." },
         { k: "workflow", label: "Runs workflow", type: "select", options: opts((c.config.workflow || []).map(function (x) { return x.name; }), "None (a task)"), help: "Run another workflow as this one step instead of a task." },
         { k: "target", label: "Target", help: "A directory on that node (or from the component). Local paths are relative to the config file." },
         { k: "prompt", label: "Prompt", type: "textarea", help: "{target} and {node} are filled in (or the component's prompt)." },
@@ -3765,8 +3844,13 @@
               });
               return h("tr", null, h("td", null, h("b", { text: u.name })), h("td", null, role),
                 h("td", null, h("button", { type: "button", onclick: function () {
-                  var p = window.prompt("New password for " + u.name + " (at least 10 characters; their sessions end):"); if (!p) return;
-                  api("/api/users/" + encodeURIComponent(u.name), { method: "PATCH", body: { password: p } }).then(function () { toast("Password set for " + u.name); }).catch(function (e) { toast(e.message, true); });
+                  ask("Set a password for " + u.name, [
+                    { name: "p", label: "New password", type: "password", min: 10, hint: "At least 10 characters. Their sessions end." },
+                    { name: "again", label: "Again", type: "password", min: 10 }
+                  ], "Set password", function (v) {
+                    if (v.p !== v.again) throw new Error("The two passwords differ.");
+                    return api("/api/users/" + encodeURIComponent(u.name), { method: "PATCH", body: { password: v.p } }).then(function () { toast("Password set for " + u.name); });
+                  });
                 } }, "Set password")),
                 h("td", null, h("button", { type: "button", class: "danger", onclick: function () {
                   if (!window.confirm("Remove " + u.name + "? They are signed out.")) return;
@@ -3906,6 +3990,9 @@
       Array.prototype.forEach.call(document.querySelectorAll('#nav a[data-route="settings"], #nav a[data-route="terminal"]'), function (a) { a.hidden = !ov.is_admin; });
       var b = $("running-badge"); b.hidden = !ov.running; b.textContent = String(ov.running);
       var a = $("approvals-badge"); a.hidden = !ov.approvals; a.textContent = String(ov.approvals || 0);
+      // Agents waiting for an answer show in the tab's title too.
+      document.title = (ov.approvals ? "(" + ov.approvals + ") " : "") + "indra";
+      a.title = ov.approvals ? ov.approvals + " agent request(s) wait for your answer" : "";
       a.title = ov.approvals ? ov.approvals + " tool request(s) waiting for you" : "";
       var l = $("learnings-badge"); l.hidden = !ov.learnings; l.textContent = String(ov.learnings || 0);
       l.title = ov.learnings ? ov.learnings + " learning(s) waiting for review" : "";
@@ -3970,10 +4057,29 @@
     var dark = cssVar("--bg") === "#131312";
     var t = dark ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", t); store("indra.theme", t);
-    route();
+    // Only what draws with theme colors redraws: what you typed stays.
+    window.dispatchEvent(new Event("indra-theme"));
   });
   var savedTheme = store("indra.theme");
   if (savedTheme === "light" || savedTheme === "dark") document.documentElement.setAttribute("data-theme", savedTheme);
-  window.addEventListener("hashchange", route);
+  // Unsaved changes: typing in a form marks the page; leaving it asks first.
+  // A successful save (any API call that changes something) clears the mark.
+  S.dirty = false; S.hash = location.hash;
+  $("main").addEventListener("input", function (e) {
+    var t = e.target;
+    if (!t || t.type === "search" || t.closest("[data-nodirty]")) return;
+    if (t.closest("form, .form, .editor, .wfeditor")) S.dirty = true;
+  });
+  window.addEventListener("beforeunload", function (e) { if (S.dirty) { e.preventDefault(); e.returnValue = ""; } });
+  window.addEventListener("hashchange", function () {
+    if (S.dirty && location.hash !== S.hash) {
+      if (!window.confirm("You have changes that are not saved. Leave this page anyway?")) {
+        history.replaceState(null, "", S.hash || "#/");
+        return;
+      }
+    }
+    S.dirty = false; S.hash = location.hash;
+    route();
+  });
   route();
 })();
