@@ -124,6 +124,30 @@ fn kill_session(sid: libc::pid_t) {
     }
 }
 
+/// The same on macOS, which has no /proc: list every process and ask each
+/// for its session.
+#[cfg(target_os = "macos")]
+fn kill_session(sid: libc::pid_t) {
+    // SAFETY: a null buffer asks for the count; the second call fills a
+    // buffer we own, of the size we pass.
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return;
+    }
+    let mut pids: Vec<libc::pid_t> = vec![0; n as usize + 64];
+    let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let got = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bytes) };
+    if got <= 0 {
+        return;
+    }
+    let me = std::process::id() as libc::pid_t;
+    for &pid in pids.iter().take((got as usize).min(pids.len())) {
+        if pid > 0 && pid != me && unsafe { libc::getsid(pid) } == sid {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
 /// The shell a terminal starts by default, and its arguments: the
 /// configured `[terminal] shell`, else the user's.
 pub fn default_shell(cfg: &crate::deck::config::TerminalCfg) -> (PathBuf, Vec<String>) {
@@ -401,7 +425,7 @@ pub async fn bridge(spec: Spec, user: String, socket: axum::extract::ws::WebSock
         // Background jobs have process groups of their own, and a shell
         // that dies before passing on the hangup leaves them running: end
         // whatever is left in the terminal's session.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(g) = group {
             kill_session(g);
         }
