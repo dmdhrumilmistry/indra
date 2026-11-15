@@ -566,6 +566,25 @@ impl Proc {
         clip(&texts.join("\n\n"), 6000)
     }
 
+    /// Everything it printed (not stderr), keeping the last `max` characters:
+    /// a shell step's output, for conditions and later steps.
+    pub fn text_output(&self, max: usize) -> String {
+        let st = self.state.lock().unwrap();
+        let all: Vec<&str> = st
+            .events
+            .iter()
+            .filter(|e| e.kind == "text" || e.kind == "result")
+            .map(|e| e.text.as_str())
+            .collect();
+        let s = all.join("\n");
+        let n = s.chars().count();
+        if n > max {
+            s.chars().skip(n - max).collect()
+        } else {
+            s
+        }
+    }
+
     pub fn runner_name(&self) -> &str {
         &self.runner
     }

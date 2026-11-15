@@ -99,6 +99,31 @@ pub fn shell() -> PathBuf {
     }
 }
 
+/// SIGKILL every process left in session `sid` (the terminal's program
+/// leads its own session, so its jobs and their children are all in it).
+#[cfg(target_os = "linux")]
+fn kill_session(sid: libc::pid_t) {
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for e in rd.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<libc::pid_t>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
+            continue;
+        };
+        // pid (comm) state ppid pgrp session ...; comm may hold spaces.
+        let session = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(3))
+            .and_then(|x| x.parse::<libc::pid_t>().ok());
+        if session == Some(sid) && pid != std::process::id() as libc::pid_t {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
 /// The shell a terminal starts by default, and its arguments: the
 /// configured `[terminal] shell`, else the user's.
 pub fn default_shell(cfg: &crate::deck::config::TerminalCfg) -> (PathBuf, Vec<String>) {
@@ -357,18 +382,30 @@ pub async fn bridge(spec: Spec, user: String, socket: axum::extract::ws::WebSock
         if let Some(g) = group {
             unsafe { libc::kill(-g, libc::SIGHUP) };
         }
+        let mut code = None;
         for _ in 0..20 {
             if let Ok(Some(s)) = child.try_wait() {
-                return Some(s.exit_code());
+                code = Some(s.exit_code());
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        #[cfg(unix)]
-        if let Some(g) = group {
-            unsafe { libc::kill(-g, libc::SIGKILL) };
+        if code.is_none() {
+            #[cfg(unix)]
+            if let Some(g) = group {
+                unsafe { libc::kill(-g, libc::SIGKILL) };
+            }
+            let _ = child.kill();
+            code = child.wait().map(|s| s.exit_code()).ok();
         }
-        let _ = child.kill();
-        child.wait().map(|s| s.exit_code()).ok()
+        // Background jobs have process groups of their own, and a shell
+        // that dies before passing on the hangup leaves them running: end
+        // whatever is left in the terminal's session.
+        #[cfg(target_os = "linux")]
+        if let Some(g) = group {
+            kill_session(g);
+        }
+        code
     })
     .await
     .ok()

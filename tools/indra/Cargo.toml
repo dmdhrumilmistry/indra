@@ -1,6 +1,6 @@
 [package]
 name = "indra"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.89"
 description = "One CLI for AI agent harnesses: graph memory (Markdown notes with typed links, Obsidian-compatible) and a local web console to view, monitor and run agents."

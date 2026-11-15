@@ -102,6 +102,10 @@ pub struct TeamCfg {
 pub struct LocalCfg {
     /// Agents allowed to run at once on this machine (default 4).
     pub max_parallel: Option<usize>,
+    /// Run workflow shell steps on this machine (default true). A node with
+    /// `false` refuses the hub's shell steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_steps: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -158,6 +162,9 @@ pub struct WorkflowCfg {
     /// when it is not in the config file.
     #[serde(skip)]
     pub source: Option<PathBuf>,
+    /// The inputs' values for this run (filled in by `apply_inputs`).
+    #[serde(skip)]
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
 /// One input of a workflow (`[[workflow.input]]`).
@@ -324,11 +331,13 @@ prompt = "/sh-security-review {target} {input.focus}"
 /// `{input.NAME}` references in a task.
 fn input_refs(t: &TaskCfg) -> Vec<String> {
     let mut out = Vec::new();
+    let each = t.foreach.as_ref().map(|f| f.list().join("\n"));
     let fields = [
         Some(t.prompt.as_str()),
         Some(t.target.as_str()),
         t.profile.as_deref(),
         t.model.as_deref(),
+        each.as_deref(),
     ];
     for f in fields.into_iter().flatten() {
         let mut rest = f;
@@ -416,6 +425,7 @@ pub fn apply_inputs(
         }
     }
     let mut values: Vec<(String, String)> = Vec::new();
+    let mut resolved = std::collections::BTreeMap::new();
     for i in &w.inputs {
         let label = if i.label.is_empty() {
             &i.name
@@ -480,6 +490,7 @@ pub fn apply_inputs(
                 raw
             }
         };
+        resolved.insert(i.name.clone(), v.clone());
         values.push((format!("{{input.{}}}", i.name), v));
     }
     let fill = |s: &str| {
@@ -502,9 +513,12 @@ pub fn apply_inputs(
             .join("\n")
     };
     let mut out = w.clone();
-    out.inputs.clear();
+    out.values = resolved;
     for t in &mut out.tasks {
         t.prompt = tidy(fill(&t.prompt));
+        if let Some(f) = &t.foreach {
+            t.foreach = Some(Items::Many(f.list().iter().map(|x| fill(x)).collect()));
+        }
         t.target = fill(&t.target);
         t.profile = t
             .profile
@@ -562,6 +576,42 @@ pub struct TaskCfg {
     /// arguments (default `{target}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// A shell command to run instead of an agent (bash, else sh; PowerShell
+    /// on Windows), in the target. Inputs, the loop item and earlier steps'
+    /// results reach it as environment variables, never as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Run only when this condition holds (see `deck::flow`); else skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    /// When to start: "success" (the default: everything it needs
+    /// succeeded), "failure" (something it needs failed), or "always" (once
+    /// everything it needs has finished, however it went).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// Its failure does not fail the workflow, and what follows it on
+    /// success still runs (`<step>.failed` still tells).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_failure: bool,
+    /// One copy of the step per item, run in parallel: `{item}` in the
+    /// prompt and target, `$INDRA_ITEM` in a command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<Items>,
+    /// Run it again until this condition holds (`self.output contains
+    /// "PASS"`), at most `max_runs` times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// The most runs of an `until` loop (default 3, at most 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs: Option<u32>,
+    /// A stop step: when it is reached (its needs and `when` allowing),
+    /// the workflow ends at once as "success" or "failure"; steps not yet
+    /// started are skipped and running ones stopped. `prompt` is its message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<String>,
+    /// The loop item this copy runs for (set when a `foreach` is expanded).
+    #[serde(skip)]
+    pub item: Option<String>,
     /// Where the graph editor draws it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos: Option<[i32; 2]>,
@@ -589,6 +639,55 @@ pub struct ComponentCfg {
     /// A skill to run, as on a task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// A shell command to run, as on a task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+}
+
+/// `foreach`: a list, or one string of items separated by new lines or
+/// commas (an input that holds a list, say).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum Items {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Items {
+    pub fn list(&self) -> Vec<String> {
+        match self {
+            Items::One(s) => vec![s.clone()],
+            Items::Many(v) => v.clone(),
+        }
+    }
+}
+
+/// The reserved runner shell steps run with, on any node.
+pub const SHELL_RUNNER: &str = "indra-shell";
+
+/// The runner for shell steps: bash, else sh (PowerShell on Windows), with
+/// the command as one argument, never parsed by indra.
+pub fn shell_runner() -> Runner {
+    let (command, args): (&str, Vec<&str>) = if cfg!(windows) {
+        (
+            "powershell",
+            vec!["-NoProfile", "-NonInteractive", "-Command", "{prompt}"],
+        )
+    } else if which("bash").is_some() {
+        ("bash", vec!["-c", "{prompt}"])
+    } else {
+        ("sh", vec!["-c", "{prompt}"])
+    };
+    Runner {
+        name: SHELL_RUNNER.into(),
+        program: which(command),
+        command: command.into(),
+        args: args.into_iter().map(String::from).collect(),
+        format: "text".into(),
+        resume_args: vec![],
+        fork_args: vec![],
+        model_args: vec![],
+    }
 }
 
 /// The prompt that runs `skill` with `args`: Claude Code's slash command
@@ -672,6 +771,10 @@ pub fn expand_workflow(
                         .map(|x| prefix(&x.id))
                         .collect(),
                 );
+                let names: std::collections::HashMap<String, String> = inner
+                    .iter()
+                    .map(|x| (x.id.clone(), prefix(&x.id)))
+                    .collect();
                 for mut x in inner.clone() {
                     x.needs = if x.needs.is_empty() {
                         t.needs.clone()
@@ -679,6 +782,15 @@ pub fn expand_workflow(
                         x.needs.iter().map(|n| prefix(n)).collect()
                     };
                     x.id = prefix(&x.id);
+                    // Its conditions name its own steps, now prefixed.
+                    x.when = x
+                        .when
+                        .as_deref()
+                        .map(|c| crate::deck::flow::rename(c, &names));
+                    x.until = x
+                        .until
+                        .as_deref()
+                        .map(|c| crate::deck::flow::rename(c, &names));
                     out.push(x);
                 }
                 continue;
@@ -705,6 +817,9 @@ pub fn expand_workflow(
                 }
                 if x.skill.is_none() {
                     x.skill = c.skill.clone();
+                }
+                if x.run.is_none() {
+                    x.run = c.run.clone();
                 }
             }
             if x.node.is_empty() {
@@ -1064,6 +1179,8 @@ pub struct Settings {
     pub teams: Vec<TeamCfg>,
     pub marketplaces: Vec<MarketplaceCfg>,
     pub terminal: TerminalCfg,
+    /// Workflow shell steps may run on this machine.
+    pub shell_steps: bool,
     /// Workflow files in repositories that could not be used, and why.
     pub workflow_errors: Vec<String>,
     /// Where `.indra/workflows/` is looked for: harness roots and targets.
@@ -1141,7 +1258,7 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
                 t.id, t.node
             )));
         }
-        if t.prompt.trim().is_empty() {
+        if t.prompt.trim().is_empty() && t.run.is_none() && t.stop.is_none() {
             return Err(at(format!("task '{}' has an empty prompt", t.id)));
         }
         if t.target.trim().is_empty() {
@@ -1155,6 +1272,7 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
             }
         }
     }
+    validate_flow(w).map_err(at)?;
     // Kahn's algorithm: whatever cannot be ordered is on a cycle.
     let mut done: Vec<&str> = Vec::new();
     loop {
@@ -1174,6 +1292,151 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
     if done.len() != w.tasks.len() {
         let stuck: Vec<&str> = ids.iter().copied().filter(|i| !done.contains(i)).collect();
         return Err(at(format!("dependency cycle among: {}", stuck.join(", "))));
+    }
+    Ok(())
+}
+
+/// Conditions, loops and commands: each condition parses and names steps
+/// that run before it (so their result is known), a command takes no text
+/// from inputs, and loops stay within their limits.
+fn validate_flow(w: &WorkflowCfg) -> std::result::Result<(), String> {
+    use crate::deck::flow;
+    let ids: Vec<&str> = w.tasks.iter().map(|t| t.id.as_str()).collect();
+    let inputs: Vec<&str> = w.inputs.iter().map(|i| i.name.as_str()).collect();
+    let looped: Vec<&str> = w
+        .tasks
+        .iter()
+        .filter(|t| t.foreach.is_some())
+        .map(|t| t.id.as_str())
+        .collect();
+    // Everything that runs before a step, through its needs.
+    let before = |id: &str| -> std::collections::HashSet<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![id.to_string()];
+        while let Some(x) = stack.pop() {
+            if let Some(t) = w.tasks.iter().find(|t| t.id == x) {
+                for n in &t.needs {
+                    if seen.insert(n.clone()) {
+                        stack.push(n.clone());
+                    }
+                }
+            }
+        }
+        seen
+    };
+    for t in &w.tasks {
+        let at = |m: String| format!("task '{}': {}", t.id, m);
+        let earlier = before(&t.id);
+        let known = |used: Vec<String>| -> std::result::Result<(), String> {
+            for u in used {
+                if u == t.id {
+                    return Err(at(
+                        "a condition cannot name its own step (use self.<field> in until)".into(),
+                    ));
+                }
+                if !earlier.contains(&u) {
+                    return Err(at(format!(
+                        "it reads step '{}', which does not run before it (add '{}' to its needs)",
+                        u, u
+                    )));
+                }
+                if looped.contains(&u.as_str()) {
+                    return Err(at(format!(
+                        "it reads step '{}', which runs once per item; follow it with on = \"failure\" or \"always\" instead",
+                        u
+                    )));
+                }
+            }
+            Ok(())
+        };
+        if let Some(r) = &t.run {
+            if r.trim().is_empty() || r.len() > 20_000 {
+                return Err(at("run must be a command (up to 20000 characters)".into()));
+            }
+            if t.skill.is_some() || t.workflow.is_some() {
+                return Err(at(
+                    "a step runs a command, a skill or a workflow, not several".into(),
+                ));
+            }
+            for bad in ["{input.", "{item}", "{steps."] {
+                if r.contains(bad) {
+                    return Err(at(format!(
+                        "a command cannot contain {}...}}: use $INDRA_INPUT_<NAME>, $INDRA_ITEM or $INDRA_OUTPUT_<STEP> (environment variables, so no value can change the command)",
+                        bad
+                    )));
+                }
+            }
+        }
+        if let Some(st) = &t.stop {
+            if !["success", "failure"].contains(&st.as_str()) {
+                return Err(at(format!("stop must be success or failure, not {:?}", st)));
+            }
+            if t.run.is_some()
+                || t.skill.is_some()
+                || t.workflow.is_some()
+                || t.foreach.is_some()
+                || t.until.is_some()
+            {
+                return Err(at(
+                    "a stop step only ends the workflow: no run, skill, workflow, foreach or until"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(o) = &t.on {
+            if !["success", "failure", "always"].contains(&o.as_str()) {
+                return Err(at(format!(
+                    "on must be success, failure or always, not {:?}",
+                    o
+                )));
+            }
+        }
+        if let Some(c) = &t.when {
+            known(flow::check(c, &ids, &inputs, false).map_err(at)?)?;
+        }
+        if let Some(c) = &t.until {
+            known(flow::check(c, &ids, &inputs, true).map_err(at)?)?;
+        }
+        if let Some(n) = t.max_runs {
+            if !(1..=flow::MAX_RUNS).contains(&n) {
+                return Err(at(format!("max_runs must be 1 to {}", flow::MAX_RUNS)));
+            }
+            if t.until.is_none() {
+                return Err(at("max_runs needs an until condition".into()));
+            }
+        }
+        if let Some(f) = &t.foreach {
+            let list = f.list();
+            if !list.iter().any(|x| x.contains("{input."))
+                && flow::items(&list).len() > flow::MAX_ITEMS
+            {
+                return Err(at(format!(
+                    "foreach has more than {} items",
+                    flow::MAX_ITEMS
+                )));
+            }
+        }
+        // `{steps.<id>.<field>}` in a prompt: an earlier step's result.
+        let mut rest = t.prompt.as_str();
+        while let Some(i) = rest.find("{steps.") {
+            let after = &rest[i + 7..];
+            let Some(j) = after.find('}') else { break };
+            let (sid, field) = after[..j].rsplit_once('.').unwrap_or((&after[..j], ""));
+            if !["output", "exit_code", "status"].contains(&field) {
+                return Err(at(format!(
+                    "{{steps.{}}}: write {{steps.<step>.output}}, .exit_code or .status",
+                    &after[..j]
+                )));
+            }
+            if !ids.contains(&sid) {
+                return Err(at(format!(
+                    "{{steps.{}.{}}}: there is no step '{}'",
+                    sid, field, sid
+                )));
+            }
+            known(vec![sid.to_string()])?;
+            rest = &after[j + 1..];
+        }
     }
     Ok(())
 }
@@ -1596,6 +1859,32 @@ pub fn read_repo_file(f: &Path) -> Result<RepoFile> {
     toml::from_str(&text).map_err(|e| e.to_string())
 }
 
+/// Write a repository's workflow file (or delete it when it holds nothing),
+/// with a header saying what it is.
+pub fn write_repo_file(f: &Path, rf: &RepoFile) -> Result<()> {
+    if rf.workflow.is_empty() && rf.component.is_empty() {
+        return match std::fs::remove_file(f) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    let body = toml::to_string(rf).map_err(|e| e.to_string())?;
+    let names: Vec<&str> = rf.workflow.iter().map(|w| w.name.as_str()).collect();
+    let text = format!(
+        "# indra workflow{}: {}. Commit this file to share it: everyone whose\n\
+         # indra console or `indra run` has this repository as a target gets it.\n\
+         # Edit it in the console's workflow editor or by hand.\n\n{}",
+        if names.len() == 1 { "" } else { "s" },
+        names.join(", "),
+        body
+    );
+    if let Some(d) = f.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    crate::deck::confedit::write_atomic(f, &text)
+}
+
 /// Names pick things out (on Launch, in workflows), so each must be unique.
 fn unique<'a>(what: &str, names: impl Iterator<Item = &'a str>) -> Result<()> {
     let mut seen: Vec<&str> = Vec::new();
@@ -2007,6 +2296,21 @@ pub fn build_settings(
         // Ids are checked on the workflow as written, the rest once expanded.
         crate::deck::nodes::validate_name(&w.name).map_err(|e| format!("workflow name: {}", e))?;
         let mut w = expand_workflow(w, &all_raw, &all_comps)?;
+        // A local step without a target runs in the harness's first target
+        // (the workflow's harness, else the first one), like a Launch does.
+        let home = w
+            .harness
+            .as_deref()
+            .and_then(|n| harnesses.iter().find(|h| h.name == n))
+            .or_else(|| harnesses.first())
+            .and_then(|h| h.targets.first().cloned().or_else(|| Some(h.root.clone())))
+            .or_else(|| default_targets.first().cloned())
+            .unwrap_or_else(|| base.clone());
+        for t in &mut w.tasks {
+            if t.node == crate::deck::nodes::LOCAL && t.target.trim().is_empty() {
+                t.target = home.to_string_lossy().into_owned();
+            }
+        }
         finish(&w)?;
         // Local targets are relative to the config file; remote ones are the
         // remote's business. One from an input is resolved when it runs.
@@ -2098,6 +2402,7 @@ pub fn build_settings(
         marketplaces: file.marketplace.clone(),
         teams,
         terminal: file.terminal.clone(),
+        shell_steps: file.local.shell_steps.unwrap_or(true),
         workflow_errors,
         repo_dirs,
     })

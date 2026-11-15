@@ -1523,6 +1523,20 @@ async fn node_run_fetch(
 /// pull`): what was seen last, as names, sizes and times.
 fn repo_fingerprint(s: &Settings) -> String {
     let mut out = String::new();
+    // indra.toml too: `indra mcp` (Claude) may save a workflow into it.
+    if let Some(m) = s
+        .config_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+    {
+        let t = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        out.push_str(&format!("config|{}|{}\n", m.len(), t));
+    }
     for d in &s.repo_dirs {
         for f in config::repo_workflow_files(d) {
             let m = std::fs::metadata(&f).ok();
@@ -2147,27 +2161,7 @@ fn repo_file_in(s: &Settings, file: &str) -> ApiResult<std::path::PathBuf> {
 }
 
 fn write_repo_file(f: &std::path::Path, rf: &config::RepoFile) -> ApiResult<()> {
-    if rf.workflow.is_empty() && rf.component.is_empty() {
-        return match std::fs::remove_file(f) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(internal(e.to_string())),
-        };
-    }
-    let body = toml::to_string(rf).map_err(|e| internal(e.to_string()))?;
-    let names: Vec<&str> = rf.workflow.iter().map(|w| w.name.as_str()).collect();
-    let text = format!(
-        "# indra workflow{}: {}. Commit this file to share it: everyone whose\n\
-         # indra console or `indra run` has this repository as a target gets it.\n\
-         # Edit it in the console's workflow editor or by hand.\n\n{}",
-        if names.len() == 1 { "" } else { "s" },
-        names.join(", "),
-        body
-    );
-    if let Some(d) = f.parent() {
-        std::fs::create_dir_all(d).map_err(|e| internal(e.to_string()))?;
-    }
-    confedit::write_atomic(f, &text).map_err(internal)
+    config::write_repo_file(f, rf).map_err(internal)
 }
 
 /// Load the settings again (a repository file changed).
@@ -2269,6 +2263,106 @@ async fn repo_wf_save(
         "problem": problem,
         "config": config_payload(&app)?,
     })))
+}
+
+#[derive(Deserialize)]
+struct GenReq {
+    /// What the workflow should do, in the person's words.
+    description: String,
+    /// "config" or one of the known repositories.
+    #[serde(default)]
+    location: String,
+}
+
+/// Describe a workflow and let Claude Code build it: it starts with the
+/// `indra mcp` server (the format, this machine's profiles, nodes and
+/// skills, validate and save) and saves the result where asked. The console
+/// sees the saved workflow on its next look.
+async fn wf_generate(State(app): State<Arc<App>>, Json(r): Json<GenReq>) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    if let Some(why) = &c.locked {
+        return Err(forbidden(why.clone()));
+    }
+    let s = app.settings();
+    if s.read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let want = r.description.trim();
+    if want.is_empty() || want.len() > 8000 {
+        return Err(bad("describe the workflow (up to 8000 characters)"));
+    }
+    let loc = match r.location.trim() {
+        "" | "config" => None,
+        x => Some(
+            s.repo_dirs
+                .iter()
+                .find(|d| d.display().to_string() == x)
+                .cloned()
+                .ok_or_else(|| bad("not a repository this console knows"))?,
+        ),
+    };
+    let claude = s
+        .runners
+        .iter()
+        .find(|x| x.format == "claude-stream-json" && x.program.is_some())
+        .ok_or_else(|| bad("Claude Code is not installed on this machine (the claude runner)"))?;
+    let mcp =
+        crate::deck::mcp::client_config(&s.data_dir.join("mcp"), &c.opts).map_err(internal)?;
+    let mut runner = claude.clone();
+    runner.args.extend([
+        "--mcp-config".to_string(),
+        mcp.display().to_string(),
+        "--strict-mcp-config".to_string(),
+    ]);
+    let target = loc.clone().unwrap_or_else(|| {
+        s.harnesses
+            .first()
+            .and_then(|h| h.targets.first().cloned())
+            .unwrap_or_else(|| c.opts.cwd.clone())
+    });
+    let harness = s
+        .harnesses
+        .first()
+        .map(|h| h.name.clone())
+        .unwrap_or_default();
+    let location = loc
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "config".into());
+    let prompt = format!(
+        "Create an indra workflow for this request, then save it.\n\n\
+         Request:\n{want}\n\n\
+         How:\n\
+         1. Call the workflow_guide tool (the indra MCP server) to learn the format and what this machine has: profiles, nodes, repositories, skills, saved tasks.\n\
+         2. If the request depends on this repository (its build, test or lint commands, its layout), look with Read, Glob and Grep.\n\
+         3. Write the workflow as TOML. Use shell steps (run) for exact commands and agent steps (prompt) for judgement; add inputs for what the person running it should choose; use conditions (when, on), allow_failure, foreach and until where the request needs branching, error handling or loops.\n\
+         4. Call validate_workflow with location \"{location}\" and fix every error it reports.\n\
+         5. Call save_workflow with location \"{location}\".\n\
+         6. Reply with the workflow's name and one line per step.\n\
+         Do not run the workflow, and change no other file."
+    );
+    let agent = crate::deck::nodes::AgentOpts {
+        allowed_tools: ["mcp__indra", "Read", "Glob", "Grep"]
+            .map(String::from)
+            .to_vec(),
+        ..Default::default()
+    };
+    let pid = app
+        .procs
+        .start_with(
+            Launch::Local {
+                runner: &runner,
+                harness: &harness,
+                prompt: &prompt,
+                target: &target,
+            },
+            crate::deck::procs::StartOpts {
+                agent,
+                ..Default::default()
+            },
+        )
+        .map_err(bad)?;
+    Ok(Json(json!({ "proc": pid, "location": location })))
 }
 
 #[derive(Deserialize)]
@@ -3025,6 +3119,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/term/check", get(term_check))
         .route("/api/workflow-files", axum::routing::put(repo_wf_save))
         .route("/api/workflow-files/delete", post(repo_wf_delete))
+        .route("/api/workflow-files/generate", post(wf_generate))
         .route("/api/term/sessions", get(term_sessions))
         .route("/api/term/sessions/{id}/close", post(term_close))
         .route("/api/overview", get(overview))
@@ -3174,6 +3269,7 @@ mod tests {
             teams: vec![],
             marketplaces: vec![],
             terminal: Default::default(),
+            shell_steps: true,
             workflow_errors: vec![],
             repo_dirs: vec![],
         };
