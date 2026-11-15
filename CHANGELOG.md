@@ -12,6 +12,9 @@ section from this file.
 - **What it worked on, at a glance:** the machine, folder and git branch, the agent and model,
   how full its context is, its task list, the files it changed (click one for the diff), and
   the pull requests it linked.
+- **Browse the folder it works in.** Files on the right lists the folder the agent works in, on
+  any machine; click a file to read it. Code (in replies, files and diffs) shows with line
+  numbers and a Wrap lines switch. Read-only, never outside that folder, operators and admins.
 - **Sessions are kept.** Finished sessions come back after the console restarts.
 
 ## v0.10.0

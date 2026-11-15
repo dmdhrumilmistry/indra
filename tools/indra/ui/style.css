@@ -550,3 +550,25 @@ pre.diff { max-height: 70vh; overflow: auto; font-size: 12px; background: var(--
 pre.diff .add { color: var(--ok); } pre.diff .del { color: var(--bad); } pre.diff .hunk { color: var(--accent); }
 @media (max-width: 1100px) { .sessions { grid-template-columns: 220px minmax(0, 1fr); height: auto; } .s-panel { grid-column: 1 / -1; } .s-chat { min-height: 60vh; } }
 @media (max-width: 760px) { .sessions { grid-template-columns: minmax(0, 1fr); } .s-side { max-height: 220px; } }
+/* Code: line numbers, diffs, files. */
+.code-wrap { position: relative; border: 1px solid var(--line); border-radius: 8px; background: var(--sunk); overflow: auto; max-height: 70vh; }
+.code-wrap .code-lang { position: sticky; top: 0; float: right; font-size: 11px; color: var(--muted); padding: 2px 8px; }
+.code-view { border-collapse: collapse; width: 100%; font-family: var(--mono, monospace); font-size: 12.5px; line-height: 1.45; }
+.code-view td { padding: 0 10px; vertical-align: top; }
+.code-view td.ln { width: 1%; min-width: 34px; text-align: right; color: var(--muted); user-select: none; border-right: 1px solid var(--line); padding: 0 8px; }
+.code-view td.src { white-space: pre; }
+dialog.wrap .code-view td.src { white-space: pre-wrap; overflow-wrap: anywhere; }
+.code-view tr.add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.code-view tr.del { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.code-view tr.hunk td { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.code-view tr.meta td { color: var(--muted); }
+.code-view.compact { font-size: 12px; }
+.msg .md .prose { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.msg .md .prose code { font-family: var(--mono, monospace); font-size: 12.5px; background: var(--sunk); padding: 1px 4px; border-radius: 4px; }
+.msg .md .code-wrap { margin: 8px 0; max-height: 420px; }
+dialog.code { width: min(1200px, calc(100vw - 32px)); }
+dialog.code .code-title { margin: 0; flex: 1; font-family: var(--mono, monospace); text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.crumbs button { padding: 1px 4px; }
+.flist { display: grid; max-height: 320px; overflow: auto; }
+.ficon { display: inline-block; width: 12px; color: var(--muted); }

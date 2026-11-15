@@ -2345,6 +2345,59 @@
       return { root: list[0], last: list[list.length - 1], procs: list };
     }).sort(function (a, b) { return b.last.started - a.last.started; });
   }
+  // An agent's reply: fenced code as code blocks, `inline code` as code, the
+  // rest as text (no HTML is ever interpreted).
+  function mdBody(text) {
+    var out = h("div", { class: "body md" });
+    String(text || "").split(/^```/m).forEach(function (part, i) {
+      if (i % 2 === 1) {
+        var nl = part.indexOf("\n"), lang = nl > 0 ? part.slice(0, nl).trim() : "";
+        out.appendChild(codeView(nl >= 0 ? part.slice(nl + 1).replace(/\n$/, "") : part, { lang: lang, compact: true }));
+        return;
+      }
+      var p = h("div", { class: "prose" });
+      part = part.replace(/^\n+|\n+$/g, "");
+      part.split(/(`[^`\n]+`)/).forEach(function (seg) {
+        if (/^`[^`]+`$/.test(seg)) p.appendChild(h("code", { text: seg.slice(1, -1) }));
+        else if (seg) p.appendChild(document.createTextNode(seg));
+      });
+      if (part.trim()) out.appendChild(p);
+    });
+    return out;
+  }
+  // Code with line numbers; a diff gets its lines coloured and numbered on
+  // both sides.
+  function codeView(text, o) {
+    o = o || {};
+    var lines = String(text).split("\n");
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    var tbl = h("table", { class: "code-view" + (o.compact ? " compact" : "") });
+    var tb = h("tbody"); tbl.appendChild(tb);
+    if (o.diff) {
+      var a = 0, b = 0;
+      lines.forEach(function (l) {
+        var m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(l), cls = "", la = "", lb = "";
+        if (m) { a = +m[1]; b = +m[2]; cls = "hunk"; }
+        else if (/^(diff |index |--- |\+\+\+ |new file|deleted file)/.test(l)) cls = "meta";
+        else if (l.charAt(0) === "+") { cls = "add"; lb = b++; }
+        else if (l.charAt(0) === "-") { cls = "del"; la = a++; }
+        else { la = a++; lb = b++; }
+        tb.appendChild(h("tr", { class: cls }, h("td", { class: "ln", text: String(la) }), h("td", { class: "ln", text: String(lb) }), h("td", { class: "src", text: l || " " })));
+      });
+    } else {
+      lines.forEach(function (l, i) { tb.appendChild(h("tr", null, h("td", { class: "ln", text: String(i + 1) }), h("td", { class: "src", text: l || " " }))); });
+    }
+    return h("div", { class: "code-wrap" }, o.lang ? h("div", { class: "code-lang", text: o.lang }) : null, tbl);
+  }
+  // A wide dialog for a diff or a file.
+  function codeDialog(title, body) {
+    var wrap = h("label", { class: "check small" }, h("input", { type: "checkbox", onchange: function (e) { dlg.classList.toggle("wrap", e.target.checked); } }), " Wrap lines");
+    var dlg = h("dialog", { class: "ask wide code", "aria-label": title },
+      h("div", { class: "row" }, h("h3", { class: "code-title", text: title }), wrap, h("button", { type: "button", onclick: function () { dlg.close(); dlg.remove(); } }, "Close")), body);
+    dlg.addEventListener("cancel", function () { dlg.remove(); });
+    document.body.appendChild(dlg); dlg.showModal();
+  }
+
   function firstLine(t, n) { t = String(t || "").split("\n").filter(function (x) { return x.trim(); })[0] || "(no prompt)"; return t.length > n ? t.slice(0, n) + "..." : t; }
   var DOT = { running: "run live", exited: "ok", failed: "bad", stopped: "warn" };
 
@@ -2391,7 +2444,7 @@
         function flush() { if (fold) { log.appendChild(fold.el); fold = null; } }
         (evs[p.id] || []).forEach(function (e) {
           if (e.kind === "user") { flush(); log.appendChild(h("div", { class: "msg user" }, h("div", { class: "who", text: "You" }), h("div", { class: "body", text: e.text }))); return; }
-          if (e.kind === "text" && !e.agent) { flush(); log.appendChild(h("div", { class: "msg agent" }, h("div", { class: "body", text: e.text }))); return; }
+          if (e.kind === "text" && !e.agent) { flush(); log.appendChild(h("div", { class: "msg agent" }, mdBody(e.text))); return; }
           if (e.kind === "result") { flush(); return; }
           if (e.kind === "exit") { flush(); log.appendChild(h("div", { class: "msg status " + (/^exited/.test(e.text) ? "ok" : "bad"), text: e.text })); return; }
           if (!fold) {
@@ -2475,6 +2528,7 @@
         Object.keys(files).forEach(function (f) { ch.appendChild(h("div", { class: "small cmd", text: f })); });
         if (ws && ws.local === false) ch.appendChild(h("p", { class: "muted small", text: "Diffs show for agents on this machine." }));
       } else ch.appendChild(h("p", { class: "muted small", text: ws && ws.git ? "No changes in its folder." : "None yet." }));
+      if (S.ov.role !== "viewer" && !(p.archived && p.node !== "local")) panel.appendChild(filesSection(p));
       var links = {}; c.procs.forEach(function (x) { (x.links || []).forEach(function (u) { links[u] = 1; }); });
       if (Object.keys(links).length) {
         var lk = sec("Pull requests and issues");
@@ -2483,13 +2537,49 @@
     }
     function showDiff(id, path) {
       api("/api/procs/" + id + "/diff" + q({ path: path })).then(function (d) {
-        var pre = h("pre", { class: "diff" });
-        d.diff.split("\n").forEach(function (l) { pre.appendChild(h("span", { class: /^\+(?!\+\+)/.test(l) ? "add" : /^-(?!--)/.test(l) ? "del" : /^@@/.test(l) ? "hunk" : "", text: l + "\n" })); });
-        var dlg = h("dialog", { class: "ask wide", "aria-label": "Diff of " + path }, h("div", { class: "row" }, h("h3", { text: path }), h("button", { type: "button", onclick: function () { dlg.close(); dlg.remove(); } }, "Close")),
-          d.diff ? pre : h("p", { class: "muted", text: "No difference." }), d.truncated ? h("p", { class: "muted small", text: "Shortened: the diff is large." }) : null);
-        dlg.addEventListener("cancel", function () { dlg.remove(); });
-        document.body.appendChild(dlg); dlg.showModal();
+        codeDialog(path + " (changes)", h("div", null, d.diff ? codeView(d.diff, { diff: true }) : h("p", { class: "muted", text: "No difference." }),
+          d.truncated ? h("p", { class: "muted small", text: "Shortened: the diff is large." }) : null,
+          h("button", { type: "button", class: "ghost small", onclick: function () { showFile(id, path); } }, "Open the whole file")));
       }).catch(function (e) { toast(e.message, true); });
+    }
+    function showFile(id, path) {
+      api("/api/procs/" + id + "/file" + q({ path: path })).then(function (f) {
+        var body = f.binary ? h("p", { class: "muted", text: "A binary file (" + bytes(f.size) + "): not shown." })
+          : f.too_big ? h("p", { class: "muted", text: "Larger than 1 MB (" + bytes(f.size) + "): not shown." })
+          : codeView(f.text, {});
+        codeDialog(path, body);
+      }).catch(function (e) { toast(e.message, true); });
+    }
+    // Files where it works: a folder browser, one level at a time.
+    var browse = "";
+    function filesSection(p) {
+      var box = h("div", { class: "s-sec" }, h("h3", { text: "Files" }));
+      var crumbs = h("div", { class: "crumbs small" }), list = h("div", { class: "flist" });
+      box.appendChild(crumbs); box.appendChild(list);
+      function go(path) {
+        browse = path;
+        crumbs.textContent = "";
+        var parts = path ? path.split("/") : [];
+        crumbs.appendChild(h("button", { type: "button", class: "ghost small", onclick: function () { go(""); } }, (p.cwd.split(/[\\/]/).filter(Boolean).pop() || "folder")));
+        parts.forEach(function (x, i) {
+          crumbs.appendChild(document.createTextNode(" / "));
+          crumbs.appendChild(h("button", { type: "button", class: "ghost small", onclick: function () { go(parts.slice(0, i + 1).join("/")); } }, x));
+        });
+        list.textContent = "";
+        list.appendChild(h("p", { class: "muted small", text: "Loading..." }));
+        api("/api/procs/" + p.id + "/files" + q({ path: path })).then(function (r) {
+          list.textContent = "";
+          if (!r.entries.length) list.appendChild(h("p", { class: "muted small", text: "Empty." }));
+          r.entries.forEach(function (e) {
+            var full = (path ? path + "/" : "") + e.name;
+            list.appendChild(h("button", { type: "button", class: "ghost file", title: e.dir ? "Open the folder" : bytes(e.size), onclick: function () { if (e.dir) go(full); else showFile(p.id, full); } },
+              h("span", { class: "ficon", text: e.dir ? "\u25b8" : "\u00b7" }), " ", e.name));
+          });
+          if (r.more) list.appendChild(h("p", { class: "muted small", text: "Showing the first 1000." }));
+        }).catch(function (e) { list.textContent = ""; list.appendChild(h("p", { class: "muted small", text: e.message })); });
+      }
+      go(browse);
+      return box;
     }
 
     // Live: one stream per process of the selected session.

@@ -355,6 +355,11 @@ pub fn needed(method: &str, path: &str) -> Role {
     {
         return Role::Admin;
     }
+    // Reading files where an agent works: not for viewers (a folder can
+    // hold secrets the agent's output never showed).
+    if under("/api/procs") && (path.ends_with("/files") || path.ends_with("/file")) {
+        return Role::Operator;
+    }
     // Enrollment keys: admins only, even to list.
     if under("/api/nodes/keys") {
         return Role::Admin;

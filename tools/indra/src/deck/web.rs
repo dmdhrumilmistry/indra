@@ -1162,6 +1162,57 @@ async fn proc_workspace(
 }
 
 #[derive(Deserialize)]
+struct FileQ {
+    #[serde(default)]
+    path: String,
+}
+
+/// `GET /api/procs/{id}/files?path=` and `/file?path=`: browse and read the
+/// folder an agent works in, on this machine or over a machine's link (that
+/// machine checks the folder is one of its own). Nothing outside it.
+async fn proc_files(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Query(q): Query<FileQ>,
+) -> ApiResult<Json<Value>> {
+    proc_fs(&app, id, "ls", &q.path).await
+}
+
+async fn proc_file(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Query(q): Query<FileQ>,
+) -> ApiResult<Json<Value>> {
+    proc_fs(&app, id, "cat", &q.path).await
+}
+
+async fn proc_fs(app: &App, id: u64, what: &str, path: &str) -> ApiResult<Json<Value>> {
+    let p = app
+        .procs
+        .get(id)
+        .ok_or_else(|| not_found("no such process"))?;
+    let root = p.target().to_string();
+    if p.node_name() == LOCAL {
+        let r = if what == "ls" {
+            nodes::list_files(&root, path)
+        } else {
+            nodes::read_file(&root, path)
+        };
+        return r.map(Json).map_err(bad);
+    }
+    let link = app
+        .procs
+        .links()
+        .get(p.node_name())
+        .filter(|l| l.connected())
+        .ok_or_else(|| bad("that machine is not connected"))?;
+    link.request(what, json!({ "root": root, "path": path }), 20)
+        .await
+        .map(Json)
+        .map_err(bad)
+}
+
+#[derive(Deserialize)]
 struct DiffQ {
     path: String,
 }
@@ -3821,6 +3872,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/procs/{id}/events", get(proc_events))
         .route("/api/procs/{id}/workspace", get(proc_workspace))
         .route("/api/procs/{id}/diff", get(proc_diff))
+        .route("/api/procs/{id}/files", get(proc_files))
+        .route("/api/procs/{id}/file", get(proc_file))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
