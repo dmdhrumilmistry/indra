@@ -2176,7 +2176,7 @@ fn hub_url(app: &App, headers: &HeaderMap) -> String {
 
 /// This machine's address on its network (the one it would use to reach
 /// the internet; nothing is sent).
-fn lan_ip() -> Option<std::net::IpAddr> {
+pub(crate) fn lan_ip() -> Option<std::net::IpAddr> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("192.0.2.1:9").ok()?;
     let ip = s.local_addr().ok()?.ip();

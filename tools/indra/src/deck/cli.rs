@@ -229,6 +229,13 @@ async fn serve(
         } else {
             format!("127.0.0.1:{}", addr.port())
         }
+    } else if addr.ip().is_unspecified() {
+        // Listening on every address: show the one other machines use.
+        match web::lan_ip() {
+            Some(std::net::IpAddr::V6(ip)) => format!("[{}]:{}", ip, addr.port()),
+            Some(ip) => format!("{}:{}", ip, addr.port()),
+            None => addr.to_string(),
+        }
     } else {
         addr.to_string()
     };
