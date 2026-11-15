@@ -1009,6 +1009,24 @@ run   = "rm -rf target/tmp"
 - Skipped steps, a branch not taken, do not fail the workflow; a failure fails it unless that
   step has `allow_failure`.
 
+**Stop steps** end the workflow early, as a success or a failure. One is usually guarded by a
+condition; when it is reached, steps that have not started are skipped and running ones are
+stopped. In the editor it is the **Stop** block, and the graph is drawn between a **Start** and an
+**End** block (Start leads to the steps that need nothing, the steps nothing needs lead to End).
+
+```toml
+[[workflow.task]]
+id     = "nothing-to-fix"
+needs  = ["test"]
+when   = "test.succeeded"
+stop   = "success"                       # or "failure"
+prompt = "Tests pass; nothing to fix."   # shown on the run page
+```
+
+**Targets.** In `indra.toml`, a step on this machine without a target runs in the harness's first
+target (the folder the Terminal page shows); in a repository's workflow file, in that repository.
+A step on another node needs its target.
+
 **Loops.**
 
 ```toml

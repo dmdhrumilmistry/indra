@@ -1635,7 +1635,7 @@
         var cancel = h("button", { class: "danger", type: "button", disabled: r.status !== "running" || S.ov.read_only, onclick: function () {
           cancel.disabled = true; api("/api/workflows/" + id + "/cancel", { method: "POST" }).then(function () { toast("Cancelling"); }).catch(function (e) { toast(e.message, true); });
         } }, "Cancel");
-        top.appendChild(header("Workflow #" + r.id + " - " + r.name, "Started " + ago(r.started) + (r.ended ? ", finished " + ago(r.ended) : ""), [wfPill(r.status), cancel]));
+        top.appendChild(header("Workflow #" + r.id + " - " + r.name, "Started " + ago(r.started) + (r.ended ? ", finished " + ago(r.ended) : "") + (r.stopped_by ? ", ended early by step " + r.stopped_by : ""), [wfPill(r.status), cancel]));
         var lv = depth(r.tasks), cols = [];
         r.tasks.forEach(function (t) { (cols[lv[t.id]] = cols[lv[t.id]] || []).push(t); });
         dag.textContent = "";
@@ -2655,8 +2655,10 @@
       while (stack.length) { var id = stack.pop(); if (id === from) return true; if (seen[id]) continue; seen[id] = 1; var t = task(id); if (t) stack = stack.concat(t.needs || []); }
       return false;
     }
+    // The Start and End blocks sit left and right of the steps (drawn only).
+    var OX = 130;
     function kind(t) {
-      var k = t.workflow ? "workflow " + t.workflow : t.run ? "$ " + t.run.split("\n")[0] : t.skill ? "skill " + t.skill : t.component ? "saved task " + t.component : "task";
+      var k = t.stop ? "stop: end as " + t.stop : t.workflow ? "workflow " + t.workflow : t.run ? "$ " + t.run.split("\n")[0] : t.skill ? "skill " + t.skill : t.component ? "saved task " + t.component : "task";
       var flow = [t.on && t.on !== "success" ? "on " + t.on : "", t.when ? "if" : "", t.foreach ? "for each" : "", t.until ? "until" : ""].filter(Boolean);
       return flow.length ? k + "  [" + flow.join(", ") + "]" : k;
     }
@@ -2666,22 +2668,22 @@
       while (svg.firstChild) svg.removeChild(svg.firstChild);
       var maxX = 900, maxY = 500;
       wf.task.forEach(function (t) {
-        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (t.workflow ? " sub" : t.run ? " cmdstep" : t.skill ? " skill" : t.component ? " comp" : "") + (t.on === "failure" ? " onfail" : ""), tabindex: "0", "data-id": t.id },
+        var n = h("div", { class: "gnode" + (sel === t.id ? " sel" : "") + (t.stop ? " stopstep " + t.stop : t.workflow ? " sub" : t.run ? " cmdstep" : t.skill ? " skill" : t.component ? " comp" : "") + (t.on === "failure" ? " onfail" : ""), tabindex: "0", "data-id": t.id },
           h("button", { type: "button", class: "gdel", title: "Delete this step", "aria-label": "Delete step " + t.id }, "\u00d7"),
           h("span", { class: "port in", title: "runs after" }),
           h("b", { text: t.id }), h("small", { text: kind(t) }),
-          h("small", { class: "muted", text: [t.node || "local", t.profile || t.runner || ""].filter(Boolean).join(" - ") }),
+          h("small", { class: "muted", text: t.stop ? (t.when ? "if " + t.when : "always, once reached") : [t.node || "local", t.profile || t.runner || ""].filter(Boolean).join(" - ") }),
           h("span", { class: "port out", title: "drag to the task that runs after this one" }));
-        n.style.left = t.pos[0] + "px"; n.style.top = t.pos[1] + "px";
+        n.style.left = (t.pos[0] + OX) + "px"; n.style.top = t.pos[1] + "px";
         canvas.appendChild(n);
-        maxX = Math.max(maxX, t.pos[0] + 400); maxY = Math.max(maxY, t.pos[1] + 260);
+        maxX = Math.max(maxX, t.pos[0] + OX + 400); maxY = Math.max(maxY, t.pos[1] + 260);
         n.addEventListener("pointerdown", function (e) {
           if (e.target.classList.contains("gdel")) { e.stopPropagation(); e.preventDefault(); removeTask(t.id); return; }
           if (e.target.classList.contains("out")) return connect(e, t);
           select(t.id); e.preventDefault(); n.focus({ preventScroll: true });
           var sx = e.clientX, sy = e.clientY, ox = t.pos[0], oy = t.pos[1];
           try { n.setPointerCapture(e.pointerId); } catch (x) { /* a synthetic or ended pointer */ }
-          function mv(ev) { t.pos = [Math.max(0, Math.round(ox + ev.clientX - sx)), Math.max(0, Math.round(oy + ev.clientY - sy))]; n.style.left = t.pos[0] + "px"; n.style.top = t.pos[1] + "px"; edges(); }
+          function mv(ev) { t.pos = [Math.max(0, Math.round(ox + ev.clientX - sx)), Math.max(0, Math.round(oy + ev.clientY - sy))]; n.style.left = (t.pos[0] + OX) + "px"; n.style.top = t.pos[1] + "px"; drawEnds(); edges(); }
           function up() { n.removeEventListener("pointermove", mv); n.removeEventListener("pointerup", up); if (t.pos[0] !== ox || t.pos[1] !== oy) changed(); }
           n.addEventListener("pointermove", mv); n.addEventListener("pointerup", up);
         });
@@ -2689,7 +2691,25 @@
       });
       canvas.style.width = maxX + "px"; canvas.style.height = maxY + "px";
       svg.setAttribute("width", maxX); svg.setAttribute("height", maxY);
+      drawEnds();
       edges();
+    }
+    // Start: before the steps that need nothing. End: after the steps nothing needs.
+    function roots() { return wf.task.filter(function (t) { return !(t.needs || []).length; }); }
+    function leaves() { return wf.task.filter(function (t) { return !wf.task.some(function (o) { return (o.needs || []).indexOf(t.id) >= 0; }); }); }
+    function drawEnds() {
+      Array.prototype.slice.call(canvas.querySelectorAll(".gend")).forEach(function (n) { n.remove(); });
+      if (!wf.task.length) return;
+      function midY(list) { return list.length ? list.reduce(function (a, t) { return a + t.pos[1]; }, 0) / list.length + 22 : 40; }
+      var right = Math.max.apply(null, wf.task.map(function (t) { return t.pos[0]; })) + OX + 250;
+      [["__start", "Start", 16, midY(roots())], ["__end", "End", right, midY(leaves())]].forEach(function (x) {
+        var n = h("div", { class: "gnode gend " + (x[0] === "__start" ? "gstart" : "gfinish"), "data-id": x[0], title: x[0] === "__start" ? "Steps that need nothing start here" : "The workflow ends when every step has finished (or a stop step ends it)" },
+          h("b", { text: x[1] }));
+        n.style.left = x[2] + "px"; n.style.top = x[3] + "px";
+        canvas.appendChild(n);
+      });
+      var w = Math.max(parseInt(canvas.style.width, 10) || 0, right + 120);
+      canvas.style.width = w + "px"; svg.setAttribute("width", w);
     }
     function center(id, side) {
       var n = canvas.querySelector('.gnode[data-id="' + CSS.escape(id) + '"]'); if (!n) return null;
@@ -2698,6 +2718,13 @@
     function path(a, b) { var dx = Math.max(40, Math.abs(b.x - a.x) / 2); return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " " + (b.x - dx) + "," + b.y + " " + b.x + "," + b.y; }
     function edges() {
       while (svg.firstChild) svg.removeChild(svg.firstChild);
+      function line(a, b, cls) {
+        if (!a || !b) return;
+        var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        p.setAttribute("d", path(a, b)); p.setAttribute("class", "edge " + cls); svg.appendChild(p);
+      }
+      roots().forEach(function (t) { line(center("__start", "out"), center(t.id, "in"), "implicit"); });
+      leaves().forEach(function (t) { line(center(t.id, "out"), center("__end", "in"), "implicit" + (t.stop ? " " + t.stop : "")); });
       wf.task.forEach(function (t) {
         (t.needs || []).forEach(function (from) {
           var a = center(from, "out"), b = center(t.id, "in"); if (!a || !b) return;
@@ -2784,7 +2811,7 @@
         wf.task.forEach(function (x) { x.needs = (x.needs || []).map(function (n) { return n === t.id ? v : n; }); });
         t.id = v; sel = v; changed(); draw();
       });
-      f.appendChild(h("div", { class: "row inspect-head" }, h("h3", { text: t.workflow ? "Sub-workflow step" : t.run != null ? "Command step" : t.skill ? "Skill step" : "Task" }),
+      f.appendChild(h("div", { class: "row inspect-head" }, h("h3", { text: t.stop ? "Stop step" : t.workflow ? "Sub-workflow step" : t.run != null ? "Command step" : t.skill ? "Skill step" : "Task" }),
         h("button", { type: "button", class: "danger small", title: "Delete this step (or press Delete)", onclick: function () { removeTask(t.id); } }, "Delete step")));
       f.appendChild(field("Id", idIn));
       function sel_(k, options, blank, help) {
@@ -2799,7 +2826,13 @@
         el.addEventListener("change", draw);
         return el;
       }
-      if (t.workflow) {
+      if (t.stop) {
+        f.appendChild(field("Ends the workflow as", sel_("stop", ["success", "failure"], null),
+          "When this step is reached (after the steps before it, and only if its condition holds), the workflow ends at once: steps not yet started are skipped and running ones are stopped."));
+        f.appendChild(field("Only if", text("when", false, "e.g. scan.output contains 'no findings'"), "Without a condition it ends the workflow as soon as it is reached."));
+        f.appendChild(field("Runs", sel_("on", ["failure", "always"], "when the steps before it succeed"), "On failure: stop when a step before it failed (to end as failure, say)."));
+        f.appendChild(field("Message", text("prompt", true, "Why it stopped (shown on the run page)")));
+      } else if (t.workflow) {
         f.appendChild(field("Runs workflow", sel_("workflow", allWorkflows().map(function (w) { return w.name; }).filter(function (n) { return n !== wf.name; }), null),
           "Its tasks run as this one step: they start after this step's links, and what runs after this step waits for them all."));
       } else {
@@ -2823,7 +2856,7 @@
           f.appendChild(field("Model", mdl, "Over the profile's; with Ollama, a local model's name."));
           f.appendChild(field("Runs on", sel_("provider", ["anthropic", "ollama"], "the profile's choice")));
         }
-        f.appendChild(field("Target", text("target", false, cc && cc.target ? cc.target : loc.kind === "repo" ? "this repository" : "a directory on that node"),
+        f.appendChild(field("Target", text("target", false, cc && cc.target ? cc.target : loc.kind === "repo" ? "this repository" : t.node && t.node !== "local" ? "a directory on that node (required)" : "the harness's first target"),
           loc.kind === "repo" ? "Relative paths are inside the repository." : null));
         if (t.run == null) f.appendChild(field(t.skill ? "Arguments" : "Prompt", text("prompt", true, t.skill ? "{target}" : cc && cc.prompt ? cc.prompt : "What should the agent do? {target}, {node}, {input.NAME}, {item} and {steps.STEP.output} are filled in."),
           t.skill ? "Default {target}: the directory it runs in." : "{steps.STEP.output} is an earlier step's result (it must run before this one)."));
@@ -2849,7 +2882,7 @@
       }
       f.appendChild(h("p", { class: "muted small", text: (t.needs || []).length ? "Runs after: " + t.needs.join(", ") : "Runs first (nothing before it)." }));
       f.appendChild(h("div", { class: "row" },
-        !t.workflow && canEdit() ? h("button", { type: "button", title: "Keep this task's settings to drag into other workflows", onclick: function () {
+        !t.workflow && !t.stop && canEdit() ? h("button", { type: "button", title: "Keep this task's settings to drag into other workflows", onclick: function () {
           var n = window.prompt("Save this task for reuse in other workflows, named:", t.id); if (!n) return;
           var comp = { name: n.trim() }; ["prompt", "profile", "runner", "node", "target", "skill"].forEach(function (k) { if (t[k]) comp[k] = t[k]; }); if (t.retries) comp.retries = t.retries;
           if (loc.kind === "repo") {
@@ -2873,6 +2906,7 @@
       if (spec.component) t.component = spec.component;
       if (spec.skill) t.skill = spec.skill;
       if (spec.run != null) { t.run = spec.run; t.id = uniqueId("command"); }
+      if (spec.stop) { t.stop = spec.stop; t.id = uniqueId("stop"); }
       wf.task.push(t); changed(); draw(); select(t.id);
     }
     function renderPalette() {
@@ -2887,6 +2921,7 @@
       palette.appendChild(h("h3", { text: "Add" }));
       palette.appendChild(item("Task", "an agent with a prompt", {}));
       palette.appendChild(item("Command", "a shell command (bash)", { run: "" }));
+      palette.appendChild(item("Stop", "end the workflow here (if...)", { stop: "success" }));
       palette.appendChild(h("h3", { text: "Skills", title: "Run one of the harness's skills as a step" }));
       if (!skills.length) palette.appendChild(h("p", { class: "muted small", text: "This harness has no skills." }));
       var sf = null;
@@ -2916,7 +2951,7 @@
     scroller.addEventListener("drop", function (e) {
       var d = e.dataTransfer.getData("application/x-indra"); if (!d) return;
       e.preventDefault(); var box = canvas.getBoundingClientRect();
-      add(JSON.parse(d), e.clientX - box.left - 90, e.clientY - box.top - 30);
+      add(JSON.parse(d), e.clientX - box.left - 90 - OX, e.clientY - box.top - 30);
     });
     layoutBtn.addEventListener("click", function () { tidy(true); changed(); draw(); });
     save.addEventListener("click", function () {
@@ -2956,7 +2991,7 @@
         toast("Saved workflow " + clean.name + (loc.kind === "repo" ? " to " + loc.file + ". Commit it to share it." : ". Applied now."));
         var title = m.querySelector(".head h1"); if (title) title.textContent = "Edit workflow " + clean.name; renderPalette();
         refreshOverview(); if (location.hash !== "#/wfedit/" + encodeURIComponent(clean.name)) history.replaceState(null, "", "#/wfedit/" + encodeURIComponent(clean.name));
-      }).catch(function (e) { toast(e.message, true); status.textContent = "Not saved: " + e.message; }).then(function () { save.disabled = !canEdit(); });
+      }).catch(function (e) { toast(e.message, true); status.textContent = /^not saved/i.test(e.message) ? e.message.replace(/^not saved/, "Not saved") : "Not saved: " + e.message; }).then(function () { save.disabled = !canEdit(); });
     });
     window.addEventListener("beforeunload", function warn(e) { if (!document.body.contains(canvas)) { window.removeEventListener("beforeunload", warn); return; } if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 

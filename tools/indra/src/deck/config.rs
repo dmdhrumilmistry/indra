@@ -604,6 +604,11 @@ pub struct TaskCfg {
     /// The most runs of an `until` loop (default 3, at most 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runs: Option<u32>,
+    /// A stop step: when it is reached (its needs and `when` allowing),
+    /// the workflow ends at once as "success" or "failure"; steps not yet
+    /// started are skipped and running ones stopped. `prompt` is its message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<String>,
     /// The loop item this copy runs for (set when a `foreach` is expanded).
     #[serde(skip)]
     pub item: Option<String>,
@@ -1253,7 +1258,7 @@ pub fn validate_workflow(w: &WorkflowCfg, node_names: &[String]) -> Result<()> {
                 t.id, t.node
             )));
         }
-        if t.prompt.trim().is_empty() && t.run.is_none() {
+        if t.prompt.trim().is_empty() && t.run.is_none() && t.stop.is_none() {
             return Err(at(format!("task '{}' has an empty prompt", t.id)));
         }
         if t.target.trim().is_empty() {
@@ -1360,6 +1365,22 @@ fn validate_flow(w: &WorkflowCfg) -> std::result::Result<(), String> {
                         bad
                     )));
                 }
+            }
+        }
+        if let Some(st) = &t.stop {
+            if !["success", "failure"].contains(&st.as_str()) {
+                return Err(at(format!("stop must be success or failure, not {:?}", st)));
+            }
+            if t.run.is_some()
+                || t.skill.is_some()
+                || t.workflow.is_some()
+                || t.foreach.is_some()
+                || t.until.is_some()
+            {
+                return Err(at(
+                    "a stop step only ends the workflow: no run, skill, workflow, foreach or until"
+                        .into(),
+                ));
             }
         }
         if let Some(o) = &t.on {
@@ -2275,6 +2296,21 @@ pub fn build_settings(
         // Ids are checked on the workflow as written, the rest once expanded.
         crate::deck::nodes::validate_name(&w.name).map_err(|e| format!("workflow name: {}", e))?;
         let mut w = expand_workflow(w, &all_raw, &all_comps)?;
+        // A local step without a target runs in the harness's first target
+        // (the workflow's harness, else the first one), like a Launch does.
+        let home = w
+            .harness
+            .as_deref()
+            .and_then(|n| harnesses.iter().find(|h| h.name == n))
+            .or_else(|| harnesses.first())
+            .and_then(|h| h.targets.first().cloned().or_else(|| Some(h.root.clone())))
+            .or_else(|| default_targets.first().cloned())
+            .unwrap_or_else(|| base.clone());
+        for t in &mut w.tasks {
+            if t.node == crate::deck::nodes::LOCAL && t.target.trim().is_empty() {
+                t.target = home.to_string_lossy().into_owned();
+            }
+        }
         finish(&w)?;
         // Local targets are relative to the config file; remote ones are the
         // remote's business. One from an input is resolved when it runs.

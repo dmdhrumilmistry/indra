@@ -425,3 +425,11 @@ fieldset label.check { font-weight: 400; align-items: center; }
 .flowbox summary { cursor: pointer; font-weight: 600; font-size: 13px; }
 .flowbox[open] summary { margin-bottom: 4px; }
 .genbox textarea { min-height: 90px; }
+
+.gnode.gend { width: auto; min-width: 74px; padding: 7px 16px; border-radius: 999px; border-left-width: 1px; cursor: default; text-align: center; }
+.gnode.gstart { border-color: var(--ok); }
+.gnode.gfinish { border-color: var(--muted); }
+.gnode.stopstep { border-left-color: var(--ok); border-radius: 18px; }
+.gnode.stopstep.failure { border-left-color: var(--bad); }
+.edges .edge.implicit { stroke-dasharray: 3 5; opacity: .7; }
+.edges .edge.implicit.failure { stroke: var(--bad); }

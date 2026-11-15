@@ -67,6 +67,13 @@ on = "failure"                        # runs only if something it needs failed
 run = "echo \"failed: $INDRA_STATUS_RETEST\""
 
 [[workflow.task]]
+id = "nothing-to-do"
+needs = ["test"]
+when = "test.succeeded"
+stop = "success"                      # a STOP STEP: ends the workflow here, as success
+prompt = "Tests pass; nothing to fix."  # (or "failure"); steps not started are skipped
+
+[[workflow.task]]
 id = "report"
 needs = ["retest", "per-service"]
 on = "always"                         # runs once they finish, however they went
@@ -77,14 +84,16 @@ prompt = "{target}"
 Step fields:
 - id (required), needs = [ids], node = "local" (default) or a node name,
   target = directory on that node (in a repository file: default the
-  repository itself, relative paths inside it; in indra.toml: required).
+  repository itself, relative paths inside it; in indra.toml: default the
+  harness's first target; on another node: required).
 - One of: prompt (an agent), skill (+ prompt as its arguments, default
   {target}), run (a shell command), workflow = "<other workflow>" (runs it as
   one step), component = "<saved task>" (fields left empty come from it).
 - profile, runner (default claude), model, provider ("anthropic" | "ollama"),
   retries (extra attempts after a failure).
 - Control flow: when, on ("success" default | "failure" | "always"),
-  allow_failure, foreach, until, max_runs.
+  allow_failure, foreach, until, max_runs, and stop = "success" | "failure"
+  (a step that only ends the workflow when reached; prompt is its message).
 
 Prompts may use {target}, {node}, {input.NAME}, {item} (in a foreach copy) and
 {steps.ID.output}, {steps.ID.exit_code}, {steps.ID.status} (an earlier step's
@@ -710,9 +719,13 @@ mod tests {
             "{}",
             msg
         );
-        // In indra.toml, a target is required.
+        // In indra.toml, a step without a target runs in the first target.
         let (msg, e) = tool("validate_workflow", json!({ "toml": good }));
-        assert!(e && msg.contains("no target"), "{}", msg);
+        assert!(!e, "{}", msg);
+        // On another node, a target is required.
+        let remote = "[[workflow]]\nname = \"r\"\n[[workflow.task]]\nid = \"a\"\nnode = \"nowhere\"\nrun = \"true\"\n";
+        let (msg, e) = tool("validate_workflow", json!({ "toml": remote }));
+        assert!(e, "{}", msg);
         let (msg, e) = tool("save_workflow", json!({ "toml": good, "location": repo }));
         assert!(!e, "{}", msg);
         assert!(dir.join("repo/.indra/workflows/ci.toml").is_file());

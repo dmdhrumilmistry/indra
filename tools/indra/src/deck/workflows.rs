@@ -51,6 +51,9 @@ pub struct TaskRun {
     pub exit_code: Option<i32>,
     /// Completed runs (an `until` loop makes several).
     pub runs: u32,
+    /// A stop step: "success" or "failure".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<String>,
     pub node: String,
     pub target: String,
     pub runner: String,
@@ -93,6 +96,9 @@ pub struct WfRun {
     pub tasks: Vec<TaskRun>,
     /// The inputs it was started with.
     pub inputs: BTreeMap<String, String>,
+    /// The stop step that ended it early, if one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<String>,
 }
 
 /// A step's result, as conditions and later steps see it.
@@ -343,6 +349,7 @@ impl Engine {
             status: "running",
             tasks: wf.tasks.iter().map(task_run).collect(),
             inputs: wf.values.clone(),
+            stopped_by: None,
         };
         let run = Arc::new(Mutex::new(run));
         self.runs.lock().unwrap().insert(id, run.clone());
@@ -360,8 +367,9 @@ impl Engine {
 
     /// One scheduling pass. Returns true when the run has finished.
     fn tick(&self, id: u64, run: &Arc<Mutex<WfRun>>) -> bool {
-        let cancel = self.cancelled.lock().unwrap().contains(&id);
         let mut r = run.lock().unwrap();
+        // A stop step ended it: like a cancel, but it finishes as the step says.
+        let cancel = self.cancelled.lock().unwrap().contains(&id) || r.stopped_by.is_some();
         let inputs = r.inputs.clone();
         let snap = snapshot(&r.tasks);
 
@@ -498,6 +506,47 @@ impl Engine {
             }
         }
 
+        // A stop step that is reached ends the workflow: nothing else starts,
+        // and what runs is stopped.
+        if r.stopped_by.is_none() {
+            if let Some(i) = r
+                .tasks
+                .iter()
+                .position(|t| t.state == "queued" && t.stop.is_some())
+            {
+                let sid = r.tasks[i].id.clone();
+                {
+                    let t = &mut r.tasks[i];
+                    t.state = "succeeded";
+                    t.started = Some(now());
+                    t.ended = Some(now());
+                    t.output = Some(if t.prompt.trim().is_empty() {
+                        format!(
+                            "stopped the workflow ({})",
+                            t.stop.clone().unwrap_or_default()
+                        )
+                    } else {
+                        t.prompt.clone()
+                    });
+                }
+                for t in r
+                    .tasks
+                    .iter_mut()
+                    .filter(|t| matches!(t.state, "waiting" | "queued"))
+                {
+                    t.state = "skipped";
+                    t.error = Some(format!("the workflow stopped at '{}'", sid));
+                    t.ended = Some(now());
+                }
+                for t in r.tasks.iter().filter(|t| t.state == "running") {
+                    if let Some(p) = t.proc_id.and_then(|pid| self.procs.get(pid)) {
+                        p.request_stop();
+                    }
+                }
+                r.stopped_by = Some(sid);
+            }
+        }
+
         // 3. Start queued tasks while their node has room. A started agent
         // counts as running at once, so the next check already sees it.
         let harness = r.harness.clone();
@@ -530,7 +579,18 @@ impl Engine {
         if r.tasks.iter().all(TaskRun::terminal) {
             // Skipped steps are part of the plan (a condition, a branch not
             // taken); a failure fails the run unless it was allowed.
-            r.status = if cancel {
+            let stop = r
+                .stopped_by
+                .as_ref()
+                .and_then(|s| r.tasks.iter().find(|t| &t.id == s))
+                .and_then(|t| t.stop.clone());
+            r.status = if let Some(st) = stop {
+                if st == "failure" {
+                    "failed"
+                } else {
+                    "succeeded"
+                }
+            } else if cancel {
                 "cancelled"
             } else if r
                 .tasks
@@ -723,6 +783,7 @@ fn task_run(t: &TaskCfg) -> TaskRun {
         output: None,
         exit_code: None,
         runs: 0,
+        stop: t.stop.clone(),
         node: t.node.clone(),
         target: t.target.clone(),
         runner: t.runner.clone(),

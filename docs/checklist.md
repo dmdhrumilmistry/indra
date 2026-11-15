@@ -91,6 +91,9 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] Conditions (`when`), `on = "failure" | "always"`, `allow_failure`, `{steps.X.output}`
 - [x] Loops: `foreach` (copies per item) and `until` with `max_runs`
 - [x] `indra mcp` (MCP server: guide, list, get, validate, save) and **Create with Claude**
+- [x] Stop steps (`stop = "success" | "failure"`) and Start/End blocks in the editor
+- [x] A local step without a target runs in the harness's first target (saving a workflow with
+      steps dragged from the palette failed with "has no target")
 
 ## Not planned yet (the docs say so)
 

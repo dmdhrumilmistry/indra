@@ -306,6 +306,63 @@ fn control_flow_commands_conditions_and_loops() {
     assert!(!Path::new(&pwned).exists(), "an input value must never run");
 }
 
+/// A stop step ends the run as it says: what has not started is skipped,
+/// what runs is stopped.
+#[test]
+fn stop_steps_end_the_run_early() {
+    let e = Env::new("stop");
+    let hub = e.hub(
+        "[[workflow]]\nname = \"clean\"\n\
+         [[workflow.task]]\nid = \"slow\"\ntarget = \"local-web\"\nrun = \"sleep 30\"\n\
+         [[workflow.task]]\nid = \"check\"\ntarget = \"local-web\"\nrun = \"echo clean\"\n\
+         [[workflow.task]]\nid = \"done\"\nneeds = [\"check\"]\nstop = \"success\"\nwhen = \"check.output contains 'clean'\"\nprompt = \"nothing to fix\"\n\
+         [[workflow.task]]\nid = \"fix\"\ntarget = \"local-web\"\nneeds = [\"check\"]\nrun = \"echo fixing\"\n\
+         [[workflow]]\nname = \"bail\"\n\
+         [[workflow.task]]\nid = \"check\"\ntarget = \"local-web\"\nrun = \"echo broken\"\n\
+         [[workflow.task]]\nid = \"give-up\"\nneeds = [\"check\"]\nstop = \"failure\"\nwhen = \"check.output contains 'broken'\"\n",
+    );
+    let started = Instant::now();
+    let out = e
+        .indra(&["run", "clean", "--config", hub.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}\n{}",
+        text,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "slow was stopped, not waited for"
+    );
+    let state = |t: &str, id: &str| {
+        t.lines()
+            .rev()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(state(&text, "done"), "succeeded", "{}", text);
+    assert_eq!(state(&text, "fix"), "skipped", "{}", text);
+    assert_eq!(state(&text, "slow"), "cancelled", "{}", text);
+    let out = e
+        .indra(&["run", "bail", "--config", hub.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a failure stop fails the run:\n{}",
+        text
+    );
+    assert_eq!(state(&text, "give-up"), "succeeded", "{}", text);
+}
+
 #[test]
 fn bad_workflows_are_rejected_before_anything_runs() {
     let e = Env::new("invalid");
