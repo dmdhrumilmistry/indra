@@ -259,10 +259,15 @@ async fn serve(
         }
     );
     let config_path = config::edit_path(&editing.opts, s.config_path.as_deref());
-    let locked = if s.read_only {
+    let join_locked = if s.read_only {
         Some("indra is running read-only".to_string())
     } else if editing.lock {
         Some("indra serve was started with --lock-config".to_string())
+    } else {
+        None
+    };
+    let locked = if join_locked.is_some() {
+        join_locked.clone()
     } else if !loopback && !editing.allow_remote {
         Some("the console listens beyond this machine; start it with --allow-remote-config to edit settings from a browser".to_string())
     } else {
@@ -321,6 +326,7 @@ async fn serve(
             opts: editing.opts,
             path: config_path,
             locked,
+            join_locked,
             saving: std::sync::Mutex::new(()),
         }),
     );
@@ -770,23 +776,193 @@ pub enum NodeCmd {
     Runfiles,
     /// Run one agent job given as JSON on stdin; stops it when stdin closes
     Exec,
-    /// Dial in to a hub and run its jobs here, reconnecting as needed (no SSH)
+    /// Keep this machine's link to its hub open and run its jobs (after `indra join`, no options needed)
     Connect {
-        /// The hub's console URL, e.g. https://hub.example:7878
-        hub: String,
-        /// This node's name in the hub's config
+        /// The hub's console URL (default: the hub this machine joined)
+        hub: Option<String>,
+        /// This node's name (default: the name it joined as)
         #[arg(long)]
-        name: String,
-        /// One-time enrolment code from the hub (Nodes > Add a machine); only the first time
+        name: Option<String>,
+        /// One-time code from the hub; only to join (`indra join` is simpler)
         #[arg(long)]
         code: Option<String>,
-        /// Codebases on this machine the hub may run agents in (repeatable)
+        /// Folders agents may work in here (repeatable; remembered)
         #[arg(long = "target")]
         targets: Vec<String>,
         /// Never use the direct WebRTC path; relay everything through the hub
         #[arg(long)]
         no_webrtc: bool,
+        /// Start in the background and return (what log-in autostart runs)
+        #[arg(long, hide = true)]
+        background: bool,
     },
+    /// Which hub this machine joined, and whether its link runs by itself
+    Status,
+    /// The folders agents may work in here: list them, or set them (restarts the link)
+    Folders {
+        /// New folders (replace the current ones)
+        dirs: Vec<String>,
+    },
+    /// Stop the link and forget the hub (remove the machine in the hub's console too)
+    Leave,
+}
+
+/// `indra join`: add this machine to a hub with the code from its console.
+#[derive(Args)]
+pub struct JoinArgs {
+    /// The hub's console URL, e.g. http://192.168.1.20:7878
+    hub: String,
+    /// The code from the console (Machines > Add a machine)
+    code: String,
+    /// Name for this machine (default: its host name)
+    #[arg(long)]
+    name: Option<String>,
+    /// Folders agents may work in here (repeatable; default: the current folder)
+    #[arg(long = "target")]
+    targets: Vec<String>,
+    /// Do not keep the link running in the background; stay in this terminal
+    #[arg(long)]
+    foreground: bool,
+    /// Never use the direct WebRTC path; relay everything through the hub
+    #[arg(long)]
+    no_webrtc: bool,
+    /// Config file on this machine (its runners are the ones it will run)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
+fn abs_targets(targets: &[String]) -> Result<Vec<String>, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    Ok(targets
+        .iter()
+        .map(|t| {
+            let p = config::expand(&cwd, t);
+            std::fs::canonicalize(&p).unwrap_or(p).display().to_string()
+        })
+        .map(|t| t.trim_start_matches(r"\\?\").to_string())
+        .collect())
+}
+
+pub fn run_join(a: JoinArgs) -> Result<ExitCode, String> {
+    let opts = DeckOpts {
+        config: a.config.clone(),
+        targets: Vec::new(),
+    };
+    let s = load(opts, None, false)?;
+    let targets = if a.targets.is_empty() {
+        abs_targets(&[".".to_string()])?
+    } else {
+        abs_targets(&a.targets)?
+    };
+    let hub = a.hub.trim_end_matches('/').to_string();
+    if !(hub.starts_with("http://") || hub.starts_with("https://")) {
+        return Err(format!(
+            "'{}' is not the hub's URL: copy it from the console, e.g. http://192.168.1.20:7878",
+            a.hub
+        ));
+    }
+    let info = nodes::local_info(&s);
+    println!("Joining {} ...", hub);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let opts = crate::deck::link::ConnectOpts {
+        hub: Some(hub.clone()),
+        name: a.name.clone(),
+        code: Some(a.code.clone()),
+        targets: targets.clone(),
+        webrtc: !a.no_webrtc,
+        once: true,
+    };
+    let joined = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            crate::deck::link::connect(s.clone(), opts),
+        )
+        .await
+    });
+    match joined {
+        Err(_) => {
+            return Err(format!(
+                "no answer from {} in a minute: is the console running, and can this machine reach that address? (try opening it in a browser here)",
+                hub
+            ))
+        }
+        Ok(r) => r?,
+    }
+    let saved = crate::deck::link::saved().ok_or("joined, but the key was not saved")?;
+    let runners: Vec<String> = info
+        .runners
+        .iter()
+        .map(|r| {
+            if r.available {
+                r.name.clone()
+            } else {
+                format!("{} (not installed)", r.name)
+            }
+        })
+        .collect();
+    println!("\nJoined {} as '{}'.", hub, saved.name);
+    println!(
+        "  machine  {} ({} {}, {} CPUs)",
+        info.hostname, info.os, info.arch, info.cpus
+    );
+    println!(
+        "  agents   {}",
+        if runners.is_empty() {
+            "none found".into()
+        } else {
+            runners.join(", ")
+        }
+    );
+    println!("  folders  {}", saved.targets.join(", "));
+    if a.foreground {
+        println!("\nStaying connected in this terminal (Ctrl+C stops it; `indra node connect` starts it again).");
+        return run_link(
+            s,
+            crate::deck::link::ConnectOpts {
+                webrtc: !a.no_webrtc,
+                ..Default::default()
+            },
+        );
+    }
+    match crate::deck::autostart::install(a.config.as_deref()) {
+        Ok(how) => {
+            println!("  runs as  {}", how);
+            println!(
+                "\nDone: it shows up on the hub's Machines page. You can close this terminal."
+            );
+            println!("Check it with `indra node status`; undo with `indra node leave`.");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            println!("\nCould not keep it running in the background ({}); staying connected here instead (Ctrl+C stops it).", e);
+            run_link(
+                s,
+                crate::deck::link::ConnectOpts {
+                    webrtc: !a.no_webrtc,
+                    ..Default::default()
+                },
+            )
+        }
+    }
+}
+
+fn run_link(s: config::Settings, o: crate::deck::link::ConnectOpts) -> Result<ExitCode, String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    match rt.block_on(crate::deck::link::connect(s, o)) {
+        // Removed on the hub: nothing to do, and no restart (see autostart).
+        Err(e) if e.contains("no longer knows") => {
+            eprintln!("indra: {}", e);
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => Err(e),
+        Ok(()) => Ok(ExitCode::SUCCESS),
+    }
 }
 
 /// `indra node ...`: the remote side of a node. The hub runs these over SSH.
@@ -899,30 +1075,96 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
             code,
             targets,
             no_webrtc,
+            background,
         } => {
+            if background {
+                let pid = crate::deck::autostart::spawn_background(opts.config.as_deref())?;
+                println!(
+                    "indra node connect runs in the background (process {})",
+                    pid
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
             let s = load(opts, None, false)?;
-            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-            let targets = targets
-                .iter()
-                .map(|t| {
-                    let p = config::expand(&cwd, t);
-                    std::fs::canonicalize(&p).unwrap_or(p).display().to_string()
-                })
-                .collect();
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())?;
-            rt.block_on(crate::deck::link::connect(
+            run_link(
                 s,
                 crate::deck::link::ConnectOpts {
                     hub,
                     name,
                     code,
-                    targets,
+                    targets: abs_targets(&targets)?,
                     webrtc: !no_webrtc,
+                    once: false,
                 },
-            ))?;
+            )
+        }
+        NodeCmd::Status => {
+            let Some(sv) = crate::deck::link::saved() else {
+                println!("This machine has not joined a hub. In the hub's console: Machines > Add a machine, then run the command it shows here.");
+                return Ok(ExitCode::SUCCESS);
+            };
+            println!("hub      {}", sv.hub);
+            println!("name     {}", sv.name);
+            println!(
+                "folders  {}",
+                if sv.targets.is_empty() {
+                    "none".to_string()
+                } else {
+                    sv.targets.join(", ")
+                }
+            );
+            match crate::deck::autostart::status() {
+                Some(how) => println!("runs as  {}", how),
+                None => println!("runs as  nothing keeps it running: `indra node connect` (or `indra join` again for the background)"),
+            }
+            println!("logs     {}", crate::deck::autostart::log_path().display());
+            println!("key      {}", crate::deck::link::saved_path().display());
+            Ok(ExitCode::SUCCESS)
+        }
+        NodeCmd::Folders { dirs } => {
+            let mut sv = crate::deck::link::saved()
+                .ok_or("this machine has not joined a hub: `indra join <hub-url> <code>`")?;
+            if dirs.is_empty() {
+                if sv.targets.is_empty() {
+                    println!("none: agents have no folder here yet (`indra node folders <dir>`)");
+                }
+                for t in &sv.targets {
+                    println!("{}", t);
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            sv.targets = abs_targets(&dirs)?;
+            for t in &sv.targets {
+                if !std::path::Path::new(t).is_dir() {
+                    return Err(format!("{} is not a folder here", t));
+                }
+            }
+            crate::deck::link::save(&sv)?;
+            println!("Agents may work in: {}", sv.targets.join(", "));
+            if crate::deck::autostart::status().is_some() {
+                let how = crate::deck::autostart::install(opts.config.as_deref())?;
+                println!(
+                    "Restarted the link ({}); the hub shows the new folders.",
+                    how
+                );
+            } else {
+                println!("The next `indra node connect` uses them.");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        NodeCmd::Leave => {
+            let sv = crate::deck::link::saved();
+            for d in crate::deck::autostart::uninstall() {
+                println!("{}", d);
+            }
+            crate::deck::link::forget().map_err(|e| e.to_string())?;
+            match sv {
+                Some(sv) => println!(
+                    "Left {} (this machine was '{}'). Remove it there too: Machines > Remove.",
+                    sv.hub, sv.name
+                ),
+                None => println!("This machine had not joined a hub."),
+            }
             Ok(ExitCode::SUCCESS)
         }
     }

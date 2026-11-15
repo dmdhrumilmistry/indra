@@ -3,6 +3,7 @@
 
 pub mod accounts;
 pub mod attach;
+pub mod autostart;
 pub mod board;
 pub mod claude;
 pub mod cli;

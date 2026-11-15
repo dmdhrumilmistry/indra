@@ -392,3 +392,121 @@ fn a_cut_connection_loses_and_repeats_nothing() {
     let want: Vec<String> = (1..=40).map(|i| format!("tick-{}", i)).collect();
     assert_eq!(ticks, want, "every line once, in order");
 }
+
+#[test]
+fn a_machine_joins_with_one_code_runs_jobs_and_can_be_removed() {
+    let h = hub("join", false);
+    // One click in the console: a code, no name.
+    let (s, body) = http(h.port, "POST", "/api/nodes/enrol", "");
+    assert_eq!(s, 200, "{}", body);
+    let v = json(&body);
+    let code = v["code"].as_str().unwrap().to_string();
+    assert!(
+        v["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("indra join http://"),
+        "{}",
+        body
+    );
+    let env = |c: &mut Command| {
+        c.env("HOME", h.dir.join("node-home"))
+            .env("XDG_CONFIG_HOME", h.dir.join("node-config"))
+            .env("XDG_DATA_HOME", h.dir.join("node-data"))
+            .current_dir(h.dir.join("node-work"));
+    };
+    let hub_url = format!("http://127.0.0.1:{}", h.port);
+    let node_toml = h.dir.join("node.toml");
+    // Typed in lower case: still the code. Everything else is found out.
+    let mut c = Command::new(INDRA);
+    c.args(["join", &hub_url, &code.to_lowercase(), "--foreground"])
+        .args(["--config", node_toml.to_str().unwrap()])
+        .stdout(std::fs::File::create(h.dir.join("join.log")).unwrap())
+        .stderr(Stdio::null());
+    env(&mut c);
+    let mut node = c.spawn().unwrap();
+    let st = until("the machine to join", 30, || {
+        let (_, b) = http(h.port, "GET", &format!("/api/nodes/enrol/{}", code), "");
+        let v = json(&b);
+        (v["joined"].is_string() && v["info"].is_object()).then_some(v)
+    });
+    let name = st["joined"].as_str().unwrap().to_string();
+    assert_eq!(st["info"]["os"], std::env::consts::OS, "{}", st);
+    assert!(
+        st["info"]["runners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "ticker"),
+        "{}",
+        st
+    );
+    // The folder it ran in is where agents work.
+    let work = std::fs::canonicalize(h.dir.join("node-work")).unwrap();
+    assert_eq!(st["targets"][0], work.display().to_string(), "{}", st);
+    let hub_toml = std::fs::read_to_string(h.dir.join("hub.toml")).unwrap();
+    assert!(
+        hub_toml.contains(&format!("name = \"{}\"", name)),
+        "{}",
+        hub_toml
+    );
+    let log = std::fs::read_to_string(h.dir.join("join.log")).unwrap();
+    assert!(
+        log.contains(&format!("Joined {} as '{}'", hub_url, name)),
+        "{}",
+        log
+    );
+
+    // A job runs there.
+    let (s, body) = http(
+        h.port,
+        "POST",
+        "/api/procs",
+        &format!(
+            r#"{{"node":"{}","runner":"ticker","prompt":"go","target":0}}"#,
+            name
+        ),
+    );
+    assert_eq!(s, 200, "{}", body);
+    let id = json(&body)["id"].as_u64().unwrap();
+    let p = until("the job to end", 30, || {
+        let p = h.proc(id);
+        (p["status"] != "running").then_some(p)
+    });
+    assert_eq!(p["status"], "exited", "{}", p);
+
+    // The code worked once.
+    let mut again = Command::new(INDRA);
+    again
+        .args(["join", &hub_url, &code, "--foreground", "--name", "other"])
+        .args(["--config", node_toml.to_str().unwrap()])
+        .env("HOME", h.dir.join("other-home"))
+        .env("XDG_CONFIG_HOME", h.dir.join("other-config"))
+        .env("XDG_DATA_HOME", h.dir.join("other-data"));
+    let out = again.output().unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refused the code"),
+        "{:?}",
+        out
+    );
+
+    // `indra node status` there knows the hub.
+    let mut c = Command::new(INDRA);
+    c.args(["node", "status"]);
+    env(&mut c);
+    let out = String::from_utf8_lossy(&c.output().unwrap().stdout).to_string();
+    assert!(out.contains(&hub_url) && out.contains(&name), "{}", out);
+
+    // Removed in the console: it disconnects and stops, successfully.
+    let (s, body) = http(h.port, "DELETE", &format!("/api/nodes/{}", name), "");
+    assert_eq!(s, 200, "{}", body);
+    let status = until("the machine to stop", 30, || node.try_wait().unwrap());
+    assert!(status.success(), "{:?}", status);
+    let hub_toml = std::fs::read_to_string(h.dir.join("hub.toml")).unwrap();
+    assert!(
+        !hub_toml.contains(&format!("name = \"{}\"", name)),
+        "{}",
+        hub_toml
+    );
+}

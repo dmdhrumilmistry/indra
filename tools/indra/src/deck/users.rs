@@ -358,6 +358,10 @@ pub fn needed(method: &str, path: &str) -> Role {
     if read {
         return Role::Viewer;
     }
+    // Removing a machine.
+    if method == "DELETE" && under("/api/nodes") {
+        return Role::Admin;
+    }
     // Changing what agents are told, installing code, enrolling machines.
     if [
         "/api/def",

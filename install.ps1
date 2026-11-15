@@ -10,6 +10,11 @@
 # $env:INDRA_NO_MODIFY_PATH = "1", $env:INDRA_RELEASES_URL, $env:INDRA_DOWNLOAD_URL,
 # $env:INDRA_NO_COMPLETIONS = "1" (no Tab completion), $env:INDRA_AUTO_UPDATE = "1"
 # (keep indra up to date by itself).
+#
+# Add this machine to a hub in the same step (the hub's Machines page gives
+# you this line): $env:INDRA_JOIN = "http://hub:7878 CODE" runs `indra join`
+# after installing, with $env:INDRA_JOIN_NAME and $env:INDRA_JOIN_TARGET as
+# its --name and --target (default: the machine's name, and this folder).
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -80,9 +85,20 @@ if ($env:INDRA_AUTO_UPDATE) {
   if ($LASTEXITCODE -eq 0) { Write-Host "Automatic updates are on (turn off: indra update --auto off)" }
 }
 
-Write-Host ""
-Write-Host "Next: start the console and open it in your browser:"
-Write-Host ""
-Write-Host "    indra serve --open"
-Write-Host ""
-Write-Host "Update later with: indra update   (or let it update itself: indra update --auto on)"
+if ($env:INDRA_JOIN) {
+  # Join a hub: it keeps the link running in the background.
+  $join = @($env:INDRA_JOIN -split '\s+' | Where-Object { $_ })
+  if ($join.Count -ne 2) { throw 'INDRA_JOIN must be "<hub-url> <code>", as the hub''s Machines page shows it.' }
+  if ($env:INDRA_JOIN_NAME) { $join += @("--name", $env:INDRA_JOIN_NAME) }
+  if ($env:INDRA_JOIN_TARGET) { $join += @("--target", $env:INDRA_JOIN_TARGET) }
+  Remove-Item Env:INDRA_JOIN, Env:INDRA_JOIN_NAME, Env:INDRA_JOIN_TARGET -ErrorAction SilentlyContinue
+  Write-Host ""
+  & $dest join @join
+} else {
+  Write-Host ""
+  Write-Host "Next: start the console and open it in your browser:"
+  Write-Host ""
+  Write-Host "    indra serve --open"
+  Write-Host ""
+  Write-Host "Update later with: indra update   (or let it update itself: indra update --auto on)"
+}

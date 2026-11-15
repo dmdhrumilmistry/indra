@@ -68,6 +68,14 @@ sections = ["Nodes and orchestration"]
 
 [[page]]
 group = "Guides"
+slug = "machines"
+title = "Adding machines"
+description = "Run agents on other computers: one command from the console, no SSH, no open ports."
+[[page.source]]
+file = "docs/guides/machines.md"
+
+[[page]]
+group = "Guides"
 slug = "processes"
 title = "Handling agent processes"
 description = "Launch, watch, stop and clean up after agents; logs, capacity, permissions, troubleshooting."

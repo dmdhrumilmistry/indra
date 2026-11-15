@@ -1,14 +1,14 @@
 # Handling agent processes
 
-Every agent that indra starts, from the console's **Launch** page, a workflow, a fan-out or a
+Every agent that indra starts, from the console's **Run an agent** page, a workflow, a fan-out or a
 pivot, is a *process*: one run of one runner (`claude`, `codex`, `gemini` or your own) in one
 target directory on one node. This guide covers starting, watching, stopping and cleaning up
 after them.
 
 ## Start one
 
-In the console (`indra serve --target <dir>`), open **Launch**, pick the node, target, runner
-and prompt, and press Launch. The process page opens and streams the agent live.
+In the console (`indra serve --target <dir>`), open **Run an agent**, pick the machine, folder, agent
+and prompt, and press Run. The process page opens and streams the agent live.
 
 From a script, the same thing over the API (the token is the one `indra serve` printed):
 
@@ -27,7 +27,7 @@ respect each node's capacity.
 
 | Where | What you get |
 |---|---|
-| **Processes** page | every process with its node, runner, status, cost and last line |
+| **Running** page | every process with its node, runner, status, cost and last line |
 | a process's page | the live stream: text, each tool call, each subagent with its own tool calls, refused permissions, and the final cost (Claude Code); plain output lines for other runners |
 | `GET /api/procs`, `GET /api/procs/{id}` | the same as JSON |
 | `GET /api/procs/{id}/events?after=N` | a Server-Sent Events stream of every event after sequence `N`, so a client can reconnect without missing or repeating anything |
@@ -123,7 +123,7 @@ indra does not rotate or delete logs; remove old ones yourself when you no longe
 in `indra.toml`, under `[local]`, default 4, and on each `[[node]]`, default 2) is how many agents a node
 runs at once *for workflows and fan-out*: a task waits until its node has room, counting every
 agent there, including ones you launched by hand. A manual Launch is never queued: it starts
-right away, so you can always run one more on purpose. The Nodes page shows `running / max`
+right away, so you can always run one more on purpose. The Machines page shows `running / max`
 for each node.
 
 ## Permissions

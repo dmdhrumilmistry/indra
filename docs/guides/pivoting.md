@@ -62,7 +62,7 @@ the same for remote nodes: the hub sends the session id in the job and the node 
 resume.
 
 To move work to *another* machine, use a Fresh-style handoff yourself: copy the original's
-outcome from its page into a new **Launch** on the other node. A session cannot follow you
+outcome from its page into a new **Run an agent** on the other node. A session cannot follow you
 across machines.
 
 ## Teaching a custom runner to continue

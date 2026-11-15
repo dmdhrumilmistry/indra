@@ -72,6 +72,10 @@ pub struct ConfigAccess {
     pub path: std::path::PathBuf,
     /// Why editing is turned off, if it is.
     pub locked: Option<String>,
+    /// Why machines cannot add themselves with a join code (read-only, or
+    /// --lock-config). Listening on the network does not stop that: a
+    /// joining machine adds only its name.
+    pub join_locked: Option<String>,
     /// One save at a time.
     pub saving: Mutex<()>,
 }
@@ -653,7 +657,11 @@ async fn overview(State(app): State<Arc<App>>, req: Request) -> Json<Value> {
         "running": app.procs.running(),
         "settings": app.config.as_ref().map(|c| json!({
             "path": c.path.display().to_string(), "editable": c.locked.is_none(), "locked": c.locked,
+            // Machines can be added and removed with a code (Machines page).
+            "join": c.join_locked.is_none() && me.role == Role::Admin, "join_locked": c.join_locked,
         })),
+        // Other machines can reach this console (it listens beyond loopback).
+        "reachable": !app.loopback,
     }))
 }
 
@@ -1320,7 +1328,8 @@ async fn nodes_list(
     State(app): State<Arc<App>>,
     Query(q): Query<NodesQ>,
 ) -> ApiResult<Json<Value>> {
-    let h = &app.harness(q.h.as_deref())?;
+    // Machines are listed even before any harness exists.
+    let h = app.harness(q.h.as_deref()).ok();
     let now = runs::now();
     // Probe stale remote nodes in parallel.
     let mut set = tokio::task::JoinSet::new();
@@ -1352,7 +1361,7 @@ async fn nodes_list(
     let local = json!({
         "name": LOCAL, "kind": "local", "description": "This machine",
         "max_parallel": app.settings().local_max_parallel, "running": app.procs.running_on(LOCAL),
-        "targets": node_targets(&app, h, LOCAL)?, "info": nodes::local_info(&app.settings()), "error": null, "checked": now,
+        "targets": match &h { Some(h) => node_targets(&app, h, LOCAL)?, None => vec![] }, "info": nodes::local_info(&app.settings()), "error": null, "checked": now,
     });
     let cache = app.node_cache.lock().unwrap();
     let mut out = vec![local];
@@ -2017,7 +2026,9 @@ async fn board_import(
 // ---- nodes that dial in -------------------------------------------------------------
 
 /// `GET /agent/connect` (WebSocket): a node presents its name and either its
-/// link key or a one-time enrolment code. Outside /api: nodes have no console
+/// link key or a one-time code. A code from Machines > Add a machine is not
+/// tied to a name: the node suggests one (its host name), and the hub adds it
+/// to indra.toml under a free name. Outside /api: nodes have no console
 /// token, and the console token gives no access here.
 async fn agent_connect(
     State(app): State<Arc<App>>,
@@ -2031,69 +2042,186 @@ async fn agent_connect(
             .unwrap_or("")
             .to_string()
     };
-    let name = h("x-indra-node");
-    if nodes::validate_name(&name).is_err() || app.settings().node(&name).is_none() {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        return ApiError(StatusCode::UNAUTHORIZED, "unknown node".into()).into_response();
+    let refuse = |msg: &str| {
+        let msg = msg.to_string();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            ApiError(StatusCode::UNAUTHORIZED, msg).into_response()
+        }
+    };
+    let mut name = h("x-indra-node");
+    if nodes::validate_name(&name).is_err() {
+        return refuse("bad node name").await;
     }
     let vault = app.procs.vault();
     let key = h("authorization")
         .strip_prefix("Bearer ")
         .map(str::to_string);
-    let enrolled = match (key, h("x-indra-enroll")) {
-        (Some(k), _) if vault.check_node_key(&name, &k) => None,
-        (None, code) if !code.is_empty() && app.procs.links().redeem(&name, &code) => {
-            let mut b = [0u8; 32];
-            if getrandom::fill(&mut b).is_err() {
-                return internal("no OS randomness").into_response();
-            }
-            let k: String = b.iter().map(|x| format!("{:02x}", x)).collect();
-            if let Err(e) = vault.set_node_key(&name, &k) {
-                return internal(e).into_response();
-            }
-            Some(k)
-        }
-        _ => {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            return ApiError(
-                StatusCode::UNAUTHORIZED,
-                "wrong key or enrolment code".into(),
-            )
-            .into_response();
-        }
-    };
+    let code = h("x-indra-enroll");
     let links = app.procs.links().clone();
+    let known = app.settings().node(&name).is_some();
+    let enrolled = match key {
+        Some(k) if known && vault.check_node_key(&name, &k) => None,
+        Some(_) => return refuse("wrong key or unknown node").await,
+        None if code.is_empty() => return refuse("no key and no code").await,
+        None if known && links.redeem(&name, &code) => match new_node_key(&app, &name) {
+            Ok(k) => Some(k),
+            Err(e) => return e.into_response(),
+        },
+        None => match links.take_join(&code) {
+            // A join code: any name, and the machine is added here.
+            Some(None) => match join_node(&app, &code, &name) {
+                Ok((n, k)) => {
+                    name = n;
+                    Some(k)
+                }
+                Err(e) => return e.into_response(),
+            },
+            _ => return refuse("wrong, used or expired code").await,
+        },
+    };
     ws.on_upgrade(move |socket| links.session(name, enrolled, socket))
 }
 
-#[derive(Deserialize)]
+/// A fresh link key for `node`, kept in the encrypted secret store.
+fn new_node_key(app: &App, node: &str) -> ApiResult<String> {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).map_err(|_| internal("no OS randomness"))?;
+    let k: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+    app.procs.vault().set_node_key(node, &k).map_err(internal)?;
+    Ok(k)
+}
+
+/// A machine joins with a code: add it to indra.toml under `wanted` (or
+/// `wanted-2`, ... when that is taken) and give it a key. Only a name goes
+/// into the file (no command, no SSH), so this works even when the console
+/// cannot edit settings because it listens on the network; not when indra
+/// runs read-only or with --lock-config.
+fn join_node(app: &App, code: &str, wanted: &str) -> ApiResult<(String, String)> {
+    let c = config_access(app)?;
+    if let Some(why) = c.join_locked.as_ref() {
+        return Err(forbidden(why.clone()));
+    }
+    let _one = c.saving.lock().unwrap_or_else(|e| e.into_inner());
+    let (current, _) = confedit::read(&c.path).map_err(internal)?;
+    let cf = confedit::parse(&current).map_err(|e| {
+        forbidden(format!(
+            "the hub's indra.toml has an error, so it cannot add machines: {}",
+            e
+        ))
+    })?;
+    let taken = |n: &str| n == LOCAL || cf.node.iter().any(|x| x.name == n);
+    let mut name = wanted.to_string();
+    let mut i = 2;
+    while taken(&name) {
+        let base: String = wanted.chars().take(60).collect();
+        name = format!("{}-{}", base, i);
+        i += 1;
+    }
+    if !app.procs.links().finish_join(code, &name, Value::Null) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "wrong, used or expired code".into(),
+        ));
+    }
+    let mut list = serde_json::to_value(&cf.node).map_err(|e| internal(e.to_string()))?;
+    list.as_array_mut()
+        .unwrap()
+        .push(json!({ "name": name, "description": "joined with a code" }));
+    let next = confedit::set_section(&current, "node", &list).map_err(bad)?;
+    let settings = check_config(app, c, &next)?;
+    confedit::write_atomic(&c.path, &next).map_err(internal)?;
+    app.settings.set(settings);
+    let key = new_node_key(app, &name)?;
+    Ok((name, key))
+}
+
+#[derive(Deserialize, Default)]
 struct EnrolReq {
-    name: String,
+    /// A name ties the code to one node (the older flow). Without one, any
+    /// machine can join with it and names itself.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     targets: Vec<String>,
 }
 
-/// Make a one-time code for a node to dial in with, adding the node to
-/// indra.toml if it is not there yet.
+/// The address other machines should use for this console: the one the
+/// browser used, unless that is this machine only (then its LAN address).
+fn hub_url(app: &App, headers: &HeaderMap) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    let local = host_name(headers)
+        .map(|n| is_loopback_host(&n))
+        .unwrap_or(true);
+    if local && !app.loopback {
+        let port = host.rsplit_once(':').map(|(_, p)| p).unwrap_or("7878");
+        if let Some(ip) = lan_ip() {
+            return format!("{}://{}:{}", scheme, ip, port);
+        }
+    }
+    format!(
+        "{}://{}",
+        scheme,
+        if host.is_empty() { "HUB:7878" } else { &host }
+    )
+}
+
+/// This machine's address on its network (the one it would use to reach
+/// the internet; nothing is sent).
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// `POST /api/nodes/enrol`: a one-time code (and the commands to use it)
+/// for adding a machine. With no name, the machine names itself and is
+/// added when it joins.
 async fn node_enrol(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    Json(r): Json<EnrolReq>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
+    let r: EnrolReq = if body.iter().all(u8::is_ascii_whitespace) {
+        EnrolReq::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| bad(e.to_string()))?
+    };
     let c = config_access(&app)?;
+    let hub = hub_url(&app, &headers);
+    let Some(name) = r.name.filter(|n| !n.trim().is_empty()) else {
+        if let Some(why) = &c.join_locked {
+            return Err(forbidden(why.clone()));
+        }
+        let code = app.procs.links().join_code();
+        return Ok(Json(json!({
+            "code": code, "expires_in": crate::deck::link::JOIN_TTL, "hub": hub,
+            "reachable": !app.loopback,
+            "command": format!("indra join {} {}", hub, code),
+        })));
+    };
     if let Some(why) = &c.locked {
         return Err(forbidden(why.clone()));
     }
-    nodes::validate_name(&r.name).map_err(bad)?;
-    if r.name == LOCAL {
+    nodes::validate_name(&name).map_err(bad)?;
+    if name == LOCAL {
         return Err(bad("'local' is this machine"));
     }
-    if app.settings().node(&r.name).is_none() {
+    if app.settings().node(&name).is_none() {
         let _one = c.saving.lock().unwrap_or_else(|e| e.into_inner());
         let (current, _) = confedit::read(&c.path).map_err(internal)?;
         let cf = confedit::parse(&current).map_err(bad)?;
         let mut list = serde_json::to_value(&cf.node).map_err(|e| internal(e.to_string()))?;
-        let mut entry = json!({ "name": r.name });
+        let mut entry = json!({ "name": name });
         if !r.targets.is_empty() {
             entry["targets"] = json!(r.targets);
         }
@@ -2103,19 +2231,80 @@ async fn node_enrol(
         confedit::write_atomic(&c.path, &next).map_err(internal)?;
         app.settings.set(settings);
     }
-    let code = app.procs.links().enrol_code(&r.name);
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("HUB:PORT");
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
+    let code = app.procs.links().enrol_code(&name);
     Ok(Json(json!({
-        "code": code, "expires_in": 900,
-        "command": format!("indra node connect {}://{} --name {} --code {}", scheme, host, r.name, code),
+        "code": code, "expires_in": 900, "hub": hub, "reachable": !app.loopback,
+        "command": format!("indra node connect {} --name {} --code {}", hub, name, code),
     })))
+}
+
+/// `DELETE /api/nodes/{name}`: remove a machine that dials in: its entry in
+/// indra.toml and its key, and close its link. Allowed whenever machines may
+/// join (a node reached over SSH is edited in Settings).
+async fn node_remove(
+    State(app): State<Arc<App>>,
+    UrlPath(name): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    if let Some(why) = &c.join_locked {
+        return Err(forbidden(why.clone()));
+    }
+    let n = app
+        .settings()
+        .node(&name)
+        .cloned()
+        .ok_or_else(|| not_found("no such machine"))?;
+    if !n.ssh.is_empty() && c.locked.is_some() {
+        return Err(forbidden(
+            "this machine is reached over SSH: remove it in Settings > Nodes",
+        ));
+    }
+    {
+        let _one = c.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let (current, _) = confedit::read(&c.path).map_err(internal)?;
+        let cf = confedit::parse(&current).map_err(bad)?;
+        let list: Vec<_> = cf.node.iter().filter(|x| x.name != name).collect();
+        let list = serde_json::to_value(&list).map_err(|e| internal(e.to_string()))?;
+        let next = confedit::set_section(&current, "node", &list).map_err(bad)?;
+        let settings = check_config(&app, c, &next).map_err(|e| {
+            ApiError(
+                e.0,
+                format!(
+                    "{} (is the machine still used by a workflow or profile?)",
+                    e.1
+                ),
+            )
+        })?;
+        confedit::write_atomic(&c.path, &next).map_err(internal)?;
+        app.settings.set(settings);
+    }
+    let _ = app
+        .procs
+        .vault()
+        .remove(&crate::deck::link::key_name(&name));
+    app.procs.links().remove(&name);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `GET /api/nodes/enrol/{code}`: has the machine joined yet, and what is it.
+async fn node_enrol_status(
+    State(app): State<Arc<App>>,
+    UrlPath(code): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let links = app.procs.links();
+    let mut v = links
+        .code_status(&code)
+        .ok_or_else(|| not_found("no such code (it may have expired)"))?;
+    if let Some(n) = v["joined"].as_str().map(String::from) {
+        if let Some(info) = links.get(&n).and_then(|l| l.info()) {
+            v["info"] = info;
+        }
+        if let Some(l) = links.get(&n) {
+            v["targets"] = json!(l.targets());
+            v["path"] = l.view()["path"].clone();
+        }
+    }
+    Ok(Json(v))
 }
 
 // ---- settings (the config file) ------------------------------------------------
@@ -3202,6 +3391,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/procs", get(procs_list).post(proc_start))
         .route("/api/nodes", get(nodes_list))
         .route("/api/nodes/enrol", post(node_enrol))
+        .route("/api/nodes/enrol/{code}", get(node_enrol_status))
+        .route("/api/nodes/{name}", axum::routing::delete(node_remove))
         .route("/agent/connect", get(agent_connect))
         .route("/api/nodes/runs", get(node_runs))
         .route("/api/nodes/runs/fetch", post(node_run_fetch))
@@ -3578,6 +3769,7 @@ mod tests {
                 opts: opts.clone(),
                 path: path.clone(),
                 locked: None,
+                join_locked: None,
                 saving: Mutex::new(()),
             }),
         );
@@ -3726,6 +3918,7 @@ mod tests {
                 Some(ConfigAccess {
                     opts: opts.clone(),
                     path: path.clone(),
+                    join_locked: locked.clone(),
                     locked,
                     saving: Mutex::new(()),
                 }),
@@ -3877,6 +4070,65 @@ mod tests {
             "/api/config",
             &[AUTH, origin],
             Some(json!({ "version": c["version"], "section": "preset", "value": [] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // --lock-config (or read-only) also stops machines joining.
+        let (s, _, _) = call(
+            &locked,
+            "POST",
+            "/api/nodes/enrol",
+            &[AUTH, origin],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // Locked only because the console listens on the network: machines
+        // still join with a code (they add only their name).
+        let lan = {
+            let s = config::load(opts.clone()).unwrap();
+            App::with_config(
+                s,
+                TOKEN.into(),
+                true,
+                Some(ConfigAccess {
+                    opts: opts.clone(),
+                    path: path.clone(),
+                    locked: Some("listens beyond this machine".into()),
+                    join_locked: None,
+                    saving: Mutex::new(()),
+                }),
+            )
+        };
+        let (s, _, body) = call(&lan, "POST", "/api/nodes/enrol", &[AUTH, origin], None).await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let code = v["code"].as_str().unwrap();
+        assert!(v["command"].as_str().unwrap().ends_with(code));
+        let (s, _, body) = call(
+            &lan,
+            "GET",
+            &format!("/api/nodes/enrol/{}", code),
+            &[AUTH],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(body.contains("\"joined\":null"), "{}", body);
+        let (s, _, _) = call(&lan, "GET", "/api/nodes/enrol/NOPE-NOPE", &[AUTH], None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let ov: Value =
+            serde_json::from_str(&call(&lan, "GET", "/api/overview", &[AUTH], None).await.2)
+                .unwrap();
+        assert_eq!(ov["settings"]["join"], true);
+        assert_eq!(ov["settings"]["editable"], false);
+        // Naming the node (the older flow) edits settings: still locked.
+        let (s, _, _) = call(
+            &lan,
+            "POST",
+            "/api/nodes/enrol",
+            &[AUTH, origin],
+            Some(json!({ "name": "box" })),
         )
         .await;
         assert_eq!(s, StatusCode::FORBIDDEN);

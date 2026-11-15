@@ -277,6 +277,8 @@ pub struct NodeLink {
     /// Requests waiting for the node's answer (`req`/`res` frames).
     reqs: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>,
     next_req: AtomicU64,
+    /// Close the connection now (the node was removed).
+    kick: tokio::sync::Notify,
 }
 
 impl NodeLink {
@@ -293,6 +295,7 @@ impl NodeLink {
             peer: Mutex::new(None),
             reqs: Mutex::new(HashMap::new()),
             next_req: AtomicU64::new(1),
+            kick: tokio::sync::Notify::new(),
         }
     }
 
@@ -393,11 +396,54 @@ impl NodeLink {
     }
 }
 
+/// How long a join code (from Machines > Add a machine) works.
+pub const JOIN_TTL: u64 = 3600;
+
+/// A one-time code: bound to a node name or not, and who used it.
+struct Pending {
+    node: Option<String>,
+    expires: u64,
+    joined: Option<(String, Value)>,
+}
+
+/// Codes are typed by people: ignore case and stray spaces.
+#[cfg(test)]
+mod code_tests {
+    use super::*;
+
+    #[test]
+    fn join_codes_work_once_in_any_case_and_names_come_from_hosts() {
+        let l = Links::default();
+        let c = l.join_code();
+        assert_eq!(l.take_join(&c.to_lowercase()), Some(None));
+        assert!(l.finish_join(&format!(" {} ", c.to_lowercase()), "box", Value::Null));
+        assert!(!l.finish_join(&c, "other", Value::Null), "used once");
+        assert_eq!(l.take_join(&c), None);
+        assert_eq!(l.code_status(&c).unwrap()["joined"], "box");
+        // A code tied to a name works for that name only, through redeem.
+        let b = l.enrol_code("box");
+        assert!(!l.redeem("other", &b));
+        assert!(l.redeem("box", &b));
+        assert!(!l.redeem("box", &b));
+        assert_eq!(
+            name_from_host("Dhrumil's MacBook-Pro.local"),
+            "dhrumil-s-macbook-pro"
+        );
+        assert_eq!(name_from_host("DESKTOP-7QK2"), "desktop-7qk2");
+        assert_eq!(name_from_host("..."), "node");
+        assert!(name_from_host(&"x".repeat(90)).len() <= 40);
+    }
+}
+
+fn normal_code(c: &str) -> String {
+    c.trim().to_ascii_uppercase()
+}
+
 pub struct Links {
     /// This hub process; a node that sees another one stops its old jobs.
     pub hub_id: String,
     nodes: Mutex<HashMap<String, Arc<NodeLink>>>,
-    codes: Mutex<HashMap<String, (String, u64)>>,
+    codes: Mutex<HashMap<String, Pending>>,
     next_job: AtomicU64,
     /// STUN/TURN servers for WebRTC (none: direct paths on the same network only).
     pub ice_servers: Mutex<Vec<IceServer>>,
@@ -435,8 +481,25 @@ impl Links {
         self.get(node).map(|l| l.connected()).unwrap_or(false)
     }
 
+    /// The node was removed: close its connection and forget it.
+    pub fn remove(&self, node: &str) {
+        if let Some(l) = self.nodes.lock().unwrap().remove(node) {
+            l.kick.notify_waiters();
+        }
+    }
+
     /// A one-time code to enrol `node` (valid 15 minutes).
     pub fn enrol_code(&self, node: &str) -> String {
+        self.new_code(Some(node.to_string()), 900)
+    }
+
+    /// A one-time code any machine can join with (`indra join HUB CODE`),
+    /// naming itself (valid an hour).
+    pub fn join_code(&self) -> String {
+        self.new_code(None, JOIN_TTL)
+    }
+
+    fn new_code(&self, node: Option<String>, ttl: u64) -> String {
         const A: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         let mut b = [0u8; 10];
         let _ = getrandom::fill(&mut b);
@@ -446,21 +509,68 @@ impl Links {
             .collect();
         let code = format!("{}-{}", &code[..5], &code[5..]);
         let mut codes = self.codes.lock().unwrap();
-        codes.retain(|_, (_, exp)| *exp > now());
-        codes.insert(code.clone(), (node.to_string(), now() + 900));
+        // Used codes stay a while, so the console can show who joined.
+        codes
+            .retain(|_, p| p.expires > now() || p.joined.is_some() && p.expires + JOIN_TTL > now());
+        codes.insert(
+            code.clone(),
+            Pending {
+                node,
+                expires: now() + ttl,
+                joined: None,
+            },
+        );
         code
     }
 
     /// Use a code: true once, for the node it was made for.
     pub fn redeem(&self, node: &str, code: &str) -> bool {
         let mut codes = self.codes.lock().unwrap();
-        match codes.get(code) {
-            Some((n, exp)) if n == node && *exp > now() => {
-                codes.remove(code);
+        match codes.get_mut(&normal_code(code)) {
+            Some(p)
+                if p.joined.is_none()
+                    && p.expires > now()
+                    && p.node.as_deref().map(|n| n == node).unwrap_or(false) =>
+            {
+                p.joined = Some((node.to_string(), Value::Null));
                 true
             }
             _ => false,
         }
+    }
+
+    /// A join code that can still be used: `Some(None)` for one any machine
+    /// may join with, `Some(Some(name))` for one tied to a node; `None` if it
+    /// is wrong, used or expired. [`Links::finish_join`] uses it up.
+    pub fn take_join(&self, code: &str) -> Option<Option<String>> {
+        let codes = self.codes.lock().unwrap();
+        match codes.get(&normal_code(code)) {
+            Some(p) if p.joined.is_none() && p.expires > now() => Some(p.node.clone()),
+            _ => None,
+        }
+    }
+
+    /// Mark a join code used by `node`, with the facts it sent. False if
+    /// someone else used it first.
+    pub fn finish_join(&self, code: &str, node: &str, info: Value) -> bool {
+        let mut codes = self.codes.lock().unwrap();
+        match codes.get_mut(&normal_code(code)) {
+            Some(p) if p.joined.is_none() && p.expires > now() => {
+                p.joined = Some((node.to_string(), info));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// For the console: has a code been used, and by which machine.
+    pub fn code_status(&self, code: &str) -> Option<Value> {
+        let codes = self.codes.lock().unwrap();
+        let p = codes.get(&normal_code(code))?;
+        Some(match &p.joined {
+            Some((n, info)) => json!({ "joined": n, "info": info, "connected": self.connected(n) }),
+            None => json!({ "joined": null, "expires_in": p.expires.saturating_sub(now()) }),
+        })
     }
 
     /// Start a job on a connected node. Its envelope lines (the protocol of
@@ -510,7 +620,7 @@ impl Links {
         let (inbound_tx, mut inbound) = mpsc::unbounded_channel::<String>();
         let epoch = link.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(key) = enrolled {
-            let _ = tx.send(json!({ "t": "enrolled", "key": key }).to_string());
+            let _ = tx.send(json!({ "t": "enrolled", "key": key, "name": node }).to_string());
         }
         let ice = self.ice_servers.lock().unwrap().clone();
         let webrtc = self.webrtc.load(Ordering::SeqCst);
@@ -544,6 +654,7 @@ impl Links {
                         break;
                     }
                 }
+                _ = link.kick.notified() => break,
                 _ = tick.tick() => {
                     if now().saturating_sub(link.last_seen.load(Ordering::SeqCst)) > DEAD_AFTER {
                         break;
@@ -679,14 +790,72 @@ impl Links {
 // ---- node side ---------------------------------------------------------------------
 
 /// What a node keeps about its link to a hub, in an owner-only file.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct Saved {
-    hub: String,
-    name: String,
-    key: String,
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug)]
+pub struct Saved {
+    pub hub: String,
+    pub name: String,
+    pub key: String,
+    /// Folders agents may work in here (`--target`), so later starts need none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
 }
 
-fn saved_path() -> std::path::PathBuf {
+/// The hub this machine joined, if it did.
+pub fn saved() -> Option<Saved> {
+    std::fs::read_to_string(saved_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Saved>(&t).ok())
+}
+
+/// Forget the hub (`indra node leave`).
+pub fn forget() -> std::io::Result<()> {
+    match std::fs::remove_file(saved_path()) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+pub fn save(saved: &Saved) -> Result<std::path::PathBuf> {
+    let p = saved_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let text = serde_json::to_string_pretty(saved).unwrap_or_default();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts
+        .open(&p)
+        .map_err(|e| format!("cannot save the node key to {}: {}", p.display(), e))?;
+    use std::io::Write;
+    f.write_all(text.as_bytes())
+        .map_err(|e| format!("cannot save the node key to {}: {}", p.display(), e))?;
+    Ok(p)
+}
+
+/// A node name from this machine's host name: lower case, letters, digits
+/// and '-' ("Dhrumil's MacBook.local" becomes "dhrumil-s-macbook").
+pub fn name_from_host(host: &str) -> String {
+    let host = host.split('.').next().unwrap_or(host);
+    let mut out = String::new();
+    for c in host.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out: String = out.trim_matches('-').chars().take(40).collect();
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
+        "node".into()
+    } else {
+        out
+    }
+}
+
+pub fn saved_path() -> std::path::PathBuf {
     crate::paths::config_dirs()
         .into_iter()
         .next()
@@ -776,13 +945,36 @@ impl NodeState {
     }
 }
 
+#[derive(Default)]
 pub struct ConnectOpts {
-    pub hub: String,
-    pub name: String,
+    /// The hub (default: the one this machine joined).
+    pub hub: Option<String>,
+    /// This node's name (default: the one it joined as; joining: its host name).
+    pub name: Option<String>,
     pub code: Option<String>,
+    /// Folders agents may work in (default: the ones saved when it joined).
     pub targets: Vec<String>,
     /// Use the WebRTC data channel when the hub offers one.
     pub webrtc: bool,
+    /// Return once enrolled, instead of staying connected (`indra join`).
+    pub once: bool,
+}
+
+/// The message in a refused WebSocket handshake: the hub's own words.
+fn refusal(e: &tokio_tungstenite::tungstenite::Error) -> Option<(u16, String)> {
+    if let tokio_tungstenite::tungstenite::Error::Http(r) = e {
+        let body = r
+            .body()
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .unwrap_or_default();
+        let msg = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
+            .unwrap_or(body);
+        return Some((r.status().as_u16(), msg));
+    }
+    None
 }
 
 /// `indra node connect`: keep a link to the hub open and run its jobs.
@@ -792,8 +984,38 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
     use tokio_tungstenite::tungstenite::http::HeaderValue;
     use tokio_tungstenite::tungstenite::Message;
 
-    crate::deck::nodes::validate_name(&o.name)?;
-    let base = o.hub.trim_end_matches('/');
+    let before = saved();
+    let hub = match o.hub.clone().or_else(|| before.as_ref().map(|s| s.hub.clone())) {
+        Some(h) => h,
+        None => {
+            return Err(
+                "this machine has not joined a hub yet: run `indra join <hub-url> <code>` (the console's Machines page gives you both)"
+                    .into(),
+            )
+        }
+    };
+    let base = hub.trim_end_matches('/').to_string();
+    let base = base.as_str();
+    let same_hub = before.as_ref().filter(|s| s.hub == base);
+    let mut name = match o.name.clone() {
+        Some(n) => n,
+        None => match same_hub {
+            Some(s) if o.code.is_none() => s.name.clone(),
+            _ => name_from_host(&crate::deck::nodes::local_info(&settings).hostname),
+        },
+    };
+    crate::deck::nodes::validate_name(&name)?;
+    let targets = if !o.targets.is_empty() {
+        o.targets.clone()
+    } else {
+        same_hub.map(|s| s.targets.clone()).unwrap_or_default()
+    };
+    // New folders for a node that already joined: remember them.
+    if let Some(s) = same_hub.filter(|s| s.name == name && s.targets != targets) {
+        let mut s = s.clone();
+        s.targets = targets.clone();
+        let _ = save(&s);
+    }
     let url = if let Some(r) = base.strip_prefix("https://") {
         format!("wss://{}/agent/connect", r)
     } else if let Some(r) = base.strip_prefix("http://") {
@@ -801,17 +1023,17 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
     } else {
         return Err("the hub URL must start with http:// or https://".into());
     };
-    let path = saved_path();
-    let mut key: Option<String> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Saved>(&t).ok())
-        .filter(|s| s.hub == base && s.name == o.name)
-        .map(|s| s.key);
+    // A code means: enrol (again). Otherwise the saved key.
+    let mut key: Option<String> = if o.code.is_some() {
+        None
+    } else {
+        same_hub.filter(|s| s.name == name).map(|s| s.key.clone())
+    };
     let mut code = o.code.clone();
     if key.is_none() && code.is_none() {
         return Err(format!(
-            "not enrolled with {} as '{}': add the node in the console (Nodes) and pass --code",
-            base, o.name
+            "not joined to {} as '{}': get a code from the console (Machines > Add a machine) and run `indra join {} <code>`",
+            base, name, base
         ));
     }
     let settings = Arc::new(settings);
@@ -832,7 +1054,7 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
         let h = req.headers_mut();
         h.insert(
             "x-indra-node",
-            HeaderValue::from_str(&o.name).map_err(|e| e.to_string())?,
+            HeaderValue::from_str(&name).map_err(|e| e.to_string())?,
         );
         if let Some(k) = &key {
             h.insert(
@@ -849,10 +1071,20 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
             Ok((ws, _)) => ws,
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("401") && code.is_some() && key.is_none() {
-                    return Err(
-                        "the hub refused the enrolment code (wrong, used, or expired)".into(),
-                    );
+                if let Some((status, why)) = refusal(&e) {
+                    if code.is_some() && key.is_none() && (status == 401 || status == 403) {
+                        return Err(if status == 401 {
+                            "the hub refused the code (wrong, already used, or expired): make a new one in the console (Machines > Add a machine)".into()
+                        } else {
+                            format!("the hub cannot add this machine: {}", why)
+                        });
+                    }
+                    if status == 401 && key.is_some() {
+                        return Err(format!(
+                            "the hub no longer knows this machine as '{}' ({}): join again with a new code (Machines > Add a machine)",
+                            name, why
+                        ));
+                    }
                 }
                 eprintln!(
                     "indra: cannot reach {}: {}; retrying in {}s",
@@ -866,14 +1098,16 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
         };
         let connected_at = now();
         away_since = None;
-        eprintln!("indra: connected to {} as {}", base, o.name);
+        if !o.once {
+            eprintln!("indra: connected to {} as {}", base, name);
+        }
         let (mut sink, mut stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let (inbound_tx, mut inbound) = mpsc::unbounded_channel::<String>();
         let mut peer: NodePeer = None;
         let hello = json!({
             "t": "hello", "version": env!("CARGO_PKG_VERSION"), "info": crate::deck::nodes::local_info(&settings),
-            "targets": o.targets, "webrtc": o.webrtc && cfg!(feature = "webrtc"),
+            "targets": targets, "webrtc": o.webrtc && cfg!(feature = "webrtc"),
             "jobs": state.jobs.lock().unwrap().keys().collect::<Vec<_>>(),
         });
         if sink
@@ -900,14 +1134,20 @@ pub async fn connect(settings: crate::deck::config::Settings, o: ConnectOpts) ->
                     Some(Ok(Message::Text(t))) => {
                         last_seen = now();
                         let t = t.to_string();
-                        node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &o.name, &mut peer, &inbound_tx).await;
+                        node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &mut name, &targets, &mut peer, &inbound_tx).await;
+                        if o.once && key.is_some() && code.is_none() {
+                            return Ok(());
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     Some(Ok(_)) => last_seen = now(),
                 },
                 Some(t) = inbound.recv() => {
                     last_seen = now();
-                    node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &o.name, &mut peer, &inbound_tx).await;
+                    node_frame(&t, &state, &settings, &out_tx, &tx, &mut key, &mut code, base, &mut name, &targets, &mut peer, &inbound_tx).await;
+                        if o.once && key.is_some() && code.is_none() {
+                            return Ok(());
+                        }
                 }
                 Some((job, seq)) = out_rx.recv() => {
                     if sent.get(&job).copied().unwrap_or(0) >= seq {
@@ -971,7 +1211,8 @@ async fn node_frame(
     key: &mut Option<String>,
     code: &mut Option<String>,
     hub: &str,
-    name: &str,
+    name: &mut String,
+    targets: &[String],
     peer: &mut NodePeer,
     _inbound: &mpsc::UnboundedSender<String>,
 ) -> Option<()> {
@@ -981,30 +1222,24 @@ async fn node_frame(
     match v.get("t").and_then(Value::as_str).unwrap_or("") {
         "enrolled" => {
             let k = v.get("key").and_then(Value::as_str)?.to_string();
+            // Joining with a code: the hub may name this node itself.
+            if let Some(n) = v.get("name").and_then(Value::as_str) {
+                if crate::deck::nodes::validate_name(n).is_ok() {
+                    *name = n.to_string();
+                }
+            }
             let saved = Saved {
                 hub: hub.into(),
-                name: name.into(),
+                name: name.clone(),
                 key: k.clone(),
+                targets: targets.to_vec(),
             };
-            let p = saved_path();
-            if let Some(d) = p.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            let text = serde_json::to_string(&saved).unwrap_or_default();
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-            match opts.open(&p) {
-                Ok(mut f) => {
-                    use std::io::Write;
-                    let _ = f.write_all(text.as_bytes());
-                }
-                Err(e) => eprintln!("indra: cannot save the node key to {}: {}", p.display(), e),
+            match save(&saved) {
+                Ok(p) => eprintln!("indra: joined as {}; the key is in {}", name, p.display()),
+                Err(e) => eprintln!("indra: {}", e),
             }
             *key = Some(k);
             *code = None;
-            eprintln!("indra: enrolled; the key is in {}", p.display());
         }
         "welcome" => {
             *state.ice.lock().unwrap() = parse_ice(v.get("ice"));

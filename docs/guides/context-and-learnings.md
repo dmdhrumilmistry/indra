@@ -50,7 +50,7 @@ list (the notes stay in memory).
 
 ## Start an agent with memory
 
-On **Launch**, tick **Give it relevant memory**. indra recalls the notes that best match the
+On **Run an agent** (under **More options**), tick **Give it relevant memory**. indra recalls the notes that best match the
 prompt from every vault of the harness (search, then a step through the graph, so a fix linked
 to a finding comes along) and appends them after the prompt, within a budget of six notes and
 about 4,000 characters. The prompt stays first, so a slash command such as `/sh-security-review`

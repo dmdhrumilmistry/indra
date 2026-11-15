@@ -99,6 +99,16 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] Accounts: credentials from the hub for agents on any node, usage per account and per
       machine login, limits, cooldown after usage limits, routing (most left by default), the
       Accounts page and `indra accounts`
+- [x] Adding a machine is one command: **Machines > Add a machine** gives a code (once, an hour)
+      and a line to paste there (`INDRA_JOIN` in the installers, or `indra join <hub> <code>`);
+      the machine names itself, reports its system and agents, and keeps its link running in the
+      background (systemd, launchd, Windows sign-in); `indra node status`, `folders`, `leave`;
+      **Remove** in the console
+- [x] Joining works on a console that listens on the network (its settings are locked there:
+      "Add a machine" used to fail without a visible error)
+- [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
+      More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
+      four fields and the rest under More options
 
 ## Not planned yet (the docs say so)
 

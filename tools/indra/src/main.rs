@@ -63,9 +63,11 @@ enum Cmd {
     Init(deck::cli::InitArgs),
     /// Check the machines agents run on: this one and every [[node]] over SSH
     Nodes(deck::cli::NodesArgs),
+    /// Add this machine to a hub: `indra join <hub-url> <code>` (the code is on the hub's Machines page)
+    Join(deck::cli::JoinArgs),
     /// Run a workflow from indra.toml and follow it here (omit the name to list them)
     Run(deck::cli::RunArgs),
-    /// The remote side of a node; the hub runs `indra node ...` over SSH
+    /// This machine as a node: connect, status, leave (and what the hub runs over SSH)
     Node(deck::cli::NodeArgs),
     /// Secrets for agents' profiles: set (value from stdin), list, rm
     Secret(deck::cli::SecretArgs),
@@ -133,6 +135,7 @@ fn main() -> ExitCode {
         Cmd::Nodes(a) => deck::cli::run_nodes(a),
         Cmd::Run(a) => deck::cli::run_workflow(a),
         Cmd::Node(a) => deck::cli::run_node(a),
+        Cmd::Join(a) => deck::cli::run_join(a),
         Cmd::Secret(a) => deck::cli::run_secret(a),
         Cmd::Agents(a) => deck::cli::run_agents(a),
         Cmd::Attach(a) => deck::cli::run_attach(a),
