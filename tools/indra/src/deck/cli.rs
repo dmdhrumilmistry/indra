@@ -289,6 +289,38 @@ async fn serve(
             Some(_) => "locked",
         }
     );
+    let mg = crate::deck::managed::view();
+    if let Some(e) = mg["error"].as_str() {
+        eprintln!(
+            "indra: WARNING the organization's settings are not applied: {}",
+            e
+        );
+    } else if mg["managed"] == true || mg["defaults"] == true {
+        println!(
+            "  org      {}  ({}{})",
+            mg["dir"].as_str().unwrap_or(""),
+            [
+                ("defaults.toml", mg["defaults"] == true),
+                ("managed.toml", mg["managed"] == true)
+            ]
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+            .join(" and "),
+            mg["enforced"]
+                .as_array()
+                .filter(|a| !a.is_empty())
+                .map(|a| format!(
+                    "; enforces {}",
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .unwrap_or_default()
+        );
+    }
     if editing.shell {
         if !loopback {
             return Err(
@@ -820,10 +852,13 @@ pub enum NodeCmd {
 /// `indra join`: add this machine to a hub with the code from its console.
 #[derive(Args)]
 pub struct JoinArgs {
-    /// The hub's console URL, e.g. http://192.168.1.20:7878
-    hub: String,
-    /// The code from the console (Machines > Add a machine)
-    code: String,
+    /// The hub's console URL, e.g. http://192.168.1.20:7878 (default: [join] hub in the settings)
+    hub: Option<String>,
+    /// A code from the console (Machines > Add a machine), or an enrollment key (default: [join] key)
+    code: Option<String>,
+    /// Join again even if this machine already joined that hub
+    #[arg(long)]
+    force: bool,
     /// Name for this machine (default: its host name)
     #[arg(long)]
     name: Option<String>,
@@ -858,18 +893,56 @@ pub fn run_join(a: JoinArgs) -> Result<ExitCode, String> {
         config: a.config.clone(),
         targets: Vec::new(),
     };
-    let s = load(opts, None, false)?;
-    let targets = if a.targets.is_empty() {
-        abs_targets(&[".".to_string()])?
-    } else {
-        abs_targets(&a.targets)?
-    };
-    let hub = a.hub.trim_end_matches('/').to_string();
+    let lo = load_options(opts, None, false)?;
+    // An organization's settings may name the hub and key ([join], from MDM).
+    let preset = config::load_file(config::config_path(&lo).as_deref())
+        .map(|f| f.join)
+        .unwrap_or_default();
+    let s = config::load(lo)?;
+    let hub = a.hub.clone().or(preset.hub.clone()).ok_or(
+        "which hub? `indra join <hub-url> <code>` (the console's Machines page gives you both)",
+    )?;
+    let code =
+        a.code.clone().or(preset.key.clone()).ok_or(
+            "no code: `indra join <hub-url> <code>` (Machines > Add a machine gives you one)",
+        )?;
+    let hub = hub.trim_end_matches('/').to_string();
     if !(hub.starts_with("http://") || hub.starts_with("https://")) {
         return Err(format!(
             "'{}' is not the hub's URL: copy it from the console, e.g. http://192.168.1.20:7878",
-            a.hub
+            hub
         ));
+    }
+    let targets = if !a.targets.is_empty() {
+        abs_targets(&a.targets)?
+    } else if !preset.targets.is_empty() {
+        abs_targets(&preset.targets)?
+    } else {
+        // The folder this runs in; from an MDM script that is often `/`,
+        // so then the home folder.
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let here = if cwd.parent().is_none() {
+            crate::paths::home().unwrap_or(cwd)
+        } else {
+            cwd
+        };
+        abs_targets(&[here.display().to_string()])?
+    };
+    // Run again (MDM policies do): already joined, so just make sure the
+    // link runs.
+    if !a.force {
+        if let Some(sv) = crate::deck::link::saved().filter(|sv| sv.hub == hub) {
+            println!(
+                "This machine already joined {} as '{}' (`--force` joins again).",
+                hub, sv.name
+            );
+            if !a.foreground {
+                if let Ok(how) = crate::deck::autostart::install(a.config.as_deref()) {
+                    println!("Its link runs as {}.", how);
+                }
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
     }
     let info = nodes::local_info(&s);
     if a.foreground {
@@ -880,7 +953,7 @@ pub fn run_join(a: JoinArgs) -> Result<ExitCode, String> {
             crate::deck::link::ConnectOpts {
                 hub: Some(hub),
                 name: a.name.clone(),
-                code: Some(a.code.clone()),
+                code: Some(code.clone()),
                 targets,
                 webrtc: !a.no_webrtc,
                 once: false,
@@ -895,7 +968,7 @@ pub fn run_join(a: JoinArgs) -> Result<ExitCode, String> {
     let opts = crate::deck::link::ConnectOpts {
         hub: Some(hub.clone()),
         name: a.name.clone(),
-        code: Some(a.code.clone()),
+        code: Some(code.clone()),
         targets: targets.clone(),
         webrtc: !a.no_webrtc,
         once: true,

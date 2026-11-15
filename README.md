@@ -124,6 +124,7 @@ That's it. The console opens in your browser: launch agents, watch them, read th
 |---|---|
 | Use the console (the "server") | `indra serve --open` |
 | Run agents on another machine too | in the console: **Machines > Add a machine**, then paste the one command it shows on that machine (it installs indra and joins; see [adding machines](docs/guides/machines.md)) |
+| Roll out to a team with Jamf, Intune or another MDM | **Machines > Add many machines** gives a key and the scripts; organization-wide settings go in `defaults.toml` / `managed.toml` (see [rolling out with MDM](docs/guides/mdm.md)) |
 | Run Claude Code on a local model (Ollama) | `indra claude -m qwen3-coder --pull` |
 | Give a team accounts and roles | `indra user add alice` (see [users and roles](docs/guides/users-and-roles.md)) |
 | Build a workflow from a description | **Workflows > Create with Claude** in the console |

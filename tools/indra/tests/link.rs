@@ -554,3 +554,106 @@ fn a_machine_joins_with_one_code_runs_jobs_and_can_be_removed() {
         hub_toml
     );
 }
+
+#[test]
+fn many_machines_join_with_an_enrollment_key_and_organization_settings() {
+    let h = hub("fleet", false);
+    let hub_url = format!("http://127.0.0.1:{}", h.port);
+    let (s, body) = http(
+        h.port,
+        "POST",
+        "/api/nodes/keys",
+        r#"{"label":"laptops","days":7,"max_uses":2}"#,
+    );
+    assert_eq!(s, 200, "{}", body);
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    assert!(key.starts_with("IEK-"));
+    // The key is never listed again.
+    let (_, list) = http(h.port, "GET", "/api/nodes/keys", "");
+    assert!(!list.contains(&key[4..]), "{}", list);
+
+    let machine = |tag: &str, args: &[&str], system: Option<&std::path::Path>| {
+        let home = h.dir.join(format!("{}-home", tag));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut c = Command::new(INDRA);
+        c.arg("join")
+            .args(args)
+            .arg("--foreground")
+            .args(["--config", h.dir.join("node.toml").to_str().unwrap()])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("cfg"))
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env(
+                "INDRA_SYSTEM_DIR",
+                system
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| h.dir.join("no-system")),
+            )
+            .current_dir(&home)
+            .stdout(std::fs::File::create(h.dir.join(format!("{}.log", tag))).unwrap())
+            .stderr(std::fs::File::create(h.dir.join(format!("{}.err", tag))).unwrap());
+        c
+    };
+    // One machine gets hub and key from its organization's settings (MDM):
+    // `indra join` with no arguments.
+    let org = h.dir.join("org");
+    std::fs::create_dir_all(&org).unwrap();
+    std::fs::write(
+        org.join("managed.toml"),
+        format!("[join]\nhub = \"{}\"\nkey = \"{}\"\n", hub_url, key),
+    )
+    .unwrap();
+    let mut a = machine("a", &["--name", "laptop"], Some(&org))
+        .spawn()
+        .unwrap();
+    // Another types the key (as the install scripts do).
+    let mut b = machine("b", &[&hub_url, &key, "--name", "laptop"], None)
+        .spawn()
+        .unwrap();
+    let names = until("both machines to join", 30, || {
+        let (_, body) = http(h.port, "GET", "/api/nodes/keys", "");
+        let v = json(&body);
+        (v[0]["uses"] == 2).then(|| v[0]["machines"].clone())
+    });
+    // Same name asked for: the second gets laptop-2.
+    let mut got: Vec<String> = names
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    got.sort();
+    assert_eq!(got, vec!["laptop", "laptop-2"]);
+    let (_, body) = http(h.port, "GET", "/api/nodes/keys", "");
+    assert_eq!(json(&body)[0]["state"], "used up");
+    // Used up: a third machine is refused.
+    let out = machine("c", &[&hub_url, &key], None)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refused the code"),
+        "{:?}",
+        out
+    );
+    // Running the roll-out again does not add the machine twice.
+    let _ = a.kill();
+    let _ = a.wait();
+    let out = machine("a", &[], Some(&org))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("already joined"),
+        "{:?}",
+        out
+    );
+    let (_, body) = http(h.port, "GET", "/api/nodes/keys", "");
+    assert_eq!(json(&body)[0]["uses"], 2);
+    let _ = b.kill();
+    let _ = b.wait();
+}

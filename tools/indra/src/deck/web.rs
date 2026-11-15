@@ -62,6 +62,8 @@ pub struct App {
     pub market: crate::deck::market::Market,
     /// Console users and their sessions (none: the token is the key).
     pub users: crate::deck::users::Users,
+    /// Enrollment keys: many machines join with one (MDM roll-outs).
+    pub enroll: crate::deck::enroll::Keys,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -102,6 +104,7 @@ impl App {
         ));
         let market = crate::deck::market::Market::open(&settings.data_dir);
         let users = crate::deck::users::Users::open(&settings.data_dir);
+        let enroll = crate::deck::enroll::Keys::open(&settings.data_dir);
         let data_dir = settings.data_dir.clone();
         let shared = config::Shared::new(settings);
         procs.set_accounts(Arc::new(crate::deck::accounts::Accounts::new(
@@ -123,6 +126,7 @@ impl App {
             delegations: Default::default(),
             market,
             users,
+            enroll,
         })
     }
 
@@ -662,6 +666,8 @@ async fn overview(State(app): State<Arc<App>>, req: Request) -> Json<Value> {
         })),
         // Other machines can reach this console (it listens beyond loopback).
         "reachable": !app.loopback,
+        // The organization's settings (MDM): what managed.toml enforces.
+        "managed": crate::deck::managed::view(),
     }))
 }
 
@@ -2086,14 +2092,24 @@ async fn agent_connect(
         },
         None => match links.take_join(&code) {
             // A join code: any name, and the machine is added here.
-            Some(None) => match join_node(&app, &code, &name) {
+            Some(None) => match join_node(&app, Claim::Code(&code), &name) {
                 Ok((n, k)) => {
                     name = n;
                     Some(k)
                 }
                 Err(e) => return e.into_response(),
             },
-            _ => return refuse("wrong, used or expired code").await,
+            // An enrollment key (Machines > Add many machines).
+            _ => match app.enroll.check(&code) {
+                Some(id) => match join_node(&app, Claim::Key(&id), &name) {
+                    Ok((n, k)) => {
+                        name = n;
+                        Some(k)
+                    }
+                    Err(e) => return e.into_response(),
+                },
+                None => return refuse("wrong, used or expired code or key").await,
+            },
         },
     };
     ws.on_upgrade(move |socket| links.session(name, enrolled, socket))
@@ -2140,7 +2156,13 @@ fn new_node_key(app: &App, node: &str) -> ApiResult<String> {
 /// into the file (no command, no SSH), so this works even when the console
 /// cannot edit settings because it listens on the network; not when indra
 /// runs read-only or with --lock-config.
-fn join_node(app: &App, code: &str, wanted: &str) -> ApiResult<(String, String)> {
+/// What a joining machine presented: a one-time code or an enrollment key.
+enum Claim<'a> {
+    Code(&'a str),
+    Key(&'a str),
+}
+
+fn join_node(app: &App, claim: Claim, wanted: &str) -> ApiResult<(String, String)> {
     let c = config_access(app)?;
     if let Some(why) = c.join_locked.as_ref() {
         return Err(forbidden(why.clone()));
@@ -2161,7 +2183,11 @@ fn join_node(app: &App, code: &str, wanted: &str) -> ApiResult<(String, String)>
         name = format!("{}-{}", base, i);
         i += 1;
     }
-    if !app.procs.links().finish_join(code, &name, Value::Null) {
+    let claimed = match claim {
+        Claim::Code(code) => app.procs.links().finish_join(code, &name, Value::Null),
+        Claim::Key(id) => app.enroll.record_use(id, &name),
+    };
+    if !claimed {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "wrong, used or expired code".into(),
@@ -2432,6 +2458,53 @@ async fn node_folders(
     confedit::write_atomic(&c.path, &next).map_err(internal)?;
     app.settings.set(settings);
     Ok(Json(json!({ "folders": list })))
+}
+
+#[derive(Deserialize)]
+struct NewKey {
+    #[serde(default)]
+    label: String,
+    #[serde(default = "thirty")]
+    days: u32,
+    max_uses: Option<u32>,
+}
+
+fn thirty() -> u32 {
+    30
+}
+
+/// `POST /api/nodes/keys`: an enrollment key, shown this once.
+async fn enroll_key_create(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(r): Json<NewKey>,
+) -> ApiResult<Json<Value>> {
+    let c = config_access(&app)?;
+    if let Some(why) = &c.join_locked {
+        return Err(forbidden(why.clone()));
+    }
+    let (key, mut v) = app
+        .enroll
+        .create(&r.label, r.days, r.max_uses)
+        .map_err(bad)?;
+    v["key"] = json!(key);
+    v["hub"] = json!(hub_url(&app, &headers));
+    v["reachable"] = json!(!app.loopback);
+    Ok(Json(v))
+}
+
+/// `GET /api/nodes/keys`: the enrollment keys, without their secrets.
+async fn enroll_key_list(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(json!(app.enroll.list()))
+}
+
+/// `DELETE /api/nodes/keys/{id}`: revoke a key (machines that joined stay).
+async fn enroll_key_revoke(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    app.enroll.revoke(&id).map_err(not_found)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// `GET /api/nodes/enrol/{code}`: has the machine joined yet, and what is it.
@@ -2796,7 +2869,8 @@ fn config_payload(app: &App) -> ApiResult<Value> {
 
 /// Load `text` exactly as `indra serve` would, without writing anything.
 fn check_config(app: &App, c: &ConfigAccess, text: &str) -> ApiResult<Settings> {
-    let file = confedit::parse(text).map_err(|e| bad(format!("not saved: {}", e)))?;
+    // Checked with the organization's settings around it, as it will load.
+    let file = config::parse_layered(text).map_err(|e| bad(format!("not saved: {}", e)))?;
     let mut s = config::build_settings(&c.opts, Some(c.path.clone()), &file)
         .map_err(|e| bad(format!("not saved: {}", e)))?;
     // Where the console listens and whether it is read-only are fixed at start.
@@ -3544,6 +3618,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/nodes", get(nodes_list))
         .route("/api/nodes/enrol", post(node_enrol))
         .route("/api/nodes/enrol/{code}", get(node_enrol_status))
+        .route(
+            "/api/nodes/keys",
+            get(enroll_key_list).post(enroll_key_create),
+        )
+        .route(
+            "/api/nodes/keys/{id}",
+            axum::routing::delete(enroll_key_revoke),
+        )
         .route("/api/nodes/{name}", axum::routing::delete(node_remove))
         .route("/api/nodes/{name}/dirs", get(node_dirs))
         .route(

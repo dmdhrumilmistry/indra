@@ -1482,12 +1482,82 @@
     var refresh = h("button", { type: "button" }, "Check again");
     m.appendChild(header("Machines", "Computers your agents run on. Add one with a single command: no SSH, no open ports, and it reconnects by itself.",
       [canJoin() ? h("button", { type: "button", class: "primary", onclick: function () { addMachine(); } }, "Add a machine") : null,
+        canJoin() ? h("button", { type: "button", title: "One key for many machines: for Jamf, Intune or any script", onclick: function () { manyMachines(); } }, "Add many machines") : null,
         canEdit() ? h("a", { class: "btn", href: "#/settings/nodes", text: "Advanced (SSH)" }) : null, refresh]));
     var addBox = h("div"); m.appendChild(addBox);
     if (!canJoin() && S.ov.is_admin && S.ov.settings && S.ov.settings.join_locked)
       m.appendChild(h("div", { class: "note warn", text: "Machines cannot be added here: " + S.ov.settings.join_locked + "." }));
     var stopPoll = null;
     S.cleanup.push(function () { if (stopPoll) stopPoll(); });
+    // Many machines at once (MDM): an enrollment key, scripts that use it,
+    // and the keys made so far.
+    function manyMachines() {
+      if (stopPoll) stopPoll();
+      addBox.textContent = "";
+      var label = h("input", { type: "text", placeholder: "e.g. engineering laptops", "aria-label": "Label" });
+      var days = h("select", { "aria-label": "Valid for" }, [[7, "7 days"], [30, "30 days"], [90, "90 days"], [365, "a year"]].map(function (d) { return h("option", { value: String(d[0]), text: d[1] }); }));
+      days.value = "30";
+      var max = h("input", { type: "number", min: "1", placeholder: "no limit", "aria-label": "At most this many machines" });
+      var made = h("div"), list = h("div");
+      var card = h("div", { class: "card form" },
+        h("div", { class: "row" }, h("h2", { text: "Add many machines" }), h("button", { type: "button", class: "ghost", "aria-label": "Close", onclick: function () { addBox.textContent = ""; } }, "x")),
+        h("p", { class: "muted" }, "Make an enrollment key, then roll indra out with your device management (Jamf, Microsoft Intune, Kandji, ...) or any script: each machine installs indra and joins with the key. Unlike a one-time code, a key works for many machines until it expires, reaches its limit or you revoke it. See ",
+          h("a", { href: "https://github.com/dmdhrumilmistry/indra/blob/main/docs/guides/mdm.md", target: "_blank", rel: "noopener", text: "the MDM guide" }), "."),
+        h("form", { class: "fields", onsubmit: function (e) {
+          e.preventDefault();
+          var body = { label: label.value.trim(), days: Number(days.value) };
+          if (max.value) body.max_uses = Number(max.value);
+          api("/api/nodes/keys", { method: "POST", body: body }).then(function (k) { showKey(k); loadKeys(); })
+            .catch(function (err) { made.textContent = ""; made.appendChild(h("div", { class: "note bad", role: "alert", text: err.message })); });
+        } }, h("label", null, "Label", label), h("label", null, "Valid for", days), h("label", null, "At most (machines)", max),
+          h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Make a key"))),
+        made, h("h3", { text: "Keys" }), list);
+      addBox.appendChild(card);
+      function showKey(k) {
+        var J = k.hub + " " + k.key;
+        var scripts = {
+          jamf: "#!/bin/sh\n# Jamf Pro: Settings > Scripts, then a policy that runs it once per computer.\n# It installs indra for the signed-in user and joins this hub.\nuser=$(stat -f%Su /dev/console)\n{ [ -z \"$user\" ] || [ \"$user\" = root ]; } && exit 0\nlaunchctl asuser \"$(id -u \"$user\")\" sudo -u \"$user\" -H sh -c \"cd ~ && curl -fsSL " + INSTALL_SH + " | INDRA_JOIN='" + J + "' sh\"\n",
+          intune: "# Microsoft Intune: Devices > Scripts and remediations > Platform scripts > Add (Windows 10 and later).\n# Run this script using the logged on credentials: Yes. Run in 64-bit PowerShell: Yes.\nSet-Location $HOME\n$env:INDRA_JOIN = \"" + J + "\"\nirm " + INSTALL_PS + " | iex\n",
+          linux: "#!/bin/sh\n# Any Linux fleet tool (Ansible, Salt, a login script): as the user who will run agents.\ncd ~ && curl -fsSL " + INSTALL_SH + " | INDRA_JOIN='" + J + "' sh\n",
+          file: "# managed.toml in the organization's folder (deploy it with your MDM):\n#   macOS   /Library/Application Support/indra/managed.toml\n#   Linux   /etc/indra/managed.toml\n#   Windows C:\\ProgramData\\indra\\managed.toml\n# Then `indra join` with no arguments joins this hub.\n[join]\nhub = \"" + k.hub + "\"\nkey = \"" + k.key + "\"\n"
+        };
+        var tab = "jamf", tabs = h("div", { class: "tabs", role: "tablist" }), box = h("div");
+        function draw() {
+          tabs.textContent = ""; box.textContent = "";
+          [["jamf", "Jamf (macOS)"], ["intune", "Intune (Windows)"], ["linux", "Linux"], ["file", "Settings file"]].forEach(function (t) {
+            tabs.appendChild(h("button", { type: "button", role: "tab", class: t[0] === tab ? "on" : "", "aria-selected": String(t[0] === tab), onclick: function () { tab = t[0]; draw(); } }, t[1]));
+          });
+          box.appendChild(cmdBox(scripts[tab]));
+        }
+        draw();
+        made.textContent = "";
+        made.appendChild(h("div", { class: "card joined" },
+          h("h3", { text: "Key made: " + k.label }),
+          k.reachable ? null : h("div", { class: "note warn", text: "This console listens on this computer only, so machines cannot reach it yet: restart it with indra serve --bind 0.0.0.0:7878." }),
+          h("p", null, h("b", { text: "Copy it now: " }), "indra keeps only a fingerprint of it and cannot show it again."),
+          cmdBox(k.key), h("p", { class: "muted small", text: "Ready to use, with this hub and key filled in:" }), tabs, box));
+      }
+      function loadKeys() {
+        api("/api/nodes/keys").then(function (keys) {
+          list.textContent = "";
+          if (!keys.length) { list.appendChild(h("p", { class: "muted", text: "No keys yet." })); return; }
+          list.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+            h("thead", null, h("tr", null, ["Key", "State", "Machines", "Expires", ""].map(function (x) { return h("th", { text: x }); }))),
+            h("tbody", null, keys.map(function (k) {
+              return h("tr", null, h("td", null, h("b", { text: k.label }), h("div", { class: "muted small", text: "made " + ago(k.created) })),
+                h("td", null, h("span", { class: "pill " + (k.state === "active" ? "ok" : "warn"), text: k.state })),
+                h("td", { title: (k.machines || []).join(", "), text: k.uses + (k.max_uses ? " of " + k.max_uses : "") }),
+                h("td", { class: "muted", text: new Date(k.expires * 1000).toLocaleDateString() }),
+                h("td", null, k.state === "active" ? h("button", { type: "button", class: "ghost", onclick: function () {
+                  if (!confirm("Revoke " + k.label + "? Machines that joined with it stay; no new ones can.")) return;
+                  api("/api/nodes/keys/" + encodeURIComponent(k.id), { method: "DELETE" }).then(loadKeys).catch(function (e) { toast(e.message, true); });
+                } }, "Revoke") : null));
+            })))));
+        }).catch(function (e) { list.textContent = ""; list.appendChild(h("div", { class: "note bad", text: e.message })); });
+      }
+      loadKeys();
+      label.focus();
+    }
     // One click: a code, the command to run there, and then what joined.
     function addMachine() {
       if (stopPoll) stopPoll();
@@ -3523,6 +3593,11 @@
   function pageSettings(m, tab) {
     tab = TABS.some(function (t) { return t[0] === tab; }) ? tab : "general";
     m.appendChild(header("Settings", "Everything in indra.toml, edited here. Each save is checked first and applies at once; agents already running are not affected."));
+    var mg = S.ov.managed || {};
+    if (mg.error) m.appendChild(h("div", { class: "note bad", role: "alert", text: "Your organization's settings could not be read, so they are not applied: " + mg.error }));
+    else if ((mg.enforced || []).length) m.appendChild(h("div", { class: "note" }, h("b", { text: "Set by your organization: " }), mg.enforced.join(", "),
+      h("span", { class: "muted small", text: ". These come from " + mg.dir + " (managed.toml) and override what you set here." })));
+    else if (mg.defaults) m.appendChild(h("p", { class: "muted small", text: "Your organization's defaults (" + mg.dir + ", defaults.toml) apply where you set nothing else." }));
     var tabs = h("nav", { class: "tabs", "aria-label": "Settings sections" }, TABS.map(function (t) {
       return h("a", { href: "#/settings/" + t[0], class: t[0] === tab ? "on" : "", "aria-current": t[0] === tab ? "page" : null, text: t[1] });
     }));

@@ -117,6 +117,10 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] The process page lists the agent's MCP servers and says how to fix one that failed or
       needs a login
 - [x] The default Ollama server can be saved (Tools > Local models > Save as default)
+- [x] MDM roll-outs (Jamf, Intune, any script): reusable enrollment keys (expiry, machine limit,
+      revoke; stored hashed) with ready-made scripts; organization settings in `defaults.toml`
+      (under the user's) and `managed.toml` (enforced, shown in Settings); `[join]` lets
+      `indra join` run with no arguments; joining again is a no-op
 - [x] A simpler console: Home with a Get started checklist, a shorter menu with the rest under
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options

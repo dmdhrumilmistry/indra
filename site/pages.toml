@@ -76,6 +76,14 @@ file = "docs/guides/machines.md"
 
 [[page]]
 group = "Guides"
+slug = "mdm"
+title = "Rolling out with MDM"
+description = "Jamf, Intune and other MDM tools: one enrollment key for many machines, and organization-wide default or enforced settings."
+[[page.source]]
+file = "docs/guides/mdm.md"
+
+[[page]]
+group = "Guides"
 slug = "processes"
 title = "Handling agent processes"
 description = "Launch, watch, stop and clean up after agents; logs, capacity, permissions, troubleshooting."

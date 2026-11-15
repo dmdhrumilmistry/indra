@@ -355,6 +355,10 @@ pub fn needed(method: &str, path: &str) -> Role {
     {
         return Role::Admin;
     }
+    // Enrollment keys: admins only, even to list.
+    if under("/api/nodes/keys") {
+        return Role::Admin;
+    }
     // Browsing a machine's folders, and changing where agents work.
     if under("/api/nodes") && (path.ends_with("/dirs") || path.ends_with("/folders")) {
         return Role::Admin;
