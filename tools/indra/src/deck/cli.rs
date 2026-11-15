@@ -830,9 +830,12 @@ pub enum NodeCmd {
         /// Folders agents may work in here (repeatable; remembered)
         #[arg(long = "target")]
         targets: Vec<String>,
-        /// Never use the direct WebRTC path; relay everything through the hub
+        /// Never use the direct WebRTC path; relay everything through the hub (runs in the foreground)
         #[arg(long)]
         no_webrtc: bool,
+        /// Stay in this terminal instead of running in the background (Ctrl-C stops it)
+        #[arg(long)]
+        foreground: bool,
         /// Start in the background and return (what log-in autostart runs)
         #[arg(long, hide = true)]
         background: bool,
@@ -847,6 +850,11 @@ pub enum NodeCmd {
         /// New folders (replace the current ones)
         dirs: Vec<String>,
     },
+    /// Restart the link to the hub, e.g. after `indra update`, so it runs the new version.
+    /// Agents running on this machine stop.
+    Restart,
+    /// Stop the link until the next `indra node connect` (or the next sign-in). Agents running here stop.
+    Stop,
     /// Stop the link and forget the hub (remove the machine in the hub's console too)
     Leave,
 }
@@ -1165,8 +1173,40 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
             code,
             targets,
             no_webrtc,
+            foreground,
             background,
         } => {
+            use std::io::IsTerminal;
+            // Typed in a terminal: start the link in the background (and at
+            // sign-in) and return. A service, a supervisor or a log-in item
+            // has no terminal and runs it here, as do one-off options.
+            let attached = foreground
+                || code.is_some()
+                || hub.is_some()
+                || name.is_some()
+                || no_webrtc
+                || !std::io::stdout().is_terminal();
+            if !background && !attached {
+                let mut sv = crate::deck::link::saved().ok_or(
+                    "this machine has not joined a hub: in the hub's console, Machines > Add a machine, then run the command it shows here",
+                )?;
+                if !targets.is_empty() {
+                    sv.targets = abs_targets(&targets)?;
+                    for t in &sv.targets {
+                        if !std::path::Path::new(t).is_dir() {
+                            return Err(format!("{} is not a folder here", t));
+                        }
+                    }
+                    crate::deck::link::save(&sv)?;
+                }
+                let how = crate::deck::autostart::install(opts.config.as_deref())?;
+                println!(
+                    "Connected to {} as '{}', in the background: {}.",
+                    sv.hub, sv.name, how
+                );
+                println!("`indra node status` shows it, `indra node restart` restarts it, `indra node stop` stops it.");
+                return Ok(ExitCode::SUCCESS);
+            }
             if background {
                 let pid = crate::deck::autostart::spawn_background(opts.config.as_deref())?;
                 println!(
@@ -1206,7 +1246,7 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
             );
             match crate::deck::autostart::status() {
                 Some(how) => println!("runs as  {}", how),
-                None => println!("runs as  nothing keeps it running: `indra node connect` (or `indra join` again for the background)"),
+                None => println!("runs as  nothing keeps it running: `indra node connect` starts it in the background"),
             }
             println!("logs     {}", crate::deck::autostart::log_path().display());
             println!("key      {}", crate::deck::link::saved_path().display());
@@ -1241,6 +1281,26 @@ pub fn run_node(a: NodeArgs) -> Result<ExitCode, String> {
             } else {
                 println!("The next `indra node connect` uses them.");
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        NodeCmd::Restart => {
+            let sv = crate::deck::link::saved()
+                .ok_or("this machine has not joined a hub: `indra join <hub-url> <code>`")?;
+            let how = crate::deck::autostart::install(opts.config.as_deref())?;
+            println!(
+                "Restarted the link to {} as '{}' with indra {}: {}.",
+                sv.hub,
+                sv.name,
+                env!("CARGO_PKG_VERSION"),
+                how
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        NodeCmd::Stop => {
+            for d in crate::deck::autostart::stop() {
+                println!("{}", d);
+            }
+            println!("The link is stopped. `indra node connect` starts it again (it also starts at the next sign-in, if it was set up to).");
             Ok(ExitCode::SUCCESS)
         }
         NodeCmd::Leave => {

@@ -3,6 +3,29 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.12.1
+
+- **Ollama models that cannot load fail before the agent starts**, with what to do (update Ollama,
+  or pull the model again), instead of as an API error inside the agent.
+- **A run that ended in an error is not asked for learnings**, and an error in answer to the
+  learnings question is not proposed as one.
+- **Learnings are global.** Every harness has the global memory (shared by every project and agent),
+  and accepted learnings go there unless you pick another vault.
+- **Replies and README files render as Markdown** in Sessions and on run pages: headings,
+  lists, tables, quotes, links and code. HTML in them is shown as text, never run, and
+  images are never loaded.
+- **Why the context is big, and a smaller one.** The Context panel says how much the agent started
+  with before doing anything (Claude Code's instructions, the tools of each MCP server, skills,
+  CLAUDE.md). **MCP servers: none** (Run an agent > More options, or `mcp = "none"` in a profile)
+  starts it without MCP servers.
+
+- **`indra node restart`** restarts a machine's link to the hub, so it runs the version `indra
+  update` just installed. `indra update` says so on a joined machine. `indra node stop` stops it.
+- **`indra node connect` runs in the background** (and again at each sign-in) and gives the
+  terminal back; `--foreground` keeps it in the terminal as before.
+- A machine on an older indra than the hub gets a note on its card with what to run, and requests
+  it does not know yet say the same instead of "unknown request".
+
 ## v0.12.0
 
 - **Threat models.** `threat model this repo` (or the threat-model workflow) maps the data flows, draws

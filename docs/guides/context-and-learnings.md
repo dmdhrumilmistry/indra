@@ -23,6 +23,10 @@ example `{target}/.security-harness/memory` or `~/notes`), with how many notes a
 and how many links point nowhere. A vault the harness names but that does not exist yet can be
 created from there.
 
+Every harness also has the **global memory**, listed last: one vault shared by every harness,
+project and agent on this machine (`$INDRA_VAULT`, else `memory` in indra's data folder, the same
+vault `indra mem` uses outside a project). What you accept there is available to all of them.
+
 | Tab | What you can do |
 |---|---|
 | **Notes** | Search (ranked, with snippets), filter by type, read a note with its links and backlinks, edit its Markdown (a save is refused if the file changed since you opened it), link it to another note with a typed relation, delete it, or write a new one. |
@@ -84,7 +88,8 @@ You can add learnings yourself too: **Save a learning from this agent** on a pro
 
 Nothing reaches memory on its own. For each proposal:
 
-- **Accept into memory** writes it to the vault you pick as a `learning` note, with its source,
+- **Accept into memory** writes it to the vault you pick (the global memory unless you choose
+  another) as a `learning` note, with its source,
   tags and any links you add. A learning whose title matches an existing note is merged into it
   rather than duplicated.
 - **Save edits** keeps your changes and leaves it in the inbox.

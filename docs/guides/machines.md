@@ -104,8 +104,12 @@ Only admins can browse or change folders. A machine that is offline cannot be br
 | I want to... | Run on that machine |
 |---|---|
 | See which hub it joined and whether its link runs | `indra node status` |
-| Start the link by hand (after `--foreground`, or with no background service) | `indra node connect` |
+| Start the link (in the background, and again at each sign-in) | `indra node connect` |
+| Run the link in this terminal instead, to watch it (Ctrl+C stops it) | `indra node connect --foreground` |
+| Stop the link (until the next `connect` or sign-in) | `indra node stop` |
 | See or change the folders agents may work in | `indra node folders`, or `indra node folders D:\work D:\other` (restarts the link) |
+| Update indra, then use the new version | `indra update`, then `indra node restart` (agents running there stop) |
+| Restart the link (after an update, or when it seems stuck) | `indra node restart` |
 | Read its log | the path `indra node status` prints (Linux with systemd: `journalctl --user -u indra-node`) |
 | Leave the hub | `indra node leave` |
 
@@ -132,11 +136,15 @@ stop machines joining. It only stops other settings being edited from a browser,
 pass `--allow-remote-config`.)
 
 **The machine shows "offline".** On it, run `indra node status`. If nothing keeps the link
-running, `indra node connect` starts it. If it says the hub no longer knows the machine, it was
+running, `indra node connect` starts it in the background. If it says the hub no longer knows the machine, it was
 removed: join it again with a new code.
 
+**"unknown request" or "runs an older indra", or a yellow note on its card.** The machine runs an
+older indra than the hub. On it, run `indra update`, then `indra node restart`. Updating only
+replaces the program on disk: the link keeps running the old version until it restarts.
+
 **It joined, but has no agents.** Install Claude Code (or Codex, Gemini) on that machine, then
-restart its link (`indra node connect`, or sign out and in again). The background service uses
+restart its link (`indra node restart`). The background service uses
 the `PATH` from when you joined, so install agents before joining, or join again afterwards.
 
 ## Many machines at once

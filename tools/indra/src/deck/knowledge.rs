@@ -416,6 +416,7 @@ pub async fn vaults(
     Query(q): Query<VaultQ>,
 ) -> ApiResult<Json<Value>> {
     let h = app.harness(q.h.as_deref())?;
+    let global = crate::mem::vault::global();
     let list: Vec<Value> = h
         .memory_paths()
         .iter()
@@ -424,10 +425,10 @@ pub async fn vaults(
             Ok(v) if p.is_dir() => {
                 let g = Graph::build(&v);
                 let orphans = (0..v.notes.len()).filter(|&j| g.degree(j) == 0).count();
-                json!({ "index": i, "path": p.display().to_string(), "exists": true, "notes": v.notes.len(),
+                json!({ "index": i, "path": p.display().to_string(), "global": *p == global, "exists": true, "notes": v.notes.len(),
                         "links": g.edge_count(), "dangling": g.dangling.len(), "orphans": orphans })
             }
-            _ => json!({ "index": i, "path": p.display().to_string(), "exists": false, "notes": 0, "links": 0,
+            _ => json!({ "index": i, "path": p.display().to_string(), "global": *p == global, "exists": false, "notes": 0, "links": 0,
                          "dangling": 0, "orphans": 0 }),
         })
         .collect();

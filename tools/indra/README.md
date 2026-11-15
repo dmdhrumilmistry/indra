@@ -345,7 +345,7 @@ memory are under **More options**.
 | **Results** | Each run directory, live: stage progress, results per agent or class, status and severity counts, and every file the run wrote. A run with a threat model shows its trust boundaries (with the controls and gaps at each) and its threats ranked by risk, open ones first. Refreshes every 3 s. Start a pull request review from here; on a run, triage its findings, compare it with an earlier run, record it into memory, publish it or post it. See [Reviewing pull requests from the console](../../docs/guides/review-loop.md). |
 | **Marketplace** | Plugins, skills and agents from Claude Code plugin marketplaces (Anthropic's built in, add your own) and skill repositories: look inside, install for Claude Code, Codex or a harness, or as a Claude Code plugin; update and remove. See [Marketplace](../../docs/guides/marketplace.md). |
 | **Plan and delegate** | Under Run an agent: a planner profile writes a plan, you review and edit it, worker profiles (cheaper or local models) carry out each step, a reviewer checks the result; cost per role. See [Plan and delegate](../../docs/guides/plan-and-delegate.md). |
-| **Sessions** | Your agents as conversations, like Claude Code online: the sessions on the left (search, **+ New**, live status; kept across restarts of the console), the selected one in the middle (your messages, its replies, its tool steps folded to one line each, what it asks you with Allow and Deny, and a box to reply, queued while it works, or to continue it once it ended), and on the right where it works and what it did (machine, folder, git branch, agent and model, context used, tokens in and out with the share read from the prompt cache and the cost, its task list, the files it changed with their diffs, every other file in its folder to browse, and the pull requests it linked). Code shows with line numbers, in replies too. **Table view** is the older list of every process. |
+| **Sessions** | Your agents as conversations, like Claude Code online: the sessions on the left (search, **+ New**, live status; kept across restarts of the console), the selected one in the middle (your messages, its replies, its tool steps folded to one line each, what it asks you with Allow and Deny, and a box to reply, queued while it works, or to continue it once it ended), and on the right where it works and what it did (machine, folder, git branch, agent and model, context used (and how much of it the agent started with: instructions, MCP server tools, skills, CLAUDE.md), tokens in and out with the share read from the prompt cache and the cost, its task list, the files it changed with their diffs, every other file in its folder to browse, and the pull requests it linked). Replies and Markdown files (README.md and the like) are rendered: headings, lists, tables, quotes, links and code with line numbers, with a Source switch for files. Rendering never runs HTML, never loads images and links only to web addresses. **Table view** is the older list of every process. |
 | **Run an agent, Running** | Start an agent through a runner and follow it. With Claude Code you see every subagent it spawns, each subagent's own tool calls, refused permissions, the final cost, how full its context window is, and the memory it started with. Stop ends the whole process tree. |
 | **Board** | Work items in columns, run by agents with a profile, imported from and reported back to Jira, GitHub Issues or ClickUp. Items can be edited and removed, and the board exported to or imported from JSON. See [the board guide](../../docs/guides/board.md). |
 | **Terminal** | A real terminal in the browser (with `indra serve --shell`): your shell or Claude Code in a target, or an agent's own session. See [Terminals](#terminals). |
@@ -575,6 +575,12 @@ model          = "opus"
 subagent_model = "haiku"             # Claude Code's own subagents run on Haiku (CLAUDE_CODE_SUBAGENT_MODEL)
 
 [[profile]]
+name   = "lean"
+runner = "claude"
+model  = "sonnet"
+mcp    = "none"                      # no MCP servers: their tools are not loaded into the context
+
+[[profile]]
 name    = "learner"
 runner  = "claude"
 memory  = true                       # start with the memory notes relevant to the prompt
@@ -707,7 +713,8 @@ Agents can start with what earlier agents learned, and finish by proposing what 
   agent's input closes, it is asked what a future agent should know. Its answer, and learnings
   people add from a process page or `indra attach`, wait in **Knowledge > Learnings** with their
   source (process, session, profile, directory) until you accept one into a vault, as a
-  `learning` note, or discard it.
+  `learning` note, or discard it. Learnings go to the **global memory** unless you pick another
+  vault: every harness has it, so every agent on every project can be given them.
 - **Context meter.** Each process page shows the tokens in the agent's context against its
   model's window, so you can pivot before it fills up.
 - **Manage memory** on **Knowledge**: search, read, edit, link, create, download and delete

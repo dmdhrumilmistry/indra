@@ -1087,6 +1087,10 @@ pub struct ProfileCfg {
     /// low | medium | high | xhigh | max
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// MCP servers: "none" for an agent without any (a much smaller
+    /// context), or left out for Claude Code's own configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1127,6 +1131,7 @@ impl ProfileCfg {
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
             effort: self.effort.clone(),
+            mcp: self.mcp.clone(),
             allowed_tools: self.allowed_tools.clone(),
             disallowed_tools: self.disallowed_tools.clone(),
             env: {
@@ -1237,6 +1242,12 @@ impl Harness {
                     out.push(p);
                 }
             }
+        }
+        // The global vault, last, for every harness: what one agent learns
+        // is there for all of them.
+        let g = crate::mem::vault::global();
+        if !out.contains(&g) {
+            out.push(g);
         }
         out
     }
@@ -1685,7 +1696,7 @@ pub fn security_harness_profile(plugin: &Path, targets: &[PathBuf]) -> Harness {
         agent: agent.map(String::from),
         done_when: Some(done.into()),
     };
-    let global_memory = crate::mem::vault::locate(None);
+    let global_memory = crate::mem::vault::global();
     Harness {
         name: "indra".into(),
         description: "Multi-agent application-security review: recon, parallel hunters, chain, verify, report.".into(),

@@ -73,6 +73,16 @@ pub fn claude_env(
 }
 
 async fn call(base: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    call_for(base, method, path, body, 15).await
+}
+
+async fn call_for(
+    base: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    secs: u64,
+) -> Result<Value, String> {
     let mut h = HeaderMap::new();
     h.insert("accept", HeaderValue::from_static("application/json"));
     let bytes = match &body {
@@ -83,7 +93,7 @@ async fn call(base: &str, method: &str, path: &str, body: Option<Value>) -> Resu
         None => Bytes::new(),
     };
     let resp = tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(secs),
         router::forward(base, method, path, &h, bytes, true),
     )
     .await
@@ -102,6 +112,56 @@ async fn call(base: &str, method: &str, path: &str, body: Option<Value>) -> Resu
         return Err(msg);
     }
     Ok(v)
+}
+
+/// Ask Ollama to load `model` (an empty prompt only loads it), so a model
+/// the server cannot run fails here, with what to do, instead of as an API
+/// error inside the agent. A slow load is not an error: it goes on loading.
+pub async fn load(base: &str, model: &str) -> Result<(), String> {
+    router::check_url(base)?;
+    let body = json!({ "model": model, "prompt": "", "stream": false, "keep_alive": "10m" });
+    match call_for(base, "POST", "api/generate", Some(body), 20).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.ends_with(": no answer") => Ok(()),
+        Err(e) => Err(load_error(model, &e)),
+    }
+}
+
+/// What to do about an error Ollama gave loading `model`.
+pub fn load_error(model: &str, e: &str) -> String {
+    let l = e.to_ascii_lowercase();
+    let hint = if l.contains("gguf")
+        || l.contains("tensor")
+        || l.contains("unknown model architecture")
+        || l.contains("unsupported")
+    {
+        format!(
+            "This Ollama cannot read this model's files: update Ollama (ollama.com/download), then try again. If it still fails, the download may be damaged: `ollama rm {m}`, then `ollama pull {m}`.",
+            m = model
+        )
+    } else if l.contains("not found") {
+        format!("Pull it first: `ollama pull {}`.", model)
+    } else if l.contains("memory") {
+        "It needs more memory than this machine has free: close other models (`ollama ps`, `ollama stop <model>`) or pick a smaller one.".to_string()
+    } else {
+        "Check that `ollama run <model>` works on this machine.".replace("<model>", model)
+    };
+    format!("Ollama cannot load {}: {}. {}", model, e.trim(), hint)
+}
+
+/// Before an agent starts on Ollama: load the models it will use there.
+pub async fn ready(o: &crate::deck::nodes::AgentOpts) -> Result<(), String> {
+    let model = if o.provider.as_deref() == Some("ollama") {
+        o.model.clone()
+    } else if o.subagent_provider.as_deref() == Some("ollama") {
+        o.env.get("CLAUDE_CODE_SUBAGENT_MODEL").cloned()
+    } else {
+        None
+    };
+    match model.filter(|m| valid_model(m)) {
+        Some(m) => load(&o.ollama(), &m).await,
+        None => Ok(()),
+    }
 }
 
 /// Whether two names are the same model: `qwen3` is `qwen3:latest`.
@@ -377,6 +437,12 @@ mod tests {
                 })
             }))
             .route("/api/ps", get(|| async { axum::Json(json!({ "models": [{ "name": "qwen3:0.6b", "context_length": 4096 }] })) }))
+            .route("/api/generate", post(|axum::Json(b): axum::Json<Value>| async move {
+                if b["model"] == "broken" {
+                    return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "error": "read GGUF metadata \"blob\": unsupported tensor \"blk.0.ffn_down_exps.weight\" size overflows" })));
+                }
+                (axum::http::StatusCode::OK, axum::Json(json!({ "model": b["model"], "response": "", "done": true })))
+            }))
             .route("/api/pull", post(|axum::Json(b): axum::Json<Value>| async move {
                 if b["model"] == "nope" {
                     return "{\"error\":\"pull model manifest: file does not exist\"}\n".to_string();
@@ -421,6 +487,38 @@ mod tests {
         let c = check("http://127.0.0.1:9", "x").await;
         assert_eq!(c["reachable"], false);
         assert!(c["error"].as_str().unwrap().contains("ollama serve"));
+    }
+
+    #[tokio::test]
+    async fn models_that_cannot_load_fail_before_the_agent_starts() {
+        let url = fake().await;
+        assert!(load(&url, "qwen3:0.6b").await.is_ok());
+        let e = load(&url, "broken").await.unwrap_err();
+        assert!(
+            e.contains("Ollama cannot load broken")
+                && e.contains("update Ollama")
+                && e.contains("ollama pull broken"),
+            "{}",
+            e
+        );
+        let on = |provider: Option<&str>, sub: Option<&str>, model: &str| {
+            let mut o = crate::deck::nodes::AgentOpts {
+                model: Some(model.into()),
+                provider: provider.map(String::from),
+                subagent_provider: sub.map(String::from),
+                ollama_url: Some(url.clone()),
+                ..Default::default()
+            };
+            o.env
+                .insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), model.into());
+            o
+        };
+        assert!(ready(&on(Some("ollama"), None, "broken")).await.is_err());
+        assert!(ready(&on(None, Some("ollama"), "broken")).await.is_err());
+        assert!(ready(&on(Some("ollama"), None, "qwen3:0.6b")).await.is_ok());
+        // Not on Ollama, or not a model name: nothing is asked.
+        assert!(ready(&on(None, None, "broken")).await.is_ok());
+        assert!(ready(&on(Some("ollama"), None, "../x")).await.is_ok());
     }
 
     #[tokio::test]

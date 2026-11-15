@@ -649,7 +649,7 @@
           var pick = function () { go(tab === "learnings" ? "notes" : tab, x.index); };
           return h("div", { class: "vault" + (x.index === cur ? " sel" : ""), role: "listitem", tabindex: "0", title: x.path,
             onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
-            h("span", { class: "vlabel", text: vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
+            h("span", { class: "vlabel", text: x.global ? "Global memory (every agent)" : vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
             h("code", { class: "vpath", text: x.path }),
             x.exists ? h("span", { class: "vstats" },
               h("span", null, h("b", { text: String(x.notes) }), " notes"),
@@ -813,12 +813,14 @@
 
     function learnings(vaults, cur) {
       var holder = h("div", { class: "stack" });
-      body.appendChild(h("p", { class: "muted", text: "Agents launched with \"Ask for learnings\" (or a profile with reflect = true) propose what they learned before they finish. Nothing reaches memory until you accept it: it then becomes a learning note, with where it came from, and later agents are given it when it is relevant." }));
+      body.appendChild(h("p", { class: "muted", text: "Agents launched with \"Ask for learnings\" (or a profile with reflect = true) propose what they learned before they finish. Nothing reaches memory until you accept it: it then becomes a learning note, with where it came from, in the global memory unless you pick another vault, so every agent on every project can be given it when it is relevant." }));
       body.appendChild(holder);
       var existing = vaults.filter(function (v) { return true; });
       function vaultSelect() {
-        var s = h("select", { "aria-label": "Vault" }, existing.map(function (v) { return h("option", { value: String(v.index), text: v.path + (v.exists ? "" : " (created on accept)") }); }));
-        s.value = String(cur);
+        var s = h("select", { "aria-label": "Vault" }, existing.map(function (v) { return h("option", { value: String(v.index), text: (v.global ? "Global memory (every agent): " : "") + v.path + (v.exists ? "" : " (created on accept)") }); }));
+        // Learnings go to the global memory unless you pick another vault.
+        var g = existing.find(function (v) { return v.global; });
+        s.value = String(g ? g.index : cur);
         return s;
       }
       function load() {
@@ -1371,6 +1373,10 @@
       api("/api/run/file" + hq({ key: key, rel: rel })).then(function (f) {
         viewer.textContent = "";
         viewer.appendChild(h("div", { class: "row" }, h("b", { text: f.rel }), f.truncated ? h("span", { class: "pill warn", text: "showing the end of a large file" }) : null, h("span", { class: "muted", text: ago(f.modified) })));
+        if (/\.(md|markdown)$/i.test(f.rel) && !f.truncated && f.text) {
+          viewer.appendChild(h("div", { class: "view md-view" }, mdOrSource(f.text)));
+          return;
+        }
         var pre = h("pre", { class: "view", text: f.text || "(empty)" });
         viewer.appendChild(pre);
         if (f.truncated) pre.scrollTop = pre.scrollHeight;
@@ -1439,6 +1445,7 @@
         MODES.map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var effort = h("select", { "aria-label": "Effort" }, h("option", { value: "", text: "default" }),
         ["low", "medium", "high", "xhigh", "max"].map(function (x) { return h("option", { value: x, text: x }); }));
+      var mcp = h("select", { "aria-label": "MCP servers" }, [["", "default"], ["all", "all, as Claude Code is set up"], ["none", "none: a much smaller context"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var where = h("select", { "aria-label": "Runs on" }, [["", "as configured"], ["anthropic", "Anthropic (the runner's own setup)"], ["ollama", "Ollama: the whole agent on a local model"],
         ["subagents", "Anthropic, with its subagents on Ollama"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var subModel = h("input", { type: "text", list: "models", "aria-label": "Subagent model", placeholder: "an Ollama model, e.g. qwen3-coder" });
@@ -1453,10 +1460,11 @@
         model.placeholder = p.model || "default"; mode.options[0].text = p.permission_mode ? "profile: " + p.permission_mode : "default";
         where.options[0].text = p.provider === "ollama" ? "profile: Ollama" : p.subagent_provider === "ollama" ? "profile: subagents on Ollama" : "as configured";
         effort.options[0].text = p.effort ? "profile: " + p.effort : "default";
+        mcp.options[0].text = p.mcp === "none" ? "profile: none" : "default (all, as Claude Code is set up)";
         update();
       }
       profile.addEventListener("change", fillProfile);
-      [model, mode, effort, where, subModel].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
+      [model, mode, effort, mcp, where, subModel].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
       var preview = h("div", { class: "cmd" });
       var go = h("button", { class: "primary", type: "submit" }, "Run");
       function cur() { return nodes.find(function (n) { return n.name === node.value; }) || nodes[0]; }
@@ -1476,6 +1484,7 @@
           if (r && r.format === "claude-stream-json") {
             [["--model", model.value || pr.model], ["--permission-mode", mode.value || pr.permission_mode], ["--effort", effort.value || pr.effort]]
               .forEach(function (f) { if (f[1]) extra.push(f[0], f[1]); });
+            if ((mcp.value || pr.mcp) === "none") extra.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
           }
           var viaStdin = r && r.format === "claude-stream-json" && r.args.indexOf("{prompt}") >= 0;
           preview.textContent = r ? [r.command].concat(r.args.filter(function (a) { return !(viaStdin && a === "{prompt}"); })
@@ -1528,6 +1537,7 @@
         if (model.value.trim()) o.model = model.value.trim();
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
+        if (mcp.value) o.mcp = mcp.value;
         if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
         if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
         api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
@@ -1540,7 +1550,7 @@
         note,
         h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, memory" }),
           h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
-          h("div", { class: "fields" }, h("label", null, "Runs on", where), subLabel),
+          h("div", { class: "fields" }, h("label", null, "MCP servers", mcp, h("small", { text: "Each server's tools fill the context before the agent does anything." })), h("label", null, "Runs on", where), subLabel),
           pfNote,
           modelList(),
           h("div", { class: "knowctl" },
@@ -1769,6 +1779,11 @@
     }
     // Where agents work on a machine: a list to edit, and a folder browser
     // that walks the machine's folders (names only) over its link.
+    function olderThan(a, b) {
+      var x = String(a || "").split(/[.-]/).map(Number), y = String(b || "").split(/[.-]/).map(Number);
+      for (var k = 0; k < 3; k++) { if ((x[k] || 0) !== (y[k] || 0)) return (x[k] || 0) < (y[k] || 0); }
+      return false;
+    }
     function folderEditor(n, box) {
       var list = n.targets.slice();
       var listBox = h("div", { class: "files" }), err = h("div", { class: "note bad", role: "alert", hidden: true });
@@ -1838,6 +1853,8 @@
               return h("div", { class: "stat" }, h("b", { class: "small", text: x[1] }), h("span", { text: x[0] }));
             })) : h("div", { class: "note bad" }, n.ssh ? (n.error || "not checked yet") : "Not connected. It reconnects by itself when it is back on. On that machine, `indra node status` says why, and `indra node connect` starts the link.",
               !n.ssh && canJoin() ? h("div", { class: "row" }, h("button", { type: "button", class: "ghost", title: "If it left or was reinstalled: a new command to join again", onclick: function () { addMachine(); } }, "Get a new join command")) : null),
+          ok && n.kind !== "local" && i.version && olderThan(i.version, S.ov.version) ? h("div", { class: "note warn" },
+            "This machine runs indra " + i.version + " and the hub " + S.ov.version + ", so some things here will not work. On it, run ", h("code", { text: "indra update" }), ", then ", h("code", { text: "indra node restart" }), ".") : null,
           meter(n.running, n.max_parallel),
           ok ? [h("h3", { text: "Agents installed" }), h("div", { class: "chips" }, i.runners.map(function (r) { return h("span", { class: "pill " + (r.available ? "ok" : ""), text: r.name + (r.available ? "" : " (not installed)") }); }))] : null,
           h("div", { class: "row" }, h("h3", { text: "Folders agents work in" }),
@@ -2411,22 +2428,124 @@
   }
   // An agent's reply: fenced code as code blocks, `inline code` as code, the
   // rest as text (no HTML is ever interpreted).
+  // Markdown, rendered safely: DOM nodes and text only (never innerHTML),
+  // links only to http(s) addresses, no images (an agent's or a file's
+  // Markdown must not fetch anything), raw HTML shown as text. Block parsing
+  // is line by line and the inline patterns use negated classes, so the work
+  // stays linear in the size of the text.
+  var MD_INLINE = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|!?\[([^\]\n]{0,300})\]\(([^()\s]{1,2000})\)|(https?:\/\/[^\s<>()\]]+[^\s<>()\].,;:!?'"])|\*([^*\n]+)\*|\b_([^_\n]+)_\b/g;
+  function mdInline(text, el) {
+    var t = String(text), last = 0, m;
+    MD_INLINE.lastIndex = 0;
+    while ((m = MD_INLINE.exec(t))) {
+      if (m.index > last) el.appendChild(document.createTextNode(t.slice(last, m.index)));
+      if (m[1] != null) el.appendChild(h("code", { text: m[1] }));
+      else if (m[2] != null || m[3] != null) el.appendChild(h("strong", { text: m[2] != null ? m[2] : m[3] }));
+      else if (m[4] != null) el.appendChild(h("del", { text: m[4] }));
+      else if (m[6] != null) {
+        var url = safeUrl(m[6]), label = m[5] || m[6];
+        el.appendChild(url ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer", text: label }) : document.createTextNode(label));
+      } else if (m[7] != null) el.appendChild(h("a", { href: m[7], target: "_blank", rel: "noopener noreferrer", text: m[7] }));
+      else el.appendChild(h("em", { text: m[8] != null ? m[8] : m[9] }));
+      last = MD_INLINE.lastIndex;
+    }
+    if (last < t.length) el.appendChild(document.createTextNode(t.slice(last)));
+    return el;
+  }
+  // A table's separator row (|---|:--:|): character classes only, linear.
+  function mdIsSep(line) {
+    var t = line.trim();
+    return t.indexOf("|") >= 0 && t.indexOf("--") >= 0 && /^[|:\- \t]+$/.test(t);
+  }
+  function mdCells(line) {
+    var x = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    return x.split("|").map(function (c) { return c.trim(); });
+  }
   function mdBody(text) {
     var out = h("div", { class: "body md" });
-    String(text || "").split(/^```/m).forEach(function (part, i) {
-      if (i % 2 === 1) {
-        var nl = part.indexOf("\n"), lang = nl > 0 ? part.slice(0, nl).trim() : "";
-        out.appendChild(codeView(nl >= 0 ? part.slice(nl + 1).replace(/\n$/, "") : part, { lang: lang, compact: true }));
-        return;
+    var lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"), i = 0, para = [];
+    function flush() {
+      if (!para.length) return;
+      out.appendChild(mdInline(para.join("\n"), h("p")));
+      para = [];
+    }
+    while (i < lines.length) {
+      var l = lines[i], m;
+      if ((m = /^\s*(```+|~~~+)\s*([\w+#.-]*)/.exec(l))) {
+        flush();
+        var fence = m[1], body = [];
+        i++;
+        while (i < lines.length && lines[i].trim().indexOf(fence) !== 0) { body.push(lines[i]); i++; }
+        i++;
+        out.appendChild(codeView(body.join("\n"), { lang: m[2], compact: true }));
+        continue;
       }
-      var p = h("div", { class: "prose" });
-      part = part.replace(/^\n+|\n+$/g, "");
-      part.split(/(`[^`\n]+`)/).forEach(function (seg) {
-        if (/^`[^`]+`$/.test(seg)) p.appendChild(h("code", { text: seg.slice(1, -1) }));
-        else if (seg) p.appendChild(document.createTextNode(seg));
-      });
-      if (part.trim()) out.appendChild(p);
-    });
+      if (!l.trim()) { flush(); i++; continue; }
+      if ((m = /^ {0,3}(#{1,6})[ \t]+(.*)$/.exec(l))) {
+        flush();
+        // Closing #s are dropped by hand: a regex for them backtracks badly.
+        var ht = m[2].trim(), hj = ht.length;
+        while (hj && ht.charAt(hj - 1) === "#") hj--;
+        if (hj < ht.length && (hj === 0 || ht.charAt(hj - 1) === " ")) ht = ht.slice(0, hj).trim();
+        out.appendChild(mdInline(ht, h("div", { class: "md-h md-h" + m[1].length, role: "heading", "aria-level": String(Math.min(6, m[1].length + 2)) })));
+        i++; continue;
+      }
+      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l)) { flush(); out.appendChild(h("hr")); i++; continue; }
+      if (/^\s*>/.test(l)) {
+        flush();
+        var quote = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { quote.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+        var bq = h("blockquote"); bq.appendChild(mdBody(quote.join("\n"))); out.appendChild(bq);
+        continue;
+      }
+      if (/\|/.test(l) && i + 1 < lines.length && mdIsSep(lines[i + 1])) {
+        flush();
+        var head = mdCells(l), rows = [];
+        i += 2;
+        while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim()) { rows.push(mdCells(lines[i])); i++; }
+        out.appendChild(h("div", { class: "tablewrap" }, h("table", null,
+          h("thead", null, h("tr", null, head.map(function (c) { return mdInline(c, h("th")); }))),
+          h("tbody", null, rows.map(function (r) { return h("tr", null, head.map(function (_, k) { return mdInline(r[k] || "", h("td")); })); })))));
+        continue;
+      }
+      if (/^\s*([-*+]|\d{1,9}[.)])\s+/.test(l)) {
+        flush();
+        // A list, nested by indentation.
+        var stack = [];
+        while (i < lines.length && lines[i].trim()) {
+          var it = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/.exec(lines[i]);
+          if (!it && /^\s*(#{1,6}\s|>|```|~~~|\|)/.test(lines[i])) break;
+          if (!it) {
+            // A continuation line of the item above.
+            var lastLi = stack.length ? stack[stack.length - 1].list.lastChild : null;
+            if (lastLi) { lastLi.appendChild(document.createTextNode(" ")); mdInline(lines[i].trim(), lastLi); }
+            i++; continue;
+          }
+          var ind = it[1].replace(/\t/g, "  ").length, ordered = /\d/.test(it[2]);
+          while (stack.length && ind < stack[stack.length - 1].ind) stack.pop();
+          // A bullet list followed by a numbered one (or back) at the same depth.
+          if (stack.length && ind === stack[stack.length - 1].ind && (stack[stack.length - 1].list.tagName === "OL") !== ordered) {
+            var was = stack.pop();
+            if (!stack.length) { var fresh = h(ordered ? "ol" : "ul"); was.list.after(fresh); stack.push({ ind: ind, list: fresh }); }
+          }
+          if (!stack.length || ind > stack[stack.length - 1].ind) {
+            var list = h(ordered ? "ol" : "ul");
+            if (stack.length && stack[stack.length - 1].list.lastChild) stack[stack.length - 1].list.lastChild.appendChild(list);
+            else out.appendChild(list);
+            stack.push({ ind: ind, list: list });
+          }
+          var top = stack[stack.length - 1].list, li = h("li"), task = /^\[([ xX])\]\s+(.*)$/.exec(it[3]);
+          if (task) { li.className = "task"; li.appendChild(h("span", { class: "tick", text: task[1] === " " ? "○ " : "✓ " })); mdInline(task[2], li); }
+          else mdInline(it[3], li);
+          top.appendChild(li);
+          i++;
+        }
+        continue;
+      }
+      para.push(l.trim());
+      i++;
+    }
+    flush();
     return out;
   }
   // Code with line numbers; a diff gets its lines coloured and numbered on
@@ -2454,6 +2573,19 @@
     return h("div", { class: "code-wrap" }, o.lang ? h("div", { class: "code-lang", text: o.lang }) : null, tbl);
   }
   // A wide dialog for a diff or a file.
+  // A Markdown file: rendered, with a switch to its source.
+  function mdOrSource(text) {
+    var box = h("div"), shown = mdBody(text), src = null;
+    var sw = h("button", { type: "button", class: "ghost small", onclick: function () {
+      if (!src) src = codeView(text, {});
+      var showSrc = sw.textContent === "Source";
+      box.replaceChild(showSrc ? src : shown, showSrc ? shown : src);
+      sw.textContent = showSrc ? "Rendered" : "Source";
+    } }, "Source");
+    box.appendChild(h("div", { class: "row" }, sw));
+    box.appendChild(shown);
+    return box;
+  }
   function codeDialog(title, body) {
     var wrap = h("label", { class: "check small" }, h("input", { type: "checkbox", onchange: function (e) { dlg.classList.toggle("wrap", e.target.checked); } }), " Wrap lines");
     var dlg = h("dialog", { class: "ask wide code", "aria-label": title },
@@ -2576,6 +2708,12 @@
         var fill = h("i"); fill.style.width = pct + "%";
         var cx = sec("Context");
         cx.appendChild(h("div", { class: "row" }, h("div", { class: "meter" + (pct > 80 ? " low" : "") }, fill), h("span", { class: "small", text: pct + "% of " + Math.round(p.context_window / 1000) + "k" })));
+        if (p.base_tokens) {
+          var servers = (p.mcp || []).length, kb = Math.round(p.base_tokens / 1000);
+          cx.appendChild(h("p", { class: "muted small", text: kb + "k of it was there at its first reply: Claude Code's own instructions and tools" +
+            (servers ? ", the tools of " + servers + " MCP server" + (servers === 1 ? "" : "s") : "") + ", the skills and subagents it can call, CLAUDE.md files and the prompt." +
+            (p.base_tokens > 30000 && servers ? " To start smaller, run it with MCP servers: none (Run an agent > More options, or in its profile)." : "") }));
+        }
         if (pct > 60) cx.appendChild(h("p", { class: "muted small", text: "Every turn re-reads this context. For an unrelated task, start a new session: it costs less." }));
       }
       // Tokens over the whole session (all its continuations).
@@ -2625,7 +2763,7 @@
       api("/api/procs/" + id + "/file" + q({ path: path })).then(function (f) {
         var body = f.binary ? h("p", { class: "muted", text: "A binary file (" + bytes(f.size) + "): not shown." })
           : f.too_big ? h("p", { class: "muted", text: "Larger than 1 MB (" + bytes(f.size) + "): not shown." })
-          : codeView(f.text, {});
+          : /\.(md|markdown)$/i.test(path) ? mdOrSource(f.text) : codeView(f.text, {});
         codeDialog(path, body);
       }).catch(function (e) { toast(e.message, true); });
     }
@@ -4064,6 +4202,7 @@
       { k: "ollama_url", label: "Ollama server", placeholder: "http://localhost:11434", help: "Another machine's Ollama, e.g. http://gpu-box:11434. Leave empty for this machine." },
       { k: "permission_mode", label: "Permission mode", type: "select", options: [["", "default"]].concat(MODES) },
       { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
+      { k: "mcp", label: "MCP servers", type: "select", options: [["", "as Claude Code is set up"], ["none", "none: a much smaller context"]], help: "Each MCP server's tools fill the agent's context before it does anything. Choose none for agents that do not need them." },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
       { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. CLAUDE_CODE_MAX_OUTPUT_TOKENS=8000. For Ollama, use Runs on above instead of setting ANTHROPIC_BASE_URL here. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },

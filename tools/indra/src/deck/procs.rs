@@ -112,6 +112,10 @@ pub struct ProcView {
     /// What its runs used, from Claude Code's result: fresh input, output,
     /// and input read from or written to the prompt cache.
     pub tokens: Option<Tokens>,
+    /// Its context at its first reply: mostly what it starts with before
+    /// doing anything (instructions, tool and MCP server definitions,
+    /// skills, CLAUDE.md, the prompt).
+    pub base_tokens: Option<u64>,
     /// MCP servers Claude Code reported at start: name and status
     /// (connected, failed, needs-auth, pending).
     pub mcp: Vec<(String, String)>,
@@ -166,10 +170,14 @@ struct State {
     /// 0: not asked for learnings, 1: asked, 2: answered.
     reflect_state: u8,
     last_result: String,
+    /// The last turn ended in an error (an API error, a failed run): no
+    /// learnings are asked for then.
+    last_failed: bool,
     reflection: Option<String>,
     context_tokens: Option<u64>,
     context_window: Option<u64>,
     tokens: Option<Tokens>,
+    base_tokens: Option<u64>,
     mcp: Vec<(String, String)>,
     files: Vec<String>,
     todos: Value,
@@ -199,10 +207,12 @@ impl State {
             next_request: 0,
             reflect_state: 0,
             last_result: String::new(),
+            last_failed: false,
             reflection: None,
             context_tokens: None,
             context_window: None,
             tokens: None,
+            base_tokens: None,
             mcp: Vec::new(),
             files: Vec::new(),
             todos: Value::Null,
@@ -302,6 +312,8 @@ struct Saved {
     context_window: Option<u64>,
     #[serde(default)]
     tokens: Option<Tokens>,
+    #[serde(default)]
+    base_tokens: Option<u64>,
     mcp: Vec<(String, String)>,
     files: Vec<String>,
     todos: Value,
@@ -358,6 +370,7 @@ impl Proc {
                 context_tokens: st.context_tokens,
                 context_window: st.context_window,
                 tokens: st.tokens.clone(),
+                base_tokens: st.base_tokens,
                 mcp: st.mcp.clone(),
                 files: st.files.clone(),
                 todos: st.todos.clone(),
@@ -421,6 +434,7 @@ impl Proc {
         st.context_tokens = sv.context_tokens;
         st.context_window = sv.context_window;
         st.tokens = sv.tokens;
+        st.base_tokens = sv.base_tokens;
         st.mcp = sv.mcp;
         st.files = sv.files;
         st.todos = sv.todos;
@@ -540,6 +554,7 @@ impl Proc {
             context_tokens: st.context_tokens,
             context_window: st.context_window,
             tokens: st.tokens.clone(),
+            base_tokens: st.base_tokens,
             mcp: st.mcp.clone(),
             files: st.files.clone(),
             todos: st.todos.clone(),
@@ -682,11 +697,19 @@ impl Proc {
             st.turns = st.turns.saturating_sub(1);
             if st.reflect_state == 1 && st.turns == 0 {
                 st.reflect_state = 2;
-                st.reflection = Some(std::mem::take(&mut st.last_result));
+                // An error is not a learning.
+                let r = std::mem::take(&mut st.last_result);
+                if !st.last_failed {
+                    st.reflection = Some(r);
+                }
             }
             if !(st.interactive && st.open && st.turns == 0) {
                 Next::Wait
-            } else if self.reflect && st.reflect_state == 0 && st.status == "running" {
+            } else if self.reflect
+                && st.reflect_state == 0
+                && st.status == "running"
+                && !st.last_failed
+            {
                 st.reflect_state = 1;
                 st.turns += 1;
                 Next::Reflect
@@ -949,7 +972,9 @@ impl Proc {
                             + n("cache_creation_input_tokens")
                             + n("output_tokens");
                         if total > 0 {
-                            self.state.lock().unwrap().context_tokens = Some(total);
+                            let mut st = self.state.lock().unwrap();
+                            st.context_tokens = Some(total);
+                            st.base_tokens.get_or_insert(total);
                         }
                     }
                 }
@@ -1011,6 +1036,8 @@ impl Proc {
                 {
                     let mut st = self.state.lock().unwrap();
                     st.last_result = r.clone();
+                    st.last_failed = s(&v, "subtype") != "success"
+                        || v.get("is_error").and_then(Value::as_bool) == Some(true);
                     if let Some(u) = v.get("usage") {
                         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                         let t = st.tokens.get_or_insert_with(Tokens::default);
@@ -2188,10 +2215,12 @@ mod tests {
                 next_request: 0,
                 reflect_state: 0,
                 last_result: String::new(),
+                last_failed: false,
                 reflection: None,
                 context_tokens: None,
                 context_window: None,
                 tokens: None,
+                base_tokens: None,
                 mcp: Vec::new(),
                 files: Vec::new(),
                 todos: Value::Null,

@@ -761,6 +761,9 @@ pub async fn run_job(
             target.display()
         ));
     }
+    if let Err(e) = crate::deck::ollama::ready(&job.opts).await {
+        return fail(e);
+    }
     let ac = match agent_command(runner, &job.prompt, &target, job.resume.as_ref(), &job.opts) {
         Ok(x) => x,
         Err(e) => return fail(e),
@@ -861,6 +864,12 @@ pub const PERMISSION_MODES: [&str; 7] = [
 /// Claude Code's effort levels.
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// `mcp` values: "all" is Claude Code's own configuration (the same as
+/// leaving it out), "none" no MCP server at all. There is deliberately no
+/// "the folder's .mcp.json": handing a repository's file to --mcp-config
+/// would skip Claude Code's prompt to trust that project's servers.
+pub const MCP_CHOICES: [&str; 2] = ["all", "none"];
+
 /// How to run one agent, beyond its prompt: usually from a profile, and
 /// overridable per launch.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -871,6 +880,11 @@ pub struct AgentOpts {
     pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// MCP servers for a Claude Code agent: "none" starts it without any
+    /// (each server's tools fill its context before it does anything);
+    /// unset, as Claude Code is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -991,6 +1005,14 @@ impl AgentOpts {
                 return Err(format!("effort must be one of {}", EFFORTS.join(", ")));
             }
         }
+        if let Some(m) = &self.mcp {
+            if !MCP_CHOICES.contains(&m.as_str()) {
+                return Err(format!(
+                    "mcp must be one of {} (or left out)",
+                    MCP_CHOICES.join(", ")
+                ));
+            }
+        }
         for t in self.allowed_tools.iter().chain(&self.disallowed_tools) {
             word("tool rule", t, 300)?;
             if t.contains(',') {
@@ -1023,6 +1045,9 @@ impl AgentOpts {
         }
         if other.effort.is_some() {
             o.effort = other.effort.clone();
+        }
+        if other.mcp.is_some() {
+            o.mcp = other.mcp.clone();
         }
         if !other.allowed_tools.is_empty() {
             o.allowed_tools = other.allowed_tools.clone();
@@ -1140,16 +1165,28 @@ pub fn agent_command(
         }
         if o.permission_mode.is_some()
             || o.effort.is_some()
+            || o.mcp.as_deref() == Some("none")
             || !o.allowed_tools.is_empty()
             || !o.disallowed_tools.is_empty()
         {
             return Err(format!(
-                "runner '{}' is not Claude Code, so permission mode, effort and tool rules do not apply to it",
+                "runner '{}' is not Claude Code, so permission mode, effort, MCP servers and tool rules do not apply to it",
                 r.name
             ));
         }
     }
     let env = provider_env(r, claude, o, &mut args)?;
+    if claude && o.mcp.as_deref() == Some("none") {
+        // Last, as --mcp-config takes every value up to the next flag.
+        args.extend(
+            [
+                "--strict-mcp-config",
+                "--mcp-config",
+                r#"{"mcpServers":{}}"#,
+            ]
+            .map(String::from),
+        );
+    }
     Ok(AgentCommand {
         program,
         args,
@@ -1398,6 +1435,53 @@ mod tests {
         assert!(agent_command(&codex, "go", t, None, &o)
             .unwrap_err()
             .contains("no subagents"));
+    }
+
+    #[test]
+    fn agents_can_start_without_mcp_servers() {
+        let t = std::path::Path::new("/t");
+        let claude = runner("claude", "claude-stream-json", &["-p", "{prompt}"], &[]);
+        let gemini = runner("gemini", "text", &["-p", "{prompt}"], &["-m", "{model}"]);
+        let none = AgentOpts {
+            mcp: Some("none".into()),
+            ..Default::default()
+        };
+        let ac = agent_command(&claude, "go", t, None, &none).unwrap();
+        // Last, so --mcp-config takes nothing else as a value.
+        assert_eq!(
+            &ac.args[ac.args.len() - 3..],
+            [
+                "--strict-mcp-config",
+                "--mcp-config",
+                r#"{"mcpServers":{}}"#
+            ]
+        );
+        // "all", or nothing, leaves Claude Code's own configuration; a
+        // launch's "all" wins over a profile's "none".
+        let all = AgentOpts {
+            mcp: Some("all".into()),
+            ..Default::default()
+        };
+        for o in [&all, &AgentOpts::default(), &none.with(&all)] {
+            let ac = agent_command(&claude, "go", t, None, o).unwrap();
+            assert!(!ac.args.iter().any(|a| a.contains("mcp")), "{:?}", ac.args);
+        }
+        // Nothing else is accepted (no repository .mcp.json: it would skip
+        // Claude Code's trust prompt), and other runners say it does not apply.
+        for bad in ["project", "./.mcp.json", ""] {
+            let o = AgentOpts {
+                mcp: Some(bad.into()),
+                ..Default::default()
+            };
+            assert!(
+                agent_command(&claude, "go", t, None, &o).is_err(),
+                "{}",
+                bad
+            );
+        }
+        assert!(agent_command(&gemini, "go", t, None, &none)
+            .unwrap_err()
+            .contains("MCP servers"));
     }
 
     #[test]
