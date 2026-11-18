@@ -5,26 +5,28 @@ section from this file.
 
 ## v0.13.0
 
-- **Status pad** (`#/pad` in the console): one key per session, with the ones waiting for you
-  first, then the ones at work, then what just finished. Each key has an orb whose colour is the
-  agent's phase (approval, question, error, tool, writing, thinking, compacting, done) and whose
-  motion follows the kind of tool in use (reading, editing, running a command, the web,
-  delegating). The phase is always written next to it, so colour is never the only signal.
-- **The hub** says how many requests wait and opens them one after another, the longest-waiting
-  first. Keys `1`-`9` open a key and Enter opens the next request.
+- **Status** (`#/pad` in the console): every session in one list, the ones waiting for you
+  first, then the ones at work, then what just finished. Each row has a small animated symbol
+  that moves while the agent works (a spinner while it thinks, a cursor while it writes, its own
+  motion for reading, editing, running a command, the web and subagents) and holds still while it
+  waits for you (`!` for an approval, `?` for a question) or has finished (a tick or a cross). The
+  state is always written beside it, so neither the symbol nor its colour is the only signal.
+- A notice at the top says how many requests wait and opens them one after another, the
+  longest-waiting first. Keys `1`-`9` open a row and Enter opens the next request.
 - **Hold to allow.** Allowing a tool request now takes a 0.6 s press and hold (pointer, Enter or
   Space), so a stray tap or click never approves anything. Deny is still one tap, with an optional
-  reason. This applies on the pad, in Sessions and on a process page.
+  reason. This applies on Status, in Sessions and on a process page.
 - **Answer an agent's questions from the console.** Claude Code's `AskUserQuestion` shows as
   numbered options (single or multiple choice, or your own text). Pick one, then hold Send. The API
   takes `answers` on `POST /api/procs/{id}/permission` and accepts only the questions that were
   asked.
 - **Alerts**: a desktop notification (or a toast while you look at the console) and an optional
-  chime when an agent asks for you or finishes. They are off by default and switched on from the
-  pad. They work on every page.
-- **A refreshed console**: indra's own indigo, sky and gold palette with a deep navy dark theme,
-  a sidebar in sections (Work, Know, Set up), clearer focus rings and buttons, and the phase orb in
-  the Sessions list and on Home. The pad works at phone width.
+  chime when an agent asks for you or finishes. They are off by default and switched on from
+  Status. They work on every page.
+- **A cleaner console**: a header bar with the main sections (the rest under More) in place of
+  the sidebar, content centred at a readable width, a quiet neutral palette where colour marks
+  only what needs attention, and the state symbols in Sessions and on Home. It works at phone
+  width.
 - `GET /api/procs` reports each agent's `phase` and current `activity` (the tool it uses or asks
   for).
 

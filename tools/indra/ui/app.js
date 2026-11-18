@@ -433,10 +433,10 @@
     var running = ov.procs.filter(function (p) { return p.status === "running"; });
     if (running.length) {
       var waiting = running.filter(function (p) { return WAITING[phaseOf(p)]; }).length;
-      m.appendChild(h("a", { class: "card home-pad", href: "#/pad" },
-        h("span", { class: "orbs", "aria-hidden": "true" }, running.slice(0, 24).map(function (p) { return orb(p, "md"); })),
-        h("span", { class: "grow" }, h("b", { text: waiting ? waiting + " waiting for you" : "Nothing waits for you" }),
-          h("span", { class: "muted", text: ", " + (running.length - waiting) + " at work. " }), "Open the status pad")));
+      m.appendChild(h("a", { class: "card home-status", href: "#/pad" },
+        h("span", { class: "sym " + (waiting ? "s-approval" : "s-thinking"), "data-sym": waiting ? "approval" : "thinking", "aria-hidden": "true", text: waiting ? "!" : "\u280b" }),
+        h("span", { class: "grow" }, h("b", { text: waiting ? waiting + " waiting for you" : "Nothing is waiting for you" }),
+          h("span", { class: "muted", text: ", " + (running.length - waiting) + " working." })), h("span", { text: "Open Status" })));
     }
     m.appendChild(h("h2", { text: "Running now" }));
     m.appendChild(running.length ? procTable(running) : empty("Nothing running. Start one with Run an agent."));
@@ -2604,11 +2604,12 @@
   function firstLine(t, n) { t = String(t || "").split("\n").filter(function (x) { return x.trim(); })[0] || "(no prompt)"; return t.length > n ? t.slice(0, n) + "..." : t; }
   var DOT = { running: "run live", exited: "ok", failed: "bad", stopped: "warn" };
 
-  // ---- agent phases --------------------------------------------------------------
-  // What a session is doing, as the server reports it (`phase`): what needs you
-  // first, then what it is at. Each phase has an orb colour and, always, a word.
+  // ---- agent states ---------------------------------------------------------------
+  // What a session is doing, as the server reports it (`phase`). Each state is a
+  // monospace symbol, always with its name beside it. Symbols move while the
+  // agent works and hold still while it waits for you or has finished.
   var PHASE = {
-    approval: "Approval", question: "Question", error: "Error", tool: "Tool", writing: "Writing", thinking: "Thinking",
+    approval: "Needs approval", question: "Has a question", error: "Failed", tool: "Using a tool", writing: "Writing", thinking: "Thinking",
     compacting: "Compacting", done: "Done", stopped: "Stopped", idle: "Idle"
   };
   var WAITING = { approval: 1, question: 1 };
@@ -2617,7 +2618,7 @@
     if (p.status === "running") return (p.pending || []).length ? "approval" : "thinking";
     return p.status === "failed" ? "error" : p.status === "stopped" ? "stopped" : "done";
   }
-  // The orb's motion follows the kind of tool in use.
+  // The kind of tool in use picks the symbol's motion.
   function toolKind(t) {
     t = String(t || "");
     if (/^(Read|Grep|Glob|LS|NotebookRead)$/.test(t)) return "read";
@@ -2630,16 +2631,45 @@
   var TOOL_WORD = { read: "Reading", edit: "Editing", shell: "Running a command", web: "On the web", agent: "Delegating" };
   function phaseLabel(p) {
     var ph = phaseOf(p);
-    if (ph === "tool") return TOOL_WORD[toolKind(p.activity)] || (p.activity ? "Using " + String(p.activity).replace(/^mcp__/, "").slice(0, 32) : "Tool");
+    if (ph === "tool") return TOOL_WORD[toolKind(p.activity)] || (p.activity ? "Using " + String(p.activity).replace(/^mcp__/, "").slice(0, 32) : PHASE.tool);
     return PHASE[ph];
   }
-  function orb(p, size) {
-    var ph = phaseOf(p);
-    return h("span", { class: "orb ph-" + ph + (ph === "tool" ? " m-" + toolKind(p.activity) : "") + (size ? " " + size : ""), "aria-hidden": "true" });
+  // Frames and the time each one shows (ms). One frame: it stands still.
+  var SYM = {
+    thinking: [80, "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"],
+    writing: [530, ["\u258f", " "]],
+    compacting: [220, ["\u2261", "=", "-", "="]],
+    read: [110, "\u2801\u2802\u2804\u2840\u2880\u2820\u2810\u2808"],
+    edit: [140, "\u2840\u2844\u2846\u2847\u28c7\u28e7\u28f7\u28ff"],
+    shell: [500, [">_", "> "]],
+    web: [140, "\u2190\u2196\u2191\u2197\u2192\u2198\u2193\u2199"],
+    agent: [100, "\u28fe\u28fd\u28fb\u28bf\u287f\u28df\u28ef\u28f7"],
+    other: [130, ["|", "/", "-", "\\"]],
+    approval: [0, ["!"]], question: [0, ["?"]], error: [0, ["\u2715"]], done: [0, ["\u2713"]], stopped: [0, ["\u25aa"]], idle: [0, ["\u00b7"]]
+  };
+  function symKey(p) { var ph = phaseOf(p); return ph === "tool" ? toolKind(p.activity) : ph; }
+  function frames(k) { var f = (SYM[k] || SYM.idle)[1]; return typeof f === "string" ? f.split("") : f; }
+  function sym(p) {
+    var k = symKey(p);
+    return h("span", { class: "sym s-" + phaseOf(p), "data-sym": k, "aria-hidden": "true", text: frames(k)[0] });
   }
-  function phaseTag(p, chip) {
-    return h("span", { class: "phase ph-" + phaseOf(p) + (chip ? " chip" : ""), text: phaseLabel(p) });
+  function phaseTag(p) {
+    return h("span", { class: "phase s-" + phaseOf(p), text: phaseLabel(p) });
   }
+  // One timer moves every symbol on the page; none when motion is reduced.
+  (function () {
+    var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+    setInterval(function () {
+      if (document.hidden || (still && still.matches)) return;
+      var now = Date.now();
+      Array.prototype.forEach.call(document.querySelectorAll(".sym[data-sym]"), function (el) {
+        var k = el.getAttribute("data-sym"), d = SYM[k];
+        if (!d || !d[0]) return;
+        var f = frames(k), x = f[Math.floor(now / d[0]) % f.length];
+        if (el.textContent !== x) el.textContent = x;
+      });
+    }, 60);
+  })();
   // A request in a line: the command, file or address it is about.
   function askLine(a) {
     var i = a.input || {};
@@ -2761,7 +2791,7 @@
     return dlg;
   }
   function sheetHead(c, p, note) {
-    return h("div", { class: "answer-head" }, orb(p, "lg"), h("div", null, phaseTag(p), h("div", { class: "t", text: chainTitle(c) })), note ? h("span", { class: "n", text: note }) : null);
+    return h("div", { class: "answer-head" }, sym(p), h("div", null, h("div", { class: "t", text: chainTitle(c) }), phaseTag(p)), note ? h("span", { class: "n", text: note }) : null);
   }
   // Answer what waits, one request after another (`firstId`'s first), until
   // nothing does. `after` runs after each answer.
@@ -2873,22 +2903,24 @@
   }
 
   function pagePad(m) {
-    var head = header("Status pad", "One key per session: the ones waiting for you first, then the ones at work, then what just finished.",
-      [alertButtons(), h("a", { class: "btn primary", href: "#/launch", text: "+ New agent" })]);
-    head.querySelector("p").appendChild(h("span", { class: "kbd-hint", text: " Press a key's number to open it, Enter for the next request." }));
+    var head = header("Status", "Every session, the ones waiting for you first.",
+      [alertButtons(), h("a", { class: "btn primary", href: "#/launch", text: "Run an agent" })]);
+    var sub = head.querySelector("p");
     m.appendChild(head);
     var body = h("div", { class: "pad" }); m.appendChild(body);
     var chains = [], keyed = [], sig = "", ticks = 0;
     function open(c) { if (WAITING[phaseOf(c.last)]) answerQueue(c.last.id, refresh); else infoSheet(c, refresh); }
-    function key(c, n) {
+    function row(c, n) {
       var p = c.last, ph = phaseOf(p), wait = WAITING[ph];
       var detail = wait && (p.pending || [])[0] ? askLine(p.pending[0]) : String(p.last || (ph === "thinking" ? "Starting..." : ""));
-      return h("button", { type: "button", class: "key ph-" + ph + (wait ? " wait" : ""), "data-sid": String(p.id), "aria-keyshortcuts": n <= 9 ? String(n) : null,
+      return h("li", null, h("button", { type: "button", class: "prow", "data-sid": String(p.id), "aria-keyshortcuts": n <= 9 ? String(n) : null,
         "aria-label": phaseLabel(p) + ": " + chainTitle(c), onclick: function () { open(c); } },
-        h("span", { class: "key-top" }, orb(p, "lg"), phaseTag(p, true), n <= 9 ? h("kbd", { text: String(n) }) : null),
-        h("span", { class: "key-title", text: chainTitle(c) }),
-        h("span", { class: "key-detail", text: detail.split("\n")[0] }),
-        h("span", { class: "key-meta", text: where(p) + "  -  " + (p.status === "running" ? ago(p.started).replace(" ago", "") : ago(p.ended || p.started)) }));
+        sym(p),
+        h("span", { class: "m" }, h("span", { class: "t", text: chainTitle(c) }), h("span", { class: "d", text: detail.split("\n")[0] })),
+        phaseTag(p),
+        h("span", { class: "w", text: where(p) }),
+        h("span", { class: "a", text: (p.status === "running" ? ago(p.started) : ago(p.ended || p.started)).replace(" ago", "") }),
+        n <= 9 ? h("kbd", { class: "row-key", text: String(n) }) : h("span")));
     }
     function draw() {
       var focused = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute("data-sid");
@@ -2899,25 +2931,27 @@
       var work = chains.filter(function (c) { return !WAITING[phaseOf(c.last)] && c.last.status === "running"; });
       var done = chains.filter(function (c) { return c.last.status !== "running"; })
         .sort(function (a, b) { return (b.last.ended || b.last.started) - (a.last.ended || a.last.started); });
-      var hubGo = q.length ? h("button", { type: "button", class: "go", onclick: function () { answerQueue(null, refresh); } }, "Answer the next", h("kbd", { text: "Enter" })) : null;
+      sub.textContent = need.length + " waiting for you, " + work.length + " working, " + done.length + " finished.";
+      sub.appendChild(h("span", { class: "kbd-hint", text: " Keys 1-9 open a row; Enter answers the next request." }));
+      // What waits, said once, plainly, with the way to answer it.
       var next = q[0];
-      body.appendChild(h("section", { class: "hub" + (q.length ? "" : " clear"), "aria-label": "Hub" },
-        next ? orb(next.p, "xl") : h("span", { class: "orb xl ph-done", "aria-hidden": "true" }),
-        h("div", { class: "hub-text" },
-          h("div", { class: "eyebrow", text: q.length ? "Needs you" : "All clear" }),
-          h("div", { class: "hub-title", text: q.length ? q.length + (q.length === 1 ? " request waits for you" : " requests wait for you") : work.length ? work.length + " agent" + (work.length === 1 ? " is" : "s are") + " at work" : "No agent is running" }),
-          next ? h("div", { class: "hub-next" }, "Next: ", h("b", { text: chainTitle(next.c) }), " asks ", h("code", { text: askLine(next.a).slice(0, 120) })) : null),
-        h("div", { class: "counts" }, h("span", null, h("b", { text: String(need.length) }), "waiting"), h("span", null, h("b", { text: String(work.length) }), "working"), h("span", null, h("b", { text: String(done.length) }), "finished")),
-        hubGo));
+      if (next) {
+        body.appendChild(h("section", { class: "notice", "aria-label": "Waiting for you" },
+          sym(next.p),
+          h("div", null,
+            h("b", { text: q.length === 1 ? "1 request is waiting for you" : q.length + " requests are waiting for you" }),
+            h("p", null, "Oldest: ", h("span", { text: chainTitle(next.c) }), " wants ", h("code", { text: askLine(next.a).slice(0, 120) }))),
+          h("button", { type: "button", class: "primary", onclick: function () { answerQueue(null, refresh); } }, "Answer", h("kbd", { text: "Enter" }))));
+      }
       keyed = [];
-      [["Needs you", need, need.length], ["Working", work, work.length], ["Finished", done.slice(0, 12), done.length]].forEach(function (g) {
+      [["Waiting for you", need, need.length], ["Working", work, work.length], ["Finished", done.slice(0, 15), done.length]].forEach(function (g) {
         if (!g[1].length) return;
-        var grid = h("div", { class: "keys" });
-        g[1].forEach(function (c) { keyed.push(c); grid.appendChild(key(c, keyed.length)); });
-        body.appendChild(h("section", { class: "pad-group", "aria-label": g[0] }, h("h2", null, g[0], h("span", { text: String(g[2]) })), grid));
+        var list = h("ul", { class: "rows" });
+        g[1].forEach(function (c) { keyed.push(c); list.appendChild(row(c, keyed.length)); });
+        body.appendChild(h("section", { class: "pad-group", "aria-label": g[0] }, h("h2", null, g[0], h("span", { text: String(g[2]) })), list));
       });
-      if (done.length > 12) body.appendChild(h("p", { class: "muted small" }, (done.length - 12) + " older in ", h("a", { href: "#/sessions", text: "Sessions" }), "."));
-      if (!chains.length) body.appendChild(empty("No sessions yet. Start an agent with + New agent and it shows up here, with what it does and what it asks."));
+      if (done.length > 15) body.appendChild(h("p", { class: "muted small" }, (done.length - 15) + " older in ", h("a", { href: "#/sessions", text: "Sessions" }), "."));
+      if (!chains.length) body.appendChild(empty("No sessions yet. Run an agent and it shows up here, with what it is doing and anything it asks you."));
       if (focused) { var f = body.querySelector('[data-sid="' + focused + '"]'); if (f) f.focus(); }
     }
     function refresh() {
@@ -2962,7 +2996,7 @@
       shown.forEach(function (c) {
         var on = c.procs.some(function (p) { return p.id === selected; });
         listBox.appendChild(h("a", { class: "s-item" + (on ? " on" : ""), href: "#/sessions/" + c.last.id },
-          orb(c.last),
+          sym(c.last),
           h("span", { class: "s-title", text: firstLine(c.root.prompt, 70) }),
           h("span", { class: "muted small" }, phaseTag(c.last), "  " + c.last.node + ", " + ago(c.last.started))));
       });
@@ -3002,7 +3036,7 @@
         last.pending.forEach(function (a) {
           // The same panel across redraws: a hold or a pick in progress stays.
           var panel = panels[a.request_id] || (panels[a.request_id] = answerPanel(last, a, refresh));
-          log.appendChild(h("div", { class: "msg ask ph-" + (a.tool === "AskUserQuestion" ? "question" : "approval") }, panel));
+          log.appendChild(h("div", { class: "msg ask" }, panel));
         });
       }
       if (last.status === "running") log.appendChild(h("div", { class: "msg status run", text: (last.pending || []).length ? "Waiting for you" : "Working..." }));
@@ -5052,8 +5086,8 @@
     });
     // The page is under More: show it open.
     var more = $("nav-more"), inMore = more && more.querySelector('a[data-route="' + navKey + '"]');
-    if (inMore) more.open = true;
-    var m = $("main"); m.textContent = ""; m.scrollTop = 0;
+    if (more) { more.open = false; more.classList.toggle("on", !!inMore); }
+    var m = $("main"); m.textContent = ""; window.scrollTo(0, 0);
     // A newer navigation wins: a slower, earlier one must not render too.
     var gen = S.gen = (S.gen || 0) + 1;
     refreshOverview().then(function () {
@@ -5097,7 +5131,7 @@
 
   $("harness").addEventListener("change", function (e) { setHarness(e.target.value); });
   $("theme").addEventListener("click", function () {
-    var dark = cssVar("--bg") === "#0c0e1a";
+    var dark = cssVar("--bg") === "#121214";
     var t = dark ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", t); store("indra.theme", t);
     // Only what draws with theme colors redraws: what you typed stays.
@@ -5124,6 +5158,9 @@
     S.dirty = false; S.hash = location.hash;
     route();
   });
+  // The More menu closes on a click elsewhere or Escape.
+  document.addEventListener("click", function (e) { var more = $("nav-more"); if (more && more.open && !more.contains(e.target)) more.open = false; });
+  document.addEventListener("keydown", function (e) { var more = $("nav-more"); if (e.key === "Escape" && more && more.open) { more.open = false; more.querySelector("summary").focus(); } });
   route();
   alertsStart();
 })();
