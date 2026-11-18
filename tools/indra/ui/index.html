@@ -13,14 +13,18 @@
     <div class="brand"><img src="/favicon.svg" alt="" width="22" height="22"><span>indra</span></div>
     <label class="hsel" title="A harness is a set of agents, skills and prompts for one kind of work (the security review by default)"><span>Setup</span><select id="harness"></select></label>
     <nav id="nav">
+      <span class="nav-sec" aria-hidden="true">Work</span>
       <a href="#/overview" data-route="overview" title="Start here: what indra is and what is going on">Home</a>
+      <a href="#/pad" data-route="pad" title="Every agent at a glance, the ones waiting for you first; answer them here">Status pad <b id="approvals-badge" class="badge warn" hidden></b></a>
+      <a href="#/sessions" data-route="sessions" title="Your agents as conversations: running and past, what they ask you, what they changed">Sessions <b id="running-badge" class="badge" hidden></b></a>
       <a href="#/launch" data-route="launch" title="Start an AI agent on a codebase">Run an agent</a>
-      <a href="#/sessions" data-route="sessions" title="Your agents as conversations: running and past, what they ask you, what they changed">Sessions <span><b id="approvals-badge" class="badge warn" hidden></b> <b id="running-badge" class="badge" hidden></b></span></a>
       <a href="#/workflows" data-route="workflows" title="Several steps in order: agents, skills and shell commands">Workflows</a>
       <a href="#/board" data-route="board" title="Tasks to hand to agents">Board</a>
+      <span class="nav-sec" aria-hidden="true">Know</span>
       <a href="#/runs" data-route="runs" title="What reviews found: findings and reports">Results</a>
-      <a href="#/nodes" data-route="nodes" title="Computers agents run on; add one with one command">Machines</a>
       <a href="#/knowledge" data-route="knowledge" title="What agents remember, and learnings to review">Knowledge <b id="learnings-badge" class="badge warn" hidden></b></a>
+      <span class="nav-sec" aria-hidden="true">Set up</span>
+      <a href="#/nodes" data-route="nodes" title="Computers agents run on; add one with one command">Machines</a>
       <details id="nav-more">
         <summary>More</summary>
         <a href="#/accounts" data-route="accounts" title="Credentials agents run with, and their usage">Accounts</a>

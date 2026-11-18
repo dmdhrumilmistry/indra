@@ -510,9 +510,12 @@ An agent started through a Claude Code runner (`format = "claude-stream-json"`) 
 Claude Code's control channel, the one the Agent SDK uses, so from its process page you can:
 
 - **Approve or deny tool requests.** When the agent wants to run a tool its permission mode does
-  not allow, the request appears under **Waiting for you** (and as a badge on Processes) with
-  **Allow**, **Allow always** (adds Claude Code's suggested rule for the rest of the session) and
-  **Deny** (with a reason the agent sees).
+  not allow, the request appears under **Waiting for you**, in Sessions and on the Status pad (with
+  a badge in the sidebar). **Hold to allow** approves it after a 0.6 s press and hold, so a stray
+  click never does. Tick **Always allow** first to add Claude Code's suggested rule for the rest
+  of the session. **Deny** is one tap, with an optional reason the agent sees.
+- **Answer its questions.** Claude Code's `AskUserQuestion` shows as numbered options. Pick one (or
+  several, or type your own), then hold **Send**. The answer goes back as the tool's `answers`.
 - **Change its permission mode**: `manual` (ask for everything), `acceptEdits`, `auto`, `plan`
   (read and plan only), `dontAsk` (deny whatever would ask) or `bypassPermissions`.
 - **Change its model** for the turns that follow.
@@ -521,7 +524,30 @@ Claude Code's control channel, the one the Agent SDK uses, so from its process p
 
 The prompt goes to the agent over stdin, and indra closes stdin after the last turn's result, so
 the agent still exits when its work is done. Remote agents get the same controls: the hub forwards
-them to the node. API: `POST /api/procs/{id}/permission`, `/control` and `/message`.
+them to the node. API: `POST /api/procs/{id}/permission` (`request_id`, `allow`, `always`,
+`message`, and `answers` for a question), `/control` and `/message`.
+
+### Status pad
+
+**Status pad** shows every session as a key: the ones waiting for you first (the longest-waiting
+first), then the ones at work, then the recent finishes. Each key shows the session, its phase,
+what it is doing or asking, and where it runs. Its orb's colour is the phase and its motion
+follows the tool in use. The phase is also written on the key, so colour is never the only signal.
+
+| Phase | Means |
+|---|---|
+| Approval | it asks to use a tool |
+| Question | it asks you to choose (`AskUserQuestion`) |
+| Reading, Editing, Running a command, On the web, Delegating | it is using that kind of tool |
+| Writing / Thinking | it is replying / reading a tool's result |
+| Compacting | Claude Code is summarising its context |
+| Done / Error / Stopped | it finished, failed or was stopped |
+
+The **hub** at the top opens the waiting requests one after another. On the keyboard, `1`-`9` open
+a key and Enter opens the next request. In a question, `1`-`9` pick an option. **Alerts** sends a
+desktop notification (a toast while the console has focus) when an agent asks for you or finishes,
+and **Sound** adds a chime. Both are per browser and off until you switch them on. The phases come
+from `GET /api/procs` (`phase`, and `activity` for the tool).
 
 ### Profiles
 

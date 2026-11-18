@@ -80,6 +80,12 @@ pub struct ProcView {
     pub ended: Option<u64>,
     /// running | exited | failed | stopped
     pub status: String,
+    /// What it is doing now, for the status pad: approval | question |
+    /// compacting | tool | writing | thinking (while it runs), then done |
+    /// error | stopped.
+    pub phase: &'static str,
+    /// The tool it is using now (phase "tool") or asking to use (approval).
+    pub activity: Option<String>,
     pub exit_code: Option<i32>,
     pub events: u64,
     pub tools: BTreeMap<String, usize>,
@@ -127,6 +133,47 @@ pub struct ProcView {
     pub links: Vec<String>,
     /// From an earlier run of the console (kept on disk; read-only).
     pub archived: bool,
+}
+
+/// The input that answers a question: its own input plus `answers`, each
+/// question's text mapped to what was picked. Only the questions it asked
+/// can be answered, and each answer is short text.
+fn question_input(a: &Approval, answers: &Value) -> Result<Value, String> {
+    if a.tool != "AskUserQuestion" {
+        return Err("answers are only for a question (AskUserQuestion)".into());
+    }
+    let asked: Vec<&str> = a
+        .input
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|qs| {
+            qs.iter()
+                .filter_map(|q| q.get("question").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let given = answers
+        .as_object()
+        .ok_or("answers must map each question to its answer")?;
+    if given.is_empty() {
+        return Err("pick an answer first".into());
+    }
+    for (q, v) in given {
+        if !asked.contains(&q.as_str()) {
+            return Err(format!("it did not ask {:?}", clip(q, 80)));
+        }
+        match v.as_str() {
+            Some(t) if !t.trim().is_empty() && t.len() <= 4000 => {}
+            _ => return Err("each answer is non-empty text (4000 characters at most)".into()),
+        }
+    }
+    let mut input = a.input.clone();
+    if let Some(o) = input.as_object_mut() {
+        o.insert("answers".into(), Value::Object(given.clone()));
+    } else {
+        return Err("the question has no input to answer".into());
+    }
+    Ok(input)
 }
 
 /// A tool request the agent is waiting on.
@@ -182,6 +229,47 @@ struct State {
     files: Vec<String>,
     todos: Value,
     links: Vec<String>,
+    act: Activity,
+}
+
+/// What a running agent is doing between events, as its stream shows it.
+#[derive(Default)]
+struct Activity {
+    /// tool | writing | thinking ("" before its first step: thinking).
+    kind: &'static str,
+    tool: Option<String>,
+    /// Claude Code is compacting its context.
+    compacting: bool,
+}
+
+impl State {
+    /// The status pad's phase: what needs you first, then what it does.
+    fn phase(&self) -> (&'static str, Option<String>) {
+        match self.status.as_str() {
+            "running" => {
+                if let Some(a) = self.pending.first() {
+                    let kind = if a.tool == "AskUserQuestion" {
+                        "question"
+                    } else {
+                        "approval"
+                    };
+                    (kind, Some(a.tool.clone()))
+                } else if self.act.compacting {
+                    ("compacting", None)
+                } else if self.act.kind == "tool" {
+                    ("tool", self.act.tool.clone())
+                } else if self.act.kind == "writing" {
+                    ("writing", None)
+                } else {
+                    ("thinking", None)
+                }
+            }
+            "failed" => ("error", None),
+            "stopped" => ("stopped", None),
+            _ if self.exit_code.is_some_and(|c| c != 0) || self.last_failed => ("error", None),
+            _ => ("done", None),
+        }
+    }
 }
 
 impl State {
@@ -217,6 +305,7 @@ impl State {
             files: Vec::new(),
             todos: Value::Null,
             links: Vec::new(),
+            act: Activity::default(),
         }
     }
 }
@@ -508,6 +597,7 @@ impl Proc {
 
     pub fn view(&self) -> ProcView {
         let st = self.state.lock().unwrap();
+        let (phase, activity) = st.phase();
         ProcView {
             id: self.id,
             node: self.node.clone(),
@@ -525,6 +615,8 @@ impl Proc {
             started: self.started,
             ended: st.ended,
             status: st.status.clone(),
+            phase,
+            activity,
             exit_code: st.exit_code,
             events: st.seq,
             tools: st.tools.clone(),
@@ -601,13 +693,16 @@ impl Proc {
     }
 
     /// Answer a tool request: allow (once, or always for this session, with
-    /// the rule Claude Code suggested) or deny with a reason.
+    /// the rule Claude Code suggested) or deny with a reason. A question
+    /// (`AskUserQuestion`) is answered by allowing it with `answers`: the
+    /// question's text to the label (or labels, joined by ", ") picked.
     pub fn answer(
         &self,
         request_id: &str,
         allow: bool,
         always: bool,
         message: Option<&str>,
+        answers: Option<&Value>,
     ) -> Result<(), String> {
         self.check_open()?;
         let a = {
@@ -617,7 +712,15 @@ impl Proc {
                 .iter()
                 .position(|a| a.request_id == request_id)
                 .ok_or("no such pending request (already answered?)")?;
-            st.pending.remove(i)
+            let input = match answers {
+                Some(ans) if allow => Some(question_input(&st.pending[i], ans)?),
+                _ => None,
+            };
+            let mut a = st.pending.remove(i);
+            if let Some(input) = input {
+                a.input = input;
+            }
+            a
         };
         let response = if allow {
             let mut r = serde_json::json!({ "behavior": "allow", "updatedInput": a.input });
@@ -635,9 +738,16 @@ impl Proc {
         };
         let line = serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": a.request_id, "response": response } });
         self.send(Ctl::Line(line.to_string()))?;
-        self.push(
-            "permission",
-            format!(
+        let said = match (allow, a.input.get("answers").and_then(Value::as_object)) {
+            (true, Some(ans)) if answers.is_some() => format!(
+                "answered: {}",
+                ans.values()
+                    .filter_map(Value::as_str)
+                    .map(|t| clip(t, 120))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            _ => format!(
                 "{} {}{}",
                 if allow { "allowed" } else { "denied" },
                 a.tool,
@@ -647,8 +757,8 @@ impl Proc {
                     ""
                 }
             ),
-            None,
-        );
+        };
+        self.push("permission", said, None);
         Ok(())
     }
 
@@ -983,11 +1093,19 @@ impl Proc {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                if parent.is_none() {
+                    self.state.lock().unwrap().act.compacting = false;
+                }
                 for c in content {
                     match c.get("type").and_then(Value::as_str).unwrap_or("") {
                         "text" => {
                             let t = s(&c, "text");
                             if !t.trim().is_empty() {
+                                if parent.is_none() {
+                                    let mut st = self.state.lock().unwrap();
+                                    st.act.kind = "writing";
+                                    st.act.tool = None;
+                                }
                                 self.push("text", t, agent.clone());
                             }
                         }
@@ -1008,6 +1126,12 @@ impl Proc {
                     }
                     let id = s(&c, "tool_use_id");
                     let is_error = c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                    if parent.is_none() {
+                        // The tool returned: the model reads the result.
+                        let mut st = self.state.lock().unwrap();
+                        st.act.kind = "thinking";
+                        st.act.tool = None;
+                    }
                     let finished = {
                         let mut st = self.state.lock().unwrap();
                         st.agents.iter_mut().find(|a| a.id == id).map(|a| {
@@ -1066,7 +1190,15 @@ impl Proc {
                 self.push("result", text, agent);
                 self.turn_done();
             }
+            "system" if s(&v, "subtype") == "compact_boundary" => {
+                self.state.lock().unwrap().act.compacting = false;
+            }
             "system" if s(&v, "subtype") == "status" => {
+                // Claude Code reports `"status": "compacting"` while it
+                // summarises its context, and a null status once done.
+                if v.get("status").is_some() {
+                    self.state.lock().unwrap().act.compacting = s(&v, "status") == "compacting";
+                }
                 if let Some(m) = v.get("permissionMode").and_then(Value::as_str) {
                     let changed = {
                         let mut st = self.state.lock().unwrap();
@@ -1149,6 +1281,12 @@ impl Proc {
             .to_string();
         let input = c.get("input").cloned().unwrap_or(Value::Null);
         let field = |k: &str| input.get(k).and_then(Value::as_str).map(String::from);
+        {
+            // A subagent's step counts too: the session is at work on a tool.
+            let mut st = self.state.lock().unwrap();
+            st.act.kind = "tool";
+            st.act.tool = Some(name.clone());
+        }
         // What the side panel shows: its task list, and the files it touched.
         if agent.is_none() {
             let mut st = self.state.lock().unwrap();
@@ -2225,6 +2363,7 @@ mod tests {
                 files: Vec::new(),
                 todos: Value::Null,
                 links: Vec::new(),
+                act: Activity::default(),
             }),
             tx,
             stop: Mutex::new(None),
@@ -2294,6 +2433,67 @@ mod tests {
             "the result is the outcome"
         );
         assert!(p.state.lock().unwrap().events[7].text.contains("$0.0123"));
+
+        // The status pad's phase follows what it does, and what waits on you
+        // comes first.
+        let phase = |p: &Proc| {
+            let v = p.view();
+            (v.phase, v.activity)
+        };
+        assert_eq!(phase(&p), ("thinking", None), "a tool result is read");
+        p.claude_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}]}}"#);
+        assert_eq!(phase(&p), ("tool", Some("Bash".into())));
+        p.claude_line(r#"{"type":"system","subtype":"status","status":"compacting"}"#);
+        assert_eq!(phase(&p).0, "compacting");
+        p.claude_line(r#"{"type":"system","subtype":"compact_boundary"}"#);
+        p.claude_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the plan"}]}}"#);
+        assert_eq!(phase(&p), ("writing", None));
+        p.claude_line(r#"{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which target?","header":"Target","multiSelect":false,"options":[{"label":"Kubernetes","description":""},{"label":"A VM","description":""}]}]}}}"#);
+        assert_eq!(phase(&p), ("question", Some("AskUserQuestion".into())));
+        {
+            let mut st = p.state.lock().unwrap();
+            st.pending.clear();
+            st.status = "exited".into();
+            st.exit_code = Some(0);
+        }
+        assert_eq!(phase(&p).0, "done");
+        p.state.lock().unwrap().exit_code = Some(2);
+        assert_eq!(phase(&p).0, "error");
+    }
+
+    /// A question is answered with what was picked, and only what it asked.
+    #[test]
+    fn questions_take_only_their_own_answers() {
+        let q = Approval {
+            request_id: "q1".into(),
+            tool: "AskUserQuestion".into(),
+            input: serde_json::json!({ "questions": [{ "question": "Which target?", "options": [] }] }),
+            suggestions: Value::Null,
+            ts: 0,
+        };
+        let ok = question_input(&q, &serde_json::json!({ "Which target?": "Kubernetes" })).unwrap();
+        assert_eq!(ok["answers"]["Which target?"], "Kubernetes");
+        assert_eq!(
+            ok["questions"][0]["question"], "Which target?",
+            "the questions stay"
+        );
+        for bad in [
+            serde_json::json!({ "Something else?": "x" }),
+            serde_json::json!({ "Which target?": "" }),
+            serde_json::json!({ "Which target?": 3 }),
+            serde_json::json!({}),
+            serde_json::json!("Kubernetes"),
+        ] {
+            assert!(question_input(&q, &bad).is_err(), "{}", bad);
+        }
+        let bash = Approval {
+            tool: "Bash".into(),
+            ..q
+        };
+        assert!(
+            question_input(&bash, &serde_json::json!({ "Which target?": "x" })).is_err(),
+            "a tool request takes no answers"
+        );
     }
 
     /// A finished session is kept on disk and comes back, read-only, with
