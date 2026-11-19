@@ -552,6 +552,38 @@ desktop notification (a toast while the console has focus) when an agent asks fo
 and **Sound** adds a chime. Both are per browser and off until you switch them on. The states come
 from `GET /api/procs` (`phase`, and `activity` for the tool).
 
+
+### Own branch per agent
+
+Several agents on one repository edit the same files unless each works apart. Tick **Work on
+its own branch** under Run an agent (this machine, a folder in a git repository) and the agent
+gets a git worktree of its own:
+
+- a new branch `indra/<words-from-the-prompt>-<id>`, made from what the repository has checked out;
+- its folder under indra's data folder (`worktrees/`), at the same subfolder you launched it on;
+- the repository you work in is untouched while it runs.
+
+Once it stops, its session's **Its own branch** panel shows the commits and changed files, with:
+
+- **Merge into `<base>`**: commits what it left, merges the branch into the branch it came from
+  (`--no-ff`), then removes the branch and its folder. A merge that conflicts is undone, nothing
+  changes in your branch, and the branch stays for you to merge by hand.
+- **Keep branch**: commits what it left and keeps the branch (to push it or open a pull request);
+  only the folder goes.
+- **Discard**: removes the branch and its folder.
+
+git runs directly, never through a shell, and only on folders under `worktrees/`. The base branch is
+kept in the branch's own git config (`branch.<name>.indraBase`). API: `"worktree": true` on
+`POST /api/procs`, `POST /api/procs/{id}/worktree` with `action` merge, keep or discard.
+
+### Spending limit
+
+A Claude Code agent stops once its API calls cost a set amount: **Spending limit** under Run an
+agent > More options, or `max_budget_usd = 2.5` in a profile. indra passes it as Claude Code's
+own `--max-budget-usd`, and the session says when the agent stopped at it. It meters API billing
+only: a subscription login is not counted this way. Other runners refuse the option rather than
+ignore it.
+
 ### Profiles
 
 A profile is a named way to run an agent: a runner with a model, permission mode, effort, tool

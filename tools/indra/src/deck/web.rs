@@ -943,6 +943,9 @@ pub(crate) struct LaunchReq {
     /// MCP & tools to give it, on top of those of its profile.
     #[serde(default)]
     tools: Vec<String>,
+    /// Run it on its own branch, in a git worktree (this machine only).
+    #[serde(default)]
+    worktree: bool,
 }
 
 /// A profile and per-launch overrides, resolved into a runner and options.
@@ -1228,14 +1231,31 @@ pub(crate) async fn proc_start(
         reflect,
         ..StartOpts::default()
     };
+    let mut branch: Option<String> = None;
+    if r.worktree && node != LOCAL {
+        return Err(bad(
+            "an agent gets its own branch (git worktree) only on this machine",
+        ));
+    }
     let id = if node == LOCAL {
         let runner = settings
             .runners
             .iter()
             .find(|x| x.name == runner_name)
             .ok_or_else(|| bad(format!("unknown runner '{}'", runner_name)))?;
-        let target = std::path::PathBuf::from(target);
-        app.procs.start_with(
+        let mut target = std::path::PathBuf::from(target);
+        // Its own branch: a worktree made now, where it runs instead.
+        let wt = if r.worktree {
+            let c = crate::deck::worktree::create(&settings.data_dir, &target, &r.prompt)
+                .await
+                .map_err(bad)?;
+            target = c.cwd.clone();
+            branch = Some(c.branch.clone());
+            Some(c)
+        } else {
+            None
+        };
+        let started = app.procs.start_with(
             Launch::Local {
                 runner,
                 harness: &h.name,
@@ -1243,7 +1263,11 @@ pub(crate) async fn proc_start(
                 target: &target,
             },
             start,
-        )
+        );
+        if let (Err(_), Some(c)) = (&started, &wt) {
+            let _ = crate::deck::worktree::finish(&settings.data_dir, &c.cwd, "discard", "").await;
+        }
+        started
     } else {
         let n = settings.node(node).ok_or_else(|| bad("unknown node"))?;
         nodes::validate_name(&runner_name).map_err(bad)?;
@@ -1259,7 +1283,7 @@ pub(crate) async fn proc_start(
         )
     }
     .map_err(bad)?;
-    Ok(Json(json!({ "id": id })))
+    Ok(Json(json!({ "id": id, "branch": branch })))
 }
 
 async fn procs_list(State(app): State<Arc<App>>) -> Json<Value> {
@@ -1303,6 +1327,8 @@ async fn proc_workspace(
     let Some(branch) = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await else {
         return Ok(Json(json!({ "local": true, "git": false })));
     };
+    let worktree =
+        crate::deck::worktree::info(&app.settings().data_dir, std::path::Path::new(&dir)).await;
     let status = git(&dir, &["status", "--porcelain", "--untracked-files=all"])
         .await
         .unwrap_or_default();
@@ -1313,8 +1339,57 @@ async fn proc_workspace(
         .map(|l| json!({ "status": l[..2].trim(), "path": l[3..].trim_matches('"') }))
         .collect();
     Ok(Json(
-        json!({ "local": true, "git": true, "branch": branch.trim(), "changed": changed }),
+        json!({ "local": true, "git": true, "branch": branch.trim(), "changed": changed, "worktree": worktree }),
     ))
+}
+
+#[derive(Deserialize)]
+struct WorktreeReq {
+    /// merge | keep | discard
+    action: String,
+}
+
+/// `POST /api/procs/{id}/worktree`: finish the branch of an agent that ran
+/// on its own (merge it into the branch it came from, keep it, or discard
+/// it), once the agent has stopped.
+async fn proc_worktree(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<WorktreeReq>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let p = app
+        .procs
+        .get(id)
+        .ok_or_else(|| not_found("no such process"))?;
+    if p.node_name() != LOCAL {
+        return Err(bad("only agents on this machine have their own branch"));
+    }
+    if p.is_running() {
+        return Err(bad(
+            "the agent is still running: stop it or let it finish first",
+        ));
+    }
+    let prompt = p.view().prompt;
+    let title = prompt
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("agent work")
+        .chars()
+        .take(72)
+        .collect::<String>();
+    let said = crate::deck::worktree::finish(
+        &app.settings().data_dir,
+        std::path::Path::new(p.target()),
+        &r.action,
+        &format!("indra: {}", title),
+    )
+    .await
+    .map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "message": said })))
 }
 
 #[derive(Deserialize)]
@@ -4456,6 +4531,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/procs/{id}/message", post(proc_message))
         .route("/api/procs/{id}/events", get(proc_events))
         .route("/api/procs/{id}/workspace", get(proc_workspace))
+        .route("/api/procs/{id}/worktree", post(proc_worktree))
         .route("/api/procs/{id}/diff", get(proc_diff))
         .route("/api/procs/{id}/files", get(proc_files))
         .route("/api/procs/{id}/file", get(proc_file))

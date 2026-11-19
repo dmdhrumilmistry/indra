@@ -889,6 +889,10 @@ pub struct AgentOpts {
     pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Stop a Claude Code agent once it has spent this many US dollars on
+    /// API calls (`--max-budget-usd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_budget_usd: Option<f64>,
     /// MCP servers for a Claude Code agent: "none" starts it without any
     /// (each server's tools fill its context before it does anything);
     /// unset, as Claude Code is configured.
@@ -921,6 +925,12 @@ pub struct AgentOpts {
     /// The Ollama server (default http://localhost:11434).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ollama_url: Option<String>,
+}
+
+/// A spending limit as Claude Code takes it: dollars and cents.
+pub fn budget_arg(b: f64) -> String {
+    let s = format!("{:.2}", b);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// Where Ollama listens unless a profile says otherwise.
@@ -989,6 +999,14 @@ impl AgentOpts {
         }
         if let Some(u) = &self.ollama_url {
             crate::deck::router::check_url(u)?;
+        }
+        if let Some(b) = self.max_budget_usd {
+            if !b.is_finite() || b <= 0.0 || b > 100_000.0 {
+                return Err(format!(
+                    "the spending limit is a number of US dollars above 0 (at most 100000), not {}",
+                    b
+                ));
+            }
         }
         let word = |what: &str, v: &str, max: usize| -> Result<(), String> {
             if v.is_empty()
@@ -1068,6 +1086,9 @@ impl AgentOpts {
         }
         if other.effort.is_some() {
             o.effort = other.effort.clone();
+        }
+        if other.max_budget_usd.is_some() {
+            o.max_budget_usd = other.max_budget_usd;
         }
         if other.mcp.is_some() {
             o.mcp = other.mcp.clone();
@@ -1171,6 +1192,10 @@ pub fn agent_command(
         flag("--model", &o.model);
         flag("--permission-mode", &o.permission_mode);
         flag("--effort", &o.effort);
+        if let Some(b) = o.max_budget_usd {
+            args.push("--max-budget-usd".into());
+            args.push(budget_arg(b));
+        }
         if !o.allowed_tools.is_empty() {
             args.push("--allowed-tools".into());
             args.push(o.allowed_tools.join(","));
@@ -1191,13 +1216,14 @@ pub fn agent_command(
         }
         if o.permission_mode.is_some()
             || o.effort.is_some()
+            || o.max_budget_usd.is_some()
             || o.mcp.as_deref() == Some("none")
             || o.engagement.is_some()
             || !o.allowed_tools.is_empty()
             || !o.disallowed_tools.is_empty()
         {
             return Err(format!(
-                "runner '{}' is not Claude Code, so permission mode, effort, MCP servers, engagements and tool rules do not apply to it",
+                "runner '{}' is not Claude Code, so permission mode, effort, a spending limit, MCP servers, engagements and tool rules do not apply to it",
                 r.name
             ));
         }
@@ -1385,6 +1411,51 @@ mod tests {
 
     fn env_of(ac: &AgentCommand) -> BTreeMap<String, String> {
         ac.env.iter().cloned().collect()
+    }
+
+    /// A spending limit becomes Claude Code's own `--max-budget-usd`; other
+    /// runners and nonsense values are refused.
+    #[test]
+    fn spending_limits() {
+        let t = std::path::Path::new("/t");
+        let claude = runner("claude", "claude-stream-json", &["-p", "{prompt}"], &[]);
+        let codex = runner("codex", "text", &["exec", "{prompt}"], &["-m", "{model}"]);
+        let o = AgentOpts {
+            max_budget_usd: Some(2.5),
+            ..Default::default()
+        };
+        let ac = agent_command(&claude, "go", t, None, &o).unwrap();
+        assert!(
+            ac.args.windows(2).any(|w| w == ["--max-budget-usd", "2.5"]),
+            "{:?}",
+            ac.args
+        );
+        assert!(agent_command(&codex, "go", t, None, &o)
+            .unwrap_err()
+            .contains("spending limit"));
+        assert_eq!(budget_arg(3.0), "3");
+        assert_eq!(budget_arg(0.126), "0.13");
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e9] {
+            let o = AgentOpts {
+                max_budget_usd: Some(bad),
+                ..Default::default()
+            };
+            assert!(o.validate().is_err(), "{}", bad);
+        }
+        // A launch's limit replaces the profile's.
+        let base = AgentOpts {
+            max_budget_usd: Some(5.0),
+            ..Default::default()
+        };
+        assert_eq!(base.with(&o_limit(1.0)).max_budget_usd, Some(1.0));
+        assert_eq!(base.with(&AgentOpts::default()).max_budget_usd, Some(5.0));
+    }
+
+    fn o_limit(b: f64) -> AgentOpts {
+        AgentOpts {
+            max_budget_usd: Some(b),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]

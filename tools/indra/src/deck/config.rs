@@ -1090,6 +1090,10 @@ pub struct ProfileCfg {
     /// low | medium | high | xhigh | max
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Stop its Claude Code agents once they have spent this many US dollars
+    /// on API calls (`--max-budget-usd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_budget_usd: Option<f64>,
     /// MCP servers: "none" for an agent without any (a much smaller
     /// context), or left out for Claude Code's own configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1134,6 +1138,7 @@ impl ProfileCfg {
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
             effort: self.effort.clone(),
+            max_budget_usd: self.max_budget_usd,
             mcp: self.mcp.clone(),
             engagement: None,
             mcp_servers: Default::default(),

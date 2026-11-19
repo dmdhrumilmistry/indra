@@ -35,3 +35,4 @@ pub mod trackers;
 pub mod users;
 pub mod web;
 pub mod workflows;
+pub mod worktree;
