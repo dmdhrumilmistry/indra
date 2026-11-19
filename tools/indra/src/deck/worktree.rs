@@ -357,6 +357,9 @@ mod tests {
         std::fs::create_dir_all(repo.join("sub")).unwrap();
         std::fs::create_dir_all(&data).unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
+        // The machine's line-ending setting (core.autocrlf on Windows
+        // runners) would rewrite the files these tests compare byte for byte.
+        sh(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("sub/a.txt"), "one\n").unwrap();
         sh(&repo, &["add", "-A"]);
         sh(&repo, &["commit", "-q", "-m", "first"]);
