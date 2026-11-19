@@ -76,6 +76,14 @@ file = "docs/guides/machines.md"
 
 [[page]]
 group = "Guides"
+slug = "engagements"
+title = "Engagements"
+description = "Test live systems inside a written scope: authorization, scope, time window, one machine, pacing, and a tamper-evident audit log of every tool call."
+[[page.source]]
+file = "docs/guides/engagements.md"
+
+[[page]]
+group = "Guides"
 slug = "mdm"
 title = "Rolling out with MDM"
 description = "Jamf, Intune and other MDM tools: one enrollment key for many machines, and organization-wide default or enforced settings."

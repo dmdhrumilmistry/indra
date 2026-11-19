@@ -1596,6 +1596,123 @@
   }
   function canJoin() { return !!(S.ov && S.ov.settings && S.ov.settings.join); }
 
+  // ---- engagements: tests of live systems inside a written scope ----------------
+  function localInput(t) {
+    var d = new Date(t * 1000), z = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate()) + "T" + z(d.getHours()) + ":" + z(d.getMinutes());
+  }
+  function fromInput(v) { var t = Date.parse(v); return isNaN(t) ? 0 : Math.floor(t / 1000); }
+  function lines(v) { return v.split("\n").map(function (x) { return x.trim(); }).filter(Boolean); }
+  var ESTATE = { active: "ok", scheduled: "warn", ended: "" };
+
+  function pageEngagements(m, open) {
+    var admin = !!S.ov.is_admin, viewer = S.ov.role === "viewer";
+    m.appendChild(header("Engagements", "Tests of live systems, inside a written scope: who authorized it, what may be tested, when, on which machine and how fast. Every tool call its agents make is checked against the scope, paced and written to a tamper-evident audit log."));
+    var formBox = h("div"), list = h("div");
+    if (admin && !S.ov.read_only) m.appendChild(h("div", { class: "row" }, h("button", { type: "button", class: "primary", onclick: function () { newForm(); } }, "+ New engagement")));
+    m.appendChild(formBox); m.appendChild(list);
+    function newForm() {
+      formBox.textContent = "";
+      var now = Math.floor(Date.now() / 1000);
+      var name = h("input", { type: "text", required: true, maxlength: "80", placeholder: "e.g. Q4 web app test" });
+      var machine = h("select", { "aria-label": "Machine" }, h("option", { value: "local", text: "this machine" }));
+      loadNodes(false).then(function (ns) { ns.filter(function (n) { return n.name !== "local"; }).forEach(function (n) { machine.appendChild(h("option", { value: n.name, text: n.name + (n.info ? "" : " (offline)") })); }); }).catch(function () { /* local only */ });
+      var scope = h("textarea", { required: true, rows: "5", placeholder: "app.example.com\n*.staging.example.com\n10.20.0.0/24" });
+      var exclude = h("textarea", { rows: "3", placeholder: "payments.example.com\n10.20.0.1" });
+      var starts = h("input", { type: "datetime-local", required: true, value: localInput(now) });
+      var ends = h("input", { type: "datetime-local", required: true, value: localInput(now + 8 * 3600) });
+      var rate = h("input", { type: "number", min: "0.1", max: "100", step: "0.1", value: "2" });
+      var auth = h("textarea", { required: true, rows: "3", placeholder: "Who authorized this test, and the reference: a signed statement of work, a ticket, an email." });
+      var go = h("button", { type: "submit", class: "primary" }, "Create engagement");
+      var form = h("form", { class: "card form", onsubmit: function (e) {
+        e.preventDefault(); go.disabled = true;
+        api("/api/engagements", { method: "POST", body: { name: name.value, machine: machine.value, scope: lines(scope.value), exclude: lines(exclude.value),
+          starts: fromInput(starts.value), ends: fromInput(ends.value), rate: Number(rate.value) || 2, authorization: auth.value } })
+          .then(function (e) { toast("Engagement created"); formBox.textContent = ""; load(e.id); })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } },
+        h("h3", { text: "New engagement" }),
+        h("div", { class: "fields" }, h("label", null, "Name", name), h("label", null, "Machine", h("small", { text: "Its agents run there only." }), machine)),
+        h("label", null, "In scope", h("small", { text: "One per line: a host (app.example.com), its subdomains (*.example.com), an IP or a CIDR range. Anything else is refused." }), scope),
+        h("label", null, "Excluded", h("small", { text: "Never tested, even inside the scope." }), exclude),
+        h("div", { class: "fields" }, h("label", null, "Starts", starts), h("label", null, "Ends", ends), h("label", null, "Calls per second per host", rate)),
+        h("label", null, "Authorization", h("small", { text: "Required. Kept with the engagement and in its audit log." }), auth),
+        h("p", { class: "muted small", text: "Agents in it are Claude Code with indra guard as a hook: it refuses tool calls that name a host outside the scope or run outside the window, paces calls per host, and logs every call. It reads the hosts a command names, not what a program connects to by itself: for hard enforcement, also firewall the machine to the scope." }),
+        h("div", { class: "row" }, go, h("button", { type: "button", onclick: function () { formBox.textContent = ""; } }, "Cancel")));
+      formBox.appendChild(form); name.focus();
+    }
+    function runForm(e, box) {
+      box.textContent = "";
+      var prompt = h("textarea", { required: true, rows: "4", placeholder: "What should the agent do, within this engagement's scope?" });
+      var folder = h("select", { "aria-label": "Folder" });
+      var profile = h("select", { "aria-label": "Profile" }, [h("option", { value: "", text: "default" })].concat((S.ov.profiles || []).filter(function (p) { return !p.runner || p.runner === "claude"; }).map(function (p) { return h("option", { value: p.name, text: p.name }); })));
+      loadNodes(false).then(function (ns) {
+        var n = ns.find(function (x) { return x.name === e.machine; });
+        (n ? n.targets : []).forEach(function (t, i) { folder.appendChild(h("option", { value: String(i), text: t })); });
+        if (!folder.options.length) folder.appendChild(h("option", { value: "", text: "no folder for agents on " + e.machine }));
+      });
+      var go = h("button", { type: "submit", class: "primary" }, "Run in this engagement");
+      box.appendChild(h("form", { class: "form", onsubmit: function (ev) {
+        ev.preventDefault(); go.disabled = true;
+        api("/api/procs", { method: "POST", body: { h: S.h, node: e.machine, runner: "claude", prompt: prompt.value, target: Number(folder.value), profile: profile.value || null, engagement: e.id } })
+          .then(function (r) { location.hash = "#/sessions/" + r.id; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } }, h("label", null, "Task", prompt), h("div", { class: "fields" }, h("label", null, "Folder on " + e.machine, folder), h("label", null, "Profile", profile)), h("div", { class: "row" }, go)));
+      prompt.focus();
+    }
+    function auditView(e, box) {
+      box.textContent = "";
+      box.appendChild(h("p", { class: "muted small", text: "Loading the audit log..." }));
+      api("/api/engagements/" + e.id + "/audit").then(function (a) {
+        box.textContent = "";
+        var tb = h("tbody");
+        a.entries.slice().reverse().forEach(function (x) {
+          var what = x.event === "tool" ? (x.tool + (x.targets && x.targets.length ? " -> " + x.targets.join(", ") : ""))
+            : x.event === "result" ? x.tool + (x.ok ? ": done" : ": failed")
+            : x.event + (x.user ? " by " + x.user : "") + (x.proc != null ? " (process #" + x.proc + ")" : "");
+          var dec = x.decision ? h("span", { class: "pill " + (x.decision === "allow" ? "ok" : "bad"), text: x.decision + (x.waited_ms ? " +" + x.waited_ms + "ms" : "") }) : null;
+          tb.appendChild(h("tr", null, h("td", { class: "small", text: new Date(x.ts).toLocaleString() }), h("td", null, what, x.reason ? h("div", { class: "small muted", text: x.reason }) : null,
+            x.input ? h("div", { class: "mono small muted", text: x.input.length > 300 ? x.input.slice(0, 300) + "..." : x.input }) : null), h("td", null, dec)));
+        });
+        box.appendChild(h("div", { class: "row" },
+          h("span", { class: "pill " + (a.intact ? "ok" : "bad"), text: a.intact ? "chain intact" : "chain broken: entries were edited or removed" }),
+          a.machine === "unreachable" ? h("span", { class: "pill warn", text: e.machine + " is not connected: its agents' entries are not shown" }) : null,
+          h("span", { class: "muted small", text: a.entries.length + " entries" }),
+          h("a", { class: "btn ghost small", href: "/api/engagements/" + e.id + "/audit" + q({ format: "csv" }), download: "" }, "Export CSV"),
+          h("a", { class: "btn ghost small", href: "/api/engagements/" + e.id + "/audit" + q({ format: "jsonl" }), download: "" }, "Export JSONL")));
+        box.appendChild(a.entries.length ? h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["When", "What", "Decision"].map(function (c) { return h("th", { text: c }); }))), tb))
+          : h("p", { class: "muted", text: "Nothing yet." }));
+      }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
+    }
+    function card(e, isOpen) {
+      var act = h("div"), aud = h("div");
+      var c = h("div", { class: "card engagement" },
+        h("div", { class: "row" }, h("h3", { text: e.name }), h("span", { class: "pill " + (ESTATE[e.state] || ""), text: e.state }), h("span", { class: "muted small", text: "on " + e.machine + ", " + e.rate + " calls/s per host" })),
+        h("p", { class: "small", text: new Date(e.starts * 1000).toLocaleString() + "  to  " + new Date(e.ends * 1000).toLocaleString() }),
+        h("div", { class: "chips" }, e.scope.map(function (x) { return h("span", { class: "pill ok", text: x }); }), e.exclude.map(function (x) { return h("span", { class: "pill bad", text: "not " + x }); })),
+        h("p", { class: "small muted" }, h("b", { text: "Authorized: " }), e.authorization, " (recorded by " + e.created_by + ")"),
+        h("div", { class: "row" },
+          e.state === "active" && !viewer && !S.ov.read_only ? h("button", { type: "button", class: "primary", onclick: function () { runForm(e, act); } }, "Run an agent in it") : null,
+          !viewer ? h("button", { type: "button", onclick: function () { auditView(e, aud); } }, "Audit log") : null,
+          admin && e.state !== "ended" && !S.ov.read_only ? h("button", { type: "button", class: "danger", onclick: function () {
+            ask("End " + e.name + " now?", [], "End now", function () {
+              return api("/api/engagements/" + e.id + "/end", { method: "POST" }).then(function (r) { toast("Ended" + (r.stopped && r.stopped.length ? "; stopped " + r.stopped.length + " agent(s)" : "")); load(e.id); });
+            });
+          } }, "End now") : null),
+        act, aud);
+      if (isOpen && !viewer) auditView(e, aud);
+      return c;
+    }
+    function load(want) {
+      api("/api/engagements").then(function (all) {
+        list.textContent = "";
+        if (!all.length) { list.appendChild(empty(admin ? "No engagements yet. Create one to test live systems within a written scope." : "No engagements yet. An admin creates them.")); return; }
+        all.forEach(function (e) { list.appendChild(card(e, e.id === want)); });
+      }).catch(function (err) { list.textContent = ""; list.appendChild(empty(err.message)); });
+    }
+    load(open);
+  }
+
   function pageNodes(m) {
     var refresh = h("button", { type: "button" }, "Check again");
     m.appendChild(header("Machines", "Computers your agents run on. Add one with a single command: no SSH, no open ports, and it reconnects by itself.",
@@ -4753,6 +4870,7 @@
         runs: function () { pageRuns(m); },
         run: function () { pageRun(m, arg); },
         nodes: function () { pageNodes(m); },
+        engagements: function () { pageEngagements(m, arg); },
         workflows: function () { pageWorkflows(m); },
         workflow: function () { pageWorkflowRun(m, arg); },
         launch: function () { pageLaunch(m); },

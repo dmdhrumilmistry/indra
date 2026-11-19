@@ -144,6 +144,13 @@ their section; nothing is deleted, items are checked off with the change that di
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options
 
+- [x] Engagements: written scope (hosts, *.domains, IPs, CIDRs, exclusions), window, one machine,
+      pace and authorization; `indra guard` hook refuses out-of-scope or out-of-window tool calls,
+      paces and logs the rest; SHA-256-chained audit log merged across console and machine, CSV/JSONL
+- [ ] Blue team: SIEM connectors (Wazuh, Elastic/OpenSearch, Splunk, log files) through MCP,
+      detection validation against an engagement's audit log, detection rules, log triage, hardening
+- [ ] Recording proxy and evidence-verified findings
+
 ## Not planned yet (the docs say so)
 
 - [ ] OS keychain backend for secrets

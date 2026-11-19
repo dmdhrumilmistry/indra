@@ -64,6 +64,8 @@ pub struct App {
     pub users: crate::deck::users::Users,
     /// Enrollment keys: many machines join with one (MDM roll-outs).
     pub enroll: crate::deck::enroll::Keys,
+    /// Engagements: tests of live systems inside a written scope.
+    pub engagements: crate::deck::engage::Store,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -105,6 +107,7 @@ impl App {
         let market = crate::deck::market::Market::open(&settings.data_dir);
         let users = crate::deck::users::Users::open(&settings.data_dir);
         let enroll = crate::deck::enroll::Keys::open(&settings.data_dir);
+        let engagements = crate::deck::engage::Store::open(&settings.data_dir);
         let data_dir = settings.data_dir.clone();
         let shared = config::Shared::new(settings);
         procs.set_accounts(Arc::new(crate::deck::accounts::Accounts::new(
@@ -127,6 +130,7 @@ impl App {
             market,
             users,
             enroll,
+            engagements,
         })
     }
 
@@ -923,6 +927,9 @@ pub(crate) struct LaunchReq {
     memory: Option<bool>,
     /// Ask it for learnings before it finishes (default: the profile's choice).
     reflect: Option<bool>,
+    /// The engagement it runs in (its scope, window and machine apply).
+    #[serde(default)]
+    engagement: Option<String>,
 }
 
 /// A profile and per-launch overrides, resolved into a runner and options.
@@ -1038,7 +1045,109 @@ async fn proc_launch(
             ));
         }
     }
-    proc_start(State(app), Json(r)).await
+    let engagement = r.engagement.clone();
+    let prompt = r.prompt.clone();
+    let node = r.node.clone().unwrap_or_else(|| LOCAL.to_string());
+    let out = proc_start(State(app.clone()), Json(r)).await?;
+    if let Some(e) = engagement {
+        hub_audit(
+            &app,
+            &e,
+            json!({ "event": "launch", "user": who.user, "proc": out.0["id"], "machine": node,
+                    "prompt": crate::mem::search::truncate(&prompt, 2000) }),
+        );
+    }
+    Ok(out)
+}
+
+/// The console's own entries in an engagement's audit log: launches,
+/// approvals, the end. (Its agents' tool calls are logged by indra guard on
+/// the machine they run on.)
+fn hub_audit(app: &App, id: &str, entry: Value) {
+    if crate::deck::engage::valid_id(id) {
+        let mut e = entry;
+        e["engagement"] = json!(id);
+        let _ = crate::deck::engage::audit(
+            &crate::deck::engage::dir_of(&app.settings().data_dir, id),
+            e,
+        );
+    }
+}
+
+/// The engagement a launch asks for, checked: it exists, it is active, the
+/// agent runs on its machine with a Claude Code runner, and that machine's
+/// indra can enforce it.
+fn engagement_for(
+    app: &App,
+    id: &str,
+    node: &str,
+    runner: Option<&config::Runner>,
+) -> ApiResult<crate::deck::engage::Spec> {
+    let e = app
+        .engagements
+        .get(id)
+        .ok_or_else(|| bad("no such engagement"))?;
+    let t = crate::deck::engage::now();
+    if !e.spec.active(t) {
+        return Err(bad(format!(
+            "the engagement '{}' is not active now (its window is over, or has not started)",
+            e.spec.name
+        )));
+    }
+    if e.machine != node {
+        return Err(bad(format!(
+            "the engagement '{}' runs on {} only",
+            e.spec.name, e.machine
+        )));
+    }
+    if let Some(r) = runner {
+        if r.format != "claude-stream-json" {
+            return Err(bad(
+                "agents in an engagement must be Claude Code: its hooks are what enforce the scope",
+            ));
+        }
+    }
+    if node != LOCAL {
+        // An older indra there would ignore the engagement: refuse.
+        let info = app
+            .procs
+            .links()
+            .get(node)
+            .and_then(|l| l.info())
+            .or_else(|| {
+                app.node_cache
+                    .lock()
+                    .unwrap()
+                    .get(node)
+                    .and_then(|(_, r)| r.as_ref().ok().map(|i| json!(i)))
+            });
+        let v = info
+            .as_ref()
+            .and_then(|i| i["version"].as_str())
+            .unwrap_or("0");
+        if !version_at_least(v, (0, 13, 0)) {
+            return Err(bad(format!(
+                "{} runs indra {}, which cannot enforce an engagement: update it there (`indra update`, then `indra node restart`)",
+                node, v
+            )));
+        }
+    }
+    Ok(e.spec)
+}
+
+fn version_at_least(v: &str, min: (u64, u64, u64)) -> bool {
+    let n: Vec<u64> = v
+        .trim_start_matches('v')
+        .split(['.', '-'])
+        .take(3)
+        .map(|x| x.parse().unwrap_or(0))
+        .collect();
+    let got = (
+        n.first().copied().unwrap_or(0),
+        n.get(1).copied().unwrap_or(0),
+        n.get(2).copied().unwrap_or(0),
+    );
+    got >= min
 }
 
 pub(crate) async fn proc_start(
@@ -1054,7 +1163,26 @@ pub(crate) async fn proc_start(
     let targets = node_targets(&app, h, node)?;
     let target = targets.get(r.target).ok_or_else(|| bad("unknown target"))?;
     let settings = app.settings();
-    let (runner_name, agent) = resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
+    let (runner_name, mut agent) =
+        resolve_agent(&settings, r.profile.as_deref(), &r.runner, &r.opts)?;
+    // Only the console's store sets an engagement, never the request.
+    agent.engagement = match r.engagement.as_deref().filter(|e| !e.is_empty()) {
+        Some(id) => {
+            let runner = if node == LOCAL {
+                Some(
+                    settings
+                        .runners
+                        .iter()
+                        .find(|x| x.name == runner_name)
+                        .ok_or_else(|| bad(format!("unknown runner '{}'", runner_name)))?,
+                )
+            } else {
+                None
+            };
+            Some(engagement_for(&app, id, node, runner)?)
+        }
+        None => None,
+    };
     // On Ollama here: a model the server cannot load fails now, clearly.
     // (A remote machine checks its own Ollama when the job arrives.)
     if node == LOCAL {
@@ -1414,6 +1542,14 @@ async fn proc_pivot(
             )
         }
     };
+    // An agent in an engagement stays in it, under its current terms.
+    let mut agent = agent;
+    agent.engagement = p.opts().engagement.as_ref().map(|e| {
+        app.engagements
+            .get(&e.id)
+            .map(|x| x.spec)
+            .unwrap_or_else(|| e.clone())
+    });
     let new_profile = if cont {
         p.profile().map(String::from)
     } else {
@@ -1970,12 +2106,21 @@ struct PermissionReq {
 /// Approve or deny a tool request the agent is waiting on.
 async fn proc_permission(
     State(app): State<Arc<App>>,
+    axum::Extension(who): axum::Extension<crate::deck::users::Who>,
     UrlPath(id): UrlPath<u64>,
     Json(r): Json<PermissionReq>,
 ) -> ApiResult<Json<Value>> {
     let p = running_proc(&app, id)?;
     p.answer(&r.request_id, r.allow, r.always, r.message.as_deref())
         .map_err(bad)?;
+    if let Some(e) = &p.opts().engagement {
+        hub_audit(
+            &app,
+            &e.id,
+            json!({ "event": "approval", "user": who.user, "proc": id, "request": r.request_id,
+                    "decision": if r.allow { "allow" } else { "deny" }, "always": r.always }),
+        );
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2720,6 +2865,200 @@ async fn enroll_key_create(
     v["hub"] = json!(hub_url(&app, &headers));
     v["reachable"] = json!(!app.loopback);
     Ok(Json(v))
+}
+
+/// `GET /api/engagements`: every engagement, newest first.
+async fn engagements_list(State(app): State<Arc<App>>) -> Json<Value> {
+    let t = crate::deck::engage::now();
+    Json(json!(app
+        .engagements
+        .list()
+        .iter()
+        .map(|e| crate::deck::engage::view(e, t))
+        .collect::<Vec<_>>()))
+}
+
+/// `POST /api/engagements` (admins): a new engagement.
+async fn engagement_create(
+    State(app): State<Arc<App>>,
+    axum::Extension(who): axum::Extension<crate::deck::users::Who>,
+    Json(n): Json<crate::deck::engage::New>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    if n.machine != LOCAL && app.settings().node(&n.machine).is_none() {
+        return Err(bad(format!(
+            "{} is not one of this hub's machines",
+            n.machine
+        )));
+    }
+    let e = app.engagements.create(n, &who.user).map_err(bad)?;
+    hub_audit(
+        &app,
+        &e.spec.id,
+        json!({ "event": "created", "user": who.user, "name": e.spec.name, "machine": e.machine,
+                "scope": e.spec.scope, "exclude": e.spec.exclude, "starts": e.spec.starts,
+                "ends": e.spec.ends, "rate": e.spec.rate, "authorization": e.authorization }),
+    );
+    Ok(Json(crate::deck::engage::view(
+        &e,
+        crate::deck::engage::now(),
+    )))
+}
+
+/// `POST /api/engagements/{id}/end` (admins): end it now and stop its agents.
+async fn engagement_end(
+    State(app): State<Arc<App>>,
+    axum::Extension(who): axum::Extension<crate::deck::users::Who>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let e = app.engagements.end(&id).map_err(not_found)?;
+    let mut stopped = vec![];
+    for p in app.procs.list() {
+        if p.status == "running"
+            && p.opts
+                .engagement
+                .as_ref()
+                .map(|x| x.id == id)
+                .unwrap_or(false)
+        {
+            if let Some(proc_) = app.procs.get(p.id) {
+                if proc_.request_stop() {
+                    stopped.push(p.id);
+                }
+            }
+        }
+    }
+    hub_audit(
+        &app,
+        &id,
+        json!({ "event": "ended", "user": who.user, "stopped": stopped }),
+    );
+    let mut v = crate::deck::engage::view(&e, crate::deck::engage::now());
+    v["stopped"] = json!(stopped);
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct AuditQ {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `GET /api/engagements/{id}/audit[?format=csv|jsonl]`: the console's
+/// entries and those of the machine its agents ran on, merged by time, and
+/// whether both chains are intact.
+async fn engagement_audit(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<AuditQ>,
+) -> ApiResult<axum::response::Response> {
+    use crate::deck::engage;
+    let e = app
+        .engagements
+        .get(&id)
+        .ok_or_else(|| not_found("no such engagement"))?;
+    let (mut entries, mut intact) =
+        engage::read_audit(&engage::dir_of(&app.settings().data_dir, &id), 20_000);
+    let mut machine = "read";
+    if e.machine == LOCAL {
+        let local = engage::local_dir(&id);
+        if local != engage::dir_of(&app.settings().data_dir, &id) {
+            let (more, ok) = engage::read_audit(&local, 20_000);
+            entries.extend(more);
+            intact &= ok;
+        }
+    } else {
+        match app.procs.links().get(&e.machine).filter(|l| l.connected()) {
+            Some(l) => match l.request("audit", json!({ "id": id }), 30).await {
+                Ok(v) => {
+                    entries.extend(v["entries"].as_array().cloned().unwrap_or_default());
+                    intact &= v["intact"].as_bool().unwrap_or(false);
+                }
+                Err(_) => machine = "unreachable",
+            },
+            None => machine = "unreachable",
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|x| seen.insert(x["hash"].as_str().unwrap_or("").to_string()));
+    entries.sort_by_key(|x| x["ts"].as_u64().unwrap_or(0));
+    let name = format!("engagement-{}-audit", id);
+    match q.format.as_deref() {
+        Some("jsonl") => {
+            let body: String = entries.iter().map(|x| x.to_string() + "\n").collect();
+            Ok(download(
+                &format!("{}.jsonl", name),
+                "application/x-ndjson",
+                body,
+            ))
+        }
+        Some("csv") => {
+            let cell = |v: &Value| -> String {
+                let s = match v {
+                    Value::Null => String::new(),
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                // Spreadsheets run cells that start like a formula.
+                let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+                    format!("'{}", s)
+                } else {
+                    s
+                };
+                format!("\"{}\"", s.replace('"', "\"\""))
+            };
+            let cols = [
+                "ts",
+                "event",
+                "user",
+                "proc",
+                "session",
+                "tool",
+                "targets",
+                "decision",
+                "reason",
+                "waited_ms",
+                "ok",
+                "input",
+                "hash",
+            ];
+            let mut body = cols.join(",") + "\n";
+            for x in &entries {
+                body.push_str(
+                    &cols
+                        .iter()
+                        .map(|c| cell(&x[*c]))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                body.push('\n');
+            }
+            Ok(download(&format!("{}.csv", name), "text/csv", body))
+        }
+        _ => Ok(
+            Json(json!({ "entries": entries, "intact": intact, "machine": machine }))
+                .into_response(),
+        ),
+    }
+}
+
+fn download(name: &str, kind: &str, body: String) -> axum::response::Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, kind.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", name),
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// `GET /api/nodes/keys`: the enrollment keys, without their secrets.
@@ -3855,6 +4194,12 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/nodes/keys/{id}",
             axum::routing::delete(enroll_key_revoke),
         )
+        .route(
+            "/api/engagements",
+            get(engagements_list).post(engagement_create),
+        )
+        .route("/api/engagements/{id}/end", post(engagement_end))
+        .route("/api/engagements/{id}/audit", get(engagement_audit))
         .route("/api/nodes/{name}", axum::routing::delete(node_remove))
         .route("/api/nodes/{name}/dirs", get(node_dirs))
         .route(
@@ -5977,6 +6322,166 @@ while True:
     }
 
     /// The fixture, with a memory vault (`vault/` under its root) on its harness.
+    #[tokio::test]
+    async fn engagements_bind_agents_to_their_scope() {
+        let (base, dir) = fixture("engage", false);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "fakeclaude".into(),
+            command: "echo".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            format: "claude-stream-json".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: crate::deck::config::which("echo"),
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let t = crate::deck::engage::now();
+        let new = |m: Value| {
+            let mut b = json!({ "name": "Q4 web test", "machine": "local", "scope": ["app.example.com"],
+                "starts": t - 10, "ends": t + 3600, "authorization": "SOW #42, signed by the app owner" });
+            for (k, v) in m.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            b
+        };
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/engagements",
+            &[AUTH, origin],
+            Some(new(json!({}))),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for bad in [
+            json!({ "authorization": "ok" }),
+            json!({ "machine": "nope" }),
+            json!({ "scope": [] }),
+            json!({ "ends": t - 20 }),
+        ] {
+            let (s, _, b) = call(
+                &app,
+                "POST",
+                "/api/engagements",
+                &[AUTH, origin],
+                Some(new(bad.clone())),
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{} {}", bad, b);
+        }
+        let launch = |body: Value| {
+            let app = app.clone();
+            async move { call(&app, "POST", "/api/procs", &[AUTH, origin], Some(body)).await }
+        };
+        // Only Claude Code, whose hooks enforce it.
+        let (s, _, b) =
+            launch(json!({ "runner": "echo", "prompt": "go", "target": 0, "engagement": id }))
+                .await;
+        assert!(
+            s == StatusCode::BAD_REQUEST && b.contains("Claude Code"),
+            "{}",
+            b
+        );
+        let (s, _, b) = launch(
+            json!({ "runner": "fakeclaude", "prompt": "go", "target": 0, "engagement": id }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let pid = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let v = json!(app.procs.get(pid).unwrap().view());
+        assert_eq!(v["opts"]["engagement"]["id"], json!(id));
+        let cmd = v["command"].to_string();
+        assert!(
+            cmd.contains("--settings") && cmd.contains("guard pre") && cmd.contains("guard post"),
+            "{}",
+            cmd
+        );
+        // A request cannot bring its own engagement.
+        let forged = json!({ "id": "zzzz9999", "name": "x", "scope": ["*.com"], "starts": 0, "ends": t + 9, "rate": 50.0 });
+        let (s, _, b) = launch(json!({ "runner": "fakeclaude", "prompt": "go", "target": 0, "opts": { "engagement": forged } })).await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let pid2 = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert!(app
+            .procs
+            .get(pid2)
+            .unwrap()
+            .view()
+            .opts
+            .engagement
+            .is_none());
+        // Not on another machine.
+        let (s, _, _) = launch(json!({ "node": "box", "runner": "fakeclaude", "prompt": "go", "target": 0, "engagement": id })).await;
+        assert_ne!(s, StatusCode::OK);
+        // The audit log: created and launched, chained.
+        let (s, _, b) = call(
+            &app,
+            "GET",
+            &format!("/api/engagements/{}/audit", id),
+            &[AUTH],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let a: Value = serde_json::from_str(&b).unwrap();
+        let events: Vec<&str> = a["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["event"].as_str())
+            .collect();
+        assert!(
+            events.contains(&"created") && events.contains(&"launch"),
+            "{:?}",
+            events
+        );
+        assert_eq!(a["intact"], true);
+        let (s, h, b) = call(
+            &app,
+            "GET",
+            &format!("/api/engagements/{}/audit?format=csv", id),
+            &[AUTH],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(
+            h["content-type"].to_str().unwrap().starts_with("text/csv")
+                && b.starts_with("ts,event,")
+        );
+        // Ended: nothing more starts in it.
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            &format!("/api/engagements/{}/end", id),
+            &[AUTH, origin],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        assert_eq!(serde_json::from_str::<Value>(&b).unwrap()["state"], "ended");
+        let (s, _, b) = launch(
+            json!({ "runner": "fakeclaude", "prompt": "go", "target": 0, "engagement": id }),
+        )
+        .await;
+        assert!(
+            s == StatusCode::BAD_REQUEST && b.contains("not active"),
+            "{}",
+            b
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn fixture_with_memory(name: &str, read_only: bool) -> (Arc<App>, PathBuf) {
         let (base, dir) = fixture(name, read_only);
         let mut settings = (*base.settings()).clone();
