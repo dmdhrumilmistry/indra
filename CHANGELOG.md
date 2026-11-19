@@ -3,6 +3,18 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.15.0
+
+- **Attack surface: what actually impacts you.** A review run's page:
+  - ranks its vulnerabilities by who can reach them: from the internet, after login, internal only, or
+    not at all;
+  - shows the path an attacker takes to each (Internet, then `POST /api/login`, then the finding);
+  - draws the whole surface as a graph: entry points, components, findings, sinks, dependencies and
+    their CVEs.
+- **CVE reachability:** recon now records whether each CVE's vulnerable code is called, with the call
+  sites, and the verifier records each finding's entry point and who can reach it. The new
+  `sh-attack-surface` skill fills these in for older runs.
+
 ## v0.14.0
 
 - **MCP & tools: any third-party tool for agents, managed from the dashboard.** Settings > MCP & tools

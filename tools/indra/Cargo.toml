@@ -1,6 +1,6 @@
 [package]
 name = "indra"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Run, watch and orchestrate AI coding agents (Claude Code, Codex, Gemini, Ollama) across machines: a web console, workflows with conditions and loops, boards, an MCP server and graph memory, in one binary."

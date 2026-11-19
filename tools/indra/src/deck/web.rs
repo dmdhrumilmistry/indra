@@ -907,6 +907,16 @@ async fn run_file(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResu
     ))
 }
 
+/// `GET /api/run/surface?key=`: the run's attack surface as a graph, and
+/// which of its vulnerabilities an attacker can reach.
+async fn run_surface(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiResult<Json<Value>> {
+    let h = &app.harness(q.h.as_deref())?;
+    let dir = find_run(&app, h, &q.key)?;
+    crate::deck::surface::build(&dir)
+        .map(Json)
+        .ok_or_else(|| not_found("this run has no codebase map (codebase-map.json) to draw"))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct LaunchReq {
     h: Option<String>,
@@ -4392,6 +4402,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/runs", get(runs_list))
         .route("/api/run", get(run_get))
         .route("/api/run/file", get(run_file))
+        .route("/api/run/surface", get(run_surface))
         .route("/api/procs", get(procs_list).post(proc_launch))
         .route("/api/nodes", get(nodes_list))
         .route("/api/nodes/enrol", post(node_enrol))

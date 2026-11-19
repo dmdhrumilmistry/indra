@@ -35,6 +35,15 @@ vulnerabilities - you produce the two artifacts hunters depend on.
    `osv-scanner --format json -r <target>`. Parse results into `known_cves[]`. If none are available,
    flag conspicuously outdated/known-bad direct dependencies from your own knowledge and mark the source `kb`
    (clearly lower confidence - do not invent CVE ids you are unsure of; prefer package+version+"outdated").
+   Then, for each CVE, decide **reachability**, because a CVE in code nobody calls does not impact anyone:
+   - Name the affected function or feature from the advisory, in `vulnerable`.
+   - Search for where the code imports and calls it.
+   - Set `reachable` with the call sites as `evidence` (`file:line`) when it is used outside tests.
+   - Set `not_reachable` when the package is dev- or test-only, or when the vulnerable part is never used.
+     Say why in `notes`.
+   - Set `unknown` when you cannot tell (a transitive dependency, or reflection).
+
+   The console draws the attack surface from these fields.
 5. **Attack surface.** Follow `attack-surface-checklist.md`: enumerate entry points (routes/CLI/consumers),
    trust boundaries, and dangerous sinks per class. Use `graft map`/`graft ask`/`graft grep` (or native
    search) to find route registrations and sink symbols. Record whether each entry point is auth-guarded.

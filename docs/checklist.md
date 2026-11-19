@@ -152,7 +152,8 @@ their section; nothing is deleted, items are checked off with the change that di
       agents by profile or per launch through a private, temporary MCP config
 - [x] Blue team: Check detections on an engagement; sh-detection-rules, sh-log-triage and
       sh-hardening skills
-- [ ] Attack surface graph: what is exposed, and which vulnerabilities are reachable
+- [x] Attack surface graph on a run: entry points to components to findings and CVEs; what is reachable
+      from the internet or after login, with paths; CVE reachability from recon; sh-attack-surface
 - [ ] Recording proxy and evidence-verified findings
 
 ## Not planned yet (the docs say so)
