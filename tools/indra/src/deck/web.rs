@@ -6790,7 +6790,7 @@ while True:
 
     #[tokio::test]
     async fn agents_get_their_tools_and_nothing_else() {
-        let (base, dir) = fixture("tools", false);
+        let (base, dir) = fixture("mcp-tools", false);
         let mut settings = (*base.settings()).clone();
         settings.runners.push(Runner {
             name: "fakeclaude".into(),
