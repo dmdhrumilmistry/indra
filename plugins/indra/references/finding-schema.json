@@ -187,6 +187,15 @@
       },
       "description": "Threat ids from threat-model.json (e.g. T3) that this finding realises. Empty when there was no threat model."
     },
+    "entry_point": {
+      "type": "string",
+      "description": "Where an attacker gets in: the entry point the data flow starts at, as recon lists it (\"POST /api/login\") or as the handler's file:line. Set by the verifier."
+    },
+    "reachability": {
+      "type": "string",
+      "enum": ["unauthenticated", "authenticated", "internal", "unreachable", "unknown"],
+      "description": "Who can reach the vulnerable code: anyone (unauthenticated), a signed-in user (authenticated), only code or people already inside (internal), nobody (unreachable), or not established (unknown). Set by the verifier; the console's attack surface uses it over its own graph."
+    },
     "chained_with": {
       "type": "array",
       "items": {

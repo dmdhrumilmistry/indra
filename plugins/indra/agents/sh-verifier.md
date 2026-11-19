@@ -35,6 +35,18 @@ until the evidence shows a complete, unbroken, reachable exploit path.
    e. Fill `cvss.score` + `cvss.vector` (per rubric), overwrite `confidence` with your post-verification
       value, add `verification` (verdict, rationale, reproduced bool), and tighten `mitigation` to a
       specific code fix.
+   f. Record **who can reach it**:
+      - `entry_point`: the entry point the data flow starts at, as `codebase-map.json` lists it
+        (`"POST /api/login"`), or the handler's `file:line`.
+      - `reachability`, one of:
+        - `unauthenticated`: anyone can reach it;
+        - `authenticated`: it needs a login (say which role in the rationale);
+        - `internal`: only from code, jobs or people already inside;
+        - `unreachable`;
+        - `unknown`.
+
+      Base it on the auth guards you saw on the path, not on the entry point's label alone. The
+      console's attack surface ranks findings by it.
 3. Verify **chains** too: confirm each member is `verified`/`needs-runtime` and the preconditions hold; if a
    member is a false-positive the chain breaks - note that in the chain's finding entries / rationale.
 4. Write **all** findings (verified, false-positive, needs-runtime) to `verified.jsonl`, one per line,

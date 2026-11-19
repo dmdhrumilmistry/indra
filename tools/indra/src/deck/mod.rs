@@ -28,6 +28,7 @@ pub mod router;
 pub mod runs;
 pub mod secrets;
 pub mod siem;
+pub mod surface;
 pub mod term;
 pub mod tools;
 pub mod trackers;

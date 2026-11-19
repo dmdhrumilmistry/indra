@@ -257,7 +257,7 @@
     var FIXED = { agent: "#2f6fdf", skill: "#23875c", prompt: "#c79a1e", stage: "#b8459c" };
     var color = {}, hidden = {}, free = PALETTE.filter(function (c) { return Object.keys(FIXED).every(function (k) { return FIXED[k] !== c; }); });
     Object.keys(types).sort(function (a, b) { return types[b] - types[a]; }).forEach(function (t) {
-      color[t] = t === "(missing)" ? null : FIXED[t] || free.shift() || PALETTE[0];
+      color[t] = t === "(missing)" ? null : (data.colors && data.colors[t]) || FIXED[t] || free.shift() || PALETTE[0];
     });
     var legend = h("div", { class: "legend" });
     Object.keys(color).forEach(function (t) {
@@ -1039,6 +1039,64 @@
   // its trust boundaries with their controls, and its threats ranked by risk.
   var STRIDE = { S: "Spoofing", T: "Tampering", R: "Repudiation", I: "Information disclosure", D: "Denial of service", E: "Elevation of privilege" };
   function loc(l) { return l && l.file ? l.file + (l.line ? ":" + l.line : "") : ""; }
+  // A run's attack surface: what an attacker can reach, and which of its
+  // vulnerabilities that makes real.
+  var REACH = { internet: ["bad", "from the internet"], login: ["warn", "after login"], reachable: ["warn", "reachable"],
+    unknown: ["", "reachability unknown"], internal: ["", "internal only"], "not reachable": ["ok", "not reachable"] };
+  function runSurface(key) {
+    var box = h("div");
+    api("/api/run/surface" + hq({ key: key })).then(function (r) {
+      var sm = r.summary, card = h("div", { class: "card surface" });
+      card.appendChild(h("h3", { text: "Attack surface" }));
+      card.appendChild(h("p", null, h("b", { text: sm.impacting + " of " + sm.vulns }), " vulnerabilities can be reached by an attacker: ",
+        h("b", { text: String(sm.internet) }), " from the internet, ", h("b", { text: String(sm.login) }), " after login" + (sm.reachable ? ", " + sm.reachable + " reachable from code an attacker can reach" : "") + ". ",
+        h("span", { class: "muted", text: sm.entry_points + " entry points, " + sm.unauthenticated_entry_points + " without login. " +
+          sm.internal + " internal only, " + sm.not_reachable + " not reachable, " + sm.unknown + " unknown." })));
+      var show = h("select", { "aria-label": "Show" }, [["impacting", "what can be reached"], ["all", "everything"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var tb = h("tbody");
+      function rows() {
+        tb.textContent = "";
+        r.vulns.filter(function (v) { return show.value === "all" || v.impacting; }).forEach(function (v) {
+          var rc = REACH[v.reach] || ["", v.reach];
+          tb.appendChild(h("tr", null,
+            h("td", null, h("span", { class: "pill " + rc[0], text: rc[1] })),
+            h("td", null, h("span", { class: "sev sev-" + (v.severity || "info"), text: v.severity || "?" })),
+            h("td", null, h("b", { text: v.title || v.id }), v.kind === "cve" && v.fixed_in ? h("div", { class: "small muted", text: "fixed in " + v.fixed_in }) : null,
+              v.file ? h("div", { class: "mono small muted", text: v.file }) : null),
+            h("td", { class: "small", text: v.path.length ? v.path.join("  ->  ") : "" })));
+        });
+        if (!tb.childNodes.length) tb.appendChild(h("tr", null, h("td", { colspan: "4", class: "muted", text: "Nothing an attacker can reach was found." })));
+      }
+      show.addEventListener("change", rows);
+      card.appendChild(h("div", { class: "row" }, h("h4", { text: "What actually impacts you" }), h("label", { class: "small" }, "Show ", show)));
+      card.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Reach", "Severity", "Vulnerability", "How an attacker gets there"].map(function (c) { return h("th", { text: c }); }))), tb)));
+      rows();
+      var gbox = h("details", { class: "surface-graph" }, h("summary", { text: "Graph: entry points, components, findings, dependencies and CVEs" }));
+      var drawn = false;
+      gbox.addEventListener("toggle", function () {
+        if (!gbox.open || drawn) return;
+        drawn = true;
+        var data = { nodes: r.nodes.map(function (n) {
+          var t = n.type === "finding" || n.type === "cve" ? (n.impacting ? "reachable " : "") + (n.type === "cve" ? "CVE" : "finding") : n.type;
+          return { id: n.id, title: n.title, type: t, raw: n };
+        }), edges: r.edges, colors: { exposure: "#8a5a3c", "entry point": "#d9622b", component: "#5b6ad0", sink: "#7a8b2a", dependency: "#3a9fb5",
+          "reachable finding": "#c2434a", "reachable CVE": "#e0457b", finding: "#9b9b95", CVE: "#b5b5ad" } };
+        graphView(gbox, data, function (n, panel) {
+          var raw = n.raw.raw || n.raw;
+          panel.appendChild(h("h3", { text: raw.title }));
+          panel.appendChild(h("p", { class: "muted small", text: raw.type + (raw.reach ? ", " + (REACH[raw.reach] || ["", raw.reach])[1] : "") }));
+          var d = raw.detail || {};
+          ["severity", "status", "class", "file", "line", "path", "method", "auth_required", "package", "version", "fixed_in", "reachability", "evidence", "entry_point"].forEach(function (k) {
+            if (d[k] != null && d[k] !== "") panel.appendChild(h("div", { class: "kv small" }, h("span", { text: k }), h("code", { text: Array.isArray(d[k]) ? d[k].join(", ") : String(d[k]) })));
+          });
+        });
+      });
+      card.appendChild(gbox);
+      box.appendChild(card);
+    }).catch(function () { /* no codebase map in this run */ });
+    return box;
+  }
+
   function runThreats(key) {
     var box = h("div");
     api("/api/run/file" + hq({ key: key, rel: "threat-model.json", max: 4194304 })).then(function (f) {
@@ -1365,7 +1423,7 @@
 
   function pageRun(m, key) {
     var top = h("div"), body = h("div"), viewer = h("div");
-    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
+    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runSurface(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
     var openRel = null, lastMod = 0;
     function showFile(rel) {
       openRel = rel;

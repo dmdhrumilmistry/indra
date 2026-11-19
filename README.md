@@ -80,6 +80,7 @@ indra/                           # this repository: a plugin marketplace + the i
 │   │   ├── sh-detection-rules   # blue team: Sigma rules for what the SIEM missed
 │   │   ├── sh-log-triage        # blue team: alert triage and threat hunting, read-only
 │   │   ├── sh-hardening         # blue team: an ordered, verifiable fix plan
+│   │   ├── sh-attack-surface    # what an attacker can reach; which CVEs and findings actually impact
 │   │   ├── sh-memory            # long-term graph memory across runs
 │   │   ├── sh-publish           # findings to Jira, Confluence, GitHub issues, Notion
 │   │   └── sh-kb-*  (15)        # per-vulnerability-class knowledge bases
