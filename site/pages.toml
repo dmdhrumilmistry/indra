@@ -84,6 +84,14 @@ file = "docs/guides/engagements.md"
 
 [[page]]
 group = "Guides"
+slug = "blue-team"
+title = "Blue team and MCP & tools"
+description = "Third-party MCP servers and read-only data sources (Wazuh, Elastic, OpenSearch, Splunk, log files) managed from the dashboard, detection checks for engagements, and agents that draft detection rules, triage logs and plan hardening."
+[[page.source]]
+file = "docs/guides/blue-team.md"
+
+[[page]]
+group = "Guides"
 slug = "mdm"
 title = "Rolling out with MDM"
 description = "Jamf, Intune and other MDM tools: one enrollment key for many machines, and organization-wide default or enforced settings."

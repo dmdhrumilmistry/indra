@@ -783,9 +783,15 @@ pub async fn run_job(
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
+    let temp = ac.temp.clone();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return fail(format!("cannot start {}: {}", program.display(), e)),
+        Err(e) => {
+            if let Some(t) = &temp {
+                let _ = std::fs::remove_file(t);
+            }
+            return fail(format!("cannot start {}: {}", program.display(), e));
+        }
     };
     let pid = child.id();
     out(
@@ -846,6 +852,9 @@ pub async fn run_job(
     };
     let _ = t1.await;
     let _ = t2.await;
+    if let Some(t) = &temp {
+        let _ = std::fs::remove_file(t);
+    }
     let code = status.ok().and_then(|st| st.code()).unwrap_or(1);
     out(json!({ "t": "exit", "code": code }));
     code
@@ -889,6 +898,10 @@ pub struct AgentOpts {
     /// against its scope and window, paces it and logs it (Claude Code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engagement: Option<crate::deck::engage::Spec>,
+    /// MCP servers from MCP & tools (references until launch). Only the
+    /// console sets them, from its configuration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, crate::deck::integrations::McpServer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1012,6 +1025,9 @@ impl AgentOpts {
         if let Some(e) = &self.engagement {
             e.validate()?;
         }
+        for (name, s) in &self.mcp_servers {
+            s.validate(name)?;
+        }
         if let Some(m) = &self.mcp {
             if !MCP_CHOICES.contains(&m.as_str()) {
                 return Err(format!(
@@ -1097,6 +1113,8 @@ pub struct AgentCommand {
     /// Driven over Claude Code's control channel: these lines go to its
     /// stdin first (initialize, then the prompt), and stdin stays open.
     pub control: Option<Vec<String>>,
+    /// A private file (the MCP config) to delete when the agent exits.
+    pub temp: Option<PathBuf>,
 }
 
 /// The command for a runner with options. A Claude Code runner whose
@@ -1196,8 +1214,18 @@ pub fn agent_command(
             serde_json::to_string(e).map_err(|e| e.to_string())?,
         );
     }
-    if claude && o.mcp.as_deref() == Some("none") {
-        // Last, as --mcp-config takes every value up to the next flag.
+    // MCP & tools (other runners do not take MCP servers). Last, as
+    // --mcp-config takes every value up to the next flag.
+    let mut temp = None;
+    if claude && !o.mcp_servers.is_empty() {
+        let f = crate::deck::integrations::write_config(&o.mcp_servers)?;
+        if o.mcp.as_deref() == Some("none") {
+            args.push("--strict-mcp-config".into());
+        }
+        args.push("--mcp-config".into());
+        args.push(f.display().to_string());
+        temp = Some(f);
+    } else if claude && o.mcp.as_deref() == Some("none") {
         args.extend(
             [
                 "--strict-mcp-config",
@@ -1212,6 +1240,7 @@ pub fn agent_command(
         args,
         env: env.into_iter().collect(),
         control,
+        temp,
     })
 }
 

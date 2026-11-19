@@ -147,8 +147,12 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] Engagements: written scope (hosts, *.domains, IPs, CIDRs, exclusions), window, one machine,
       pace and authorization; `indra guard` hook refuses out-of-scope or out-of-window tool calls,
       paces and logs the rest; SHA-256-chained audit log merged across console and machine, CSV/JSONL
-- [ ] Blue team: SIEM connectors (Wazuh, Elastic/OpenSearch, Splunk, log files) through MCP,
-      detection validation against an engagement's audit log, detection rules, log triage, hardening
+- [x] MCP & tools (Settings > MCP & tools, `[[tool]]`): any third-party MCP server (command or URL)
+      and read-only data sources (Wazuh, Elastic, OpenSearch, Splunk, log files), Test, given to
+      agents by profile or per launch through a private, temporary MCP config
+- [x] Blue team: Check detections on an engagement; sh-detection-rules, sh-log-triage and
+      sh-hardening skills
+- [ ] Attack surface graph: what is exposed, and which vulnerabilities are reachable
 - [ ] Recording proxy and evidence-verified findings
 
 ## Not planned yet (the docs say so)
