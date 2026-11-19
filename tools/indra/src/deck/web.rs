@@ -2125,6 +2125,8 @@ struct PermissionReq {
     #[serde(default)]
     always: bool,
     message: Option<String>,
+    /// For a question (AskUserQuestion): each question's text to the answer.
+    answers: Option<Value>,
 }
 
 /// Approve or deny a tool request the agent is waiting on.
@@ -2135,8 +2137,14 @@ async fn proc_permission(
     Json(r): Json<PermissionReq>,
 ) -> ApiResult<Json<Value>> {
     let p = running_proc(&app, id)?;
-    p.answer(&r.request_id, r.allow, r.always, r.message.as_deref())
-        .map_err(bad)?;
+    p.answer(
+        &r.request_id,
+        r.allow,
+        r.always,
+        r.message.as_deref(),
+        r.answers.as_ref(),
+    )
+    .map_err(bad)?;
     if let Some(e) = &p.opts().engagement {
         hub_audit(
             &app,
@@ -5544,6 +5552,17 @@ while True:
         )
         .await;
         assert_eq!(s, StatusCode::OK, "{}", body);
+        let (s, _, _) = post(
+            format!("/api/procs/{}/permission", id),
+            json!({ "request_id": "perm-1", "allow": true, "answers": { "q": "a" } }),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "a tool request takes no answers, and stays waiting"
+        );
+        assert_eq!(view(id).await["phase"], "approval");
         let (s, _, body) = post(
             format!("/api/procs/{}/permission", id),
             json!({ "request_id": "perm-1", "allow": true, "always": true }),

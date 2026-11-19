@@ -431,6 +431,13 @@
     m.appendChild(header("Home", "indra runs AI coding agents (Claude Code, Codex, Gemini) on your code, on this computer or others you add, and shows what they do and find."));
     m.appendChild(getStarted(ov));
     var running = ov.procs.filter(function (p) { return p.status === "running"; });
+    if (running.length) {
+      var waiting = running.filter(function (p) { return WAITING[phaseOf(p)]; }).length;
+      m.appendChild(h("a", { class: "card home-status", href: "#/pad" },
+        h("span", { class: "sym " + (waiting ? "s-approval" : "s-thinking"), "data-sym": waiting ? "approval" : "thinking", "aria-hidden": "true", text: waiting ? "!" : "\u280b" }),
+        h("span", { class: "grow" }, h("b", { text: waiting ? waiting + " waiting for you" : "Nothing is waiting for you" }),
+          h("span", { class: "muted", text: ", " + (running.length - waiting) + " working." })), h("span", { text: "Open Status" })));
+    }
     m.appendChild(h("h2", { text: "Running now" }));
     m.appendChild(running.length ? procTable(running) : empty("Nothing running. Start one with Run an agent."));
     var about = h("details", { class: "card", keep: "home-about" }, h("summary", { text: "About this setup: agents, skills and what they are made of" }),
@@ -2821,6 +2828,376 @@
   function firstLine(t, n) { t = String(t || "").split("\n").filter(function (x) { return x.trim(); })[0] || "(no prompt)"; return t.length > n ? t.slice(0, n) + "..." : t; }
   var DOT = { running: "run live", exited: "ok", failed: "bad", stopped: "warn" };
 
+  // ---- agent states ---------------------------------------------------------------
+  // What a session is doing, as the server reports it (`phase`). Each state is a
+  // monospace symbol, always with its name beside it. Symbols move while the
+  // agent works and hold still while it waits for you or has finished.
+  var PHASE = {
+    approval: "Needs approval", question: "Has a question", error: "Failed", tool: "Using a tool", writing: "Writing", thinking: "Thinking",
+    compacting: "Compacting", done: "Done", stopped: "Stopped", idle: "Idle"
+  };
+  var WAITING = { approval: 1, question: 1 };
+  function phaseOf(p) {
+    if (p.phase && PHASE[p.phase]) return p.phase;
+    if (p.status === "running") return (p.pending || []).length ? "approval" : "thinking";
+    return p.status === "failed" ? "error" : p.status === "stopped" ? "stopped" : "done";
+  }
+  // The kind of tool in use picks the symbol's motion.
+  function toolKind(t) {
+    t = String(t || "");
+    if (/^(Read|Grep|Glob|LS|NotebookRead)$/.test(t)) return "read";
+    if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(t)) return "edit";
+    if (/^(Bash|BashOutput|KillShell|KillBash)$/.test(t)) return "shell";
+    if (/^(WebFetch|WebSearch)$/.test(t)) return "web";
+    if (/^(Task|Agent)$/.test(t)) return "agent";
+    return "other";
+  }
+  var TOOL_WORD = { read: "Reading", edit: "Editing", shell: "Running a command", web: "On the web", agent: "Delegating" };
+  function phaseLabel(p) {
+    var ph = phaseOf(p);
+    if (ph === "tool") return TOOL_WORD[toolKind(p.activity)] || (p.activity ? "Using " + String(p.activity).replace(/^mcp__/, "").slice(0, 32) : PHASE.tool);
+    return PHASE[ph];
+  }
+  // Frames and the time each one shows (ms). One frame: it stands still.
+  var SYM = {
+    thinking: [80, "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"],
+    writing: [530, ["\u258f", " "]],
+    compacting: [220, ["\u2261", "=", "-", "="]],
+    read: [110, "\u2801\u2802\u2804\u2840\u2880\u2820\u2810\u2808"],
+    edit: [140, "\u2840\u2844\u2846\u2847\u28c7\u28e7\u28f7\u28ff"],
+    shell: [500, [">_", "> "]],
+    web: [140, "\u2190\u2196\u2191\u2197\u2192\u2198\u2193\u2199"],
+    agent: [100, "\u28fe\u28fd\u28fb\u28bf\u287f\u28df\u28ef\u28f7"],
+    other: [130, ["|", "/", "-", "\\"]],
+    approval: [0, ["!"]], question: [0, ["?"]], error: [0, ["\u2715"]], done: [0, ["\u2713"]], stopped: [0, ["\u25aa"]], idle: [0, ["\u00b7"]]
+  };
+  function symKey(p) { var ph = phaseOf(p); return ph === "tool" ? toolKind(p.activity) : ph; }
+  function frames(k) { var f = (SYM[k] || SYM.idle)[1]; return typeof f === "string" ? f.split("") : f; }
+  function sym(p) {
+    var k = symKey(p);
+    return h("span", { class: "sym s-" + phaseOf(p), "data-sym": k, "aria-hidden": "true", text: frames(k)[0] });
+  }
+  function phaseTag(p) {
+    return h("span", { class: "phase s-" + phaseOf(p), text: phaseLabel(p) });
+  }
+  // One timer moves every symbol on the page; none when motion is reduced.
+  (function () {
+    var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+    setInterval(function () {
+      if (document.hidden || (still && still.matches)) return;
+      var now = Date.now();
+      Array.prototype.forEach.call(document.querySelectorAll(".sym[data-sym]"), function (el) {
+        var k = el.getAttribute("data-sym"), d = SYM[k];
+        if (!d || !d[0]) return;
+        var f = frames(k), x = f[Math.floor(now / d[0]) % f.length];
+        if (el.textContent !== x) el.textContent = x;
+      });
+    }, 60);
+  })();
+  // A request in a line: the command, file or address it is about.
+  function askLine(a) {
+    var i = a.input || {};
+    if (a.tool === "AskUserQuestion") return ((i.questions || [])[0] || {}).question || "It has a question";
+    var what = i.command || i.file_path || i.notebook_path || i.url || i.pattern || i.query || i.description || "";
+    return a.tool + (what ? ": " + String(what).split("\n")[0] : "");
+  }
+
+  // A button that acts only once held down (pointer, Enter or Space) for `ms`:
+  // a stray tap or click never approves anything.
+  function holdButton(label, ms, onDone, cls) {
+    var text = h("span", { text: label });
+    var b = h("button", { type: "button", class: "hold" + (cls ? " " + cls : ""), "aria-label": label + " (press and hold)" }, text);
+    var t0 = 0, raf = 0, done = false;
+    function set(x) { b.style.setProperty("--p", (x * 100).toFixed(1) + "%"); }
+    function tick(now) {
+      var x = Math.min(1, (now - t0) / ms); set(x);
+      if (x >= 1) { done = true; t0 = 0; b.classList.add("done"); text.textContent = "Sending..."; onDone(); return; }
+      raf = requestAnimationFrame(tick);
+    }
+    function start(e) {
+      if (done || b.disabled || t0) return;
+      if (e.type === "pointerdown") { if (e.button !== 0) return; try { b.setPointerCapture(e.pointerId); } catch (x) { /* fine */ } }
+      t0 = performance.now(); text.textContent = "Keep holding..."; raf = requestAnimationFrame(tick);
+    }
+    function stop() { if (done || !t0) return; cancelAnimationFrame(raf); t0 = 0; set(0); text.textContent = label; }
+    b.addEventListener("pointerdown", start);
+    ["pointerup", "pointercancel", "lostpointercapture", "blur"].forEach(function (ev) { b.addEventListener(ev, stop); });
+    b.addEventListener("keydown", function (e) { if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (!e.repeat) start(e); } });
+    b.addEventListener("keyup", function (e) { if (e.key === " " || e.key === "Enter") stop(); });
+    b.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    b.reset = function () { done = false; t0 = 0; b.classList.remove("done"); set(0); text.textContent = label; };
+    return b;
+  }
+
+  // Answer one request: a tool to allow or deny, or a question to pick an
+  // answer for. `done` runs once it is answered.
+  function answerPanel(p, a, done) {
+    var ro = S.ov.read_only, box = h("div", { class: "answer" });
+    function send(body, word) {
+      body.request_id = a.request_id;
+      return api("/api/procs/" + p.id + "/permission", { method: "POST", body: body }).then(function () { toast(word); if (done) done(); });
+    }
+    if (a.tool === "AskUserQuestion") {
+      var qs = ((a.input || {}).questions || []).filter(function (x) { return x && x.question; });
+      var picked = qs.map(function () { return {}; }), others = [];
+      qs.forEach(function (qq, qi) {
+        var opts = qq.options || [], btns = [];
+        if (qq.header) box.appendChild(h("div", { class: "qhead", text: qq.header }));
+        box.appendChild(h("div", { class: "qtext", text: qq.question }));
+        var list = h("div", { class: "opts", role: qq.multiSelect ? "group" : "radiogroup", "aria-label": qq.question });
+        opts.forEach(function (o, oi) {
+          var b = h("button", { type: "button", class: "opt", role: qq.multiSelect ? "checkbox" : "radio", "aria-checked": "false", disabled: ro, onclick: function () {
+            if (!qq.multiSelect) { picked[qi] = {}; btns.forEach(function (x) { x.setAttribute("aria-checked", "false"); }); }
+            var on = !picked[qi][oi]; picked[qi][oi] = on; b.setAttribute("aria-checked", String(on));
+            if (!qq.multiSelect && on && others[qi]) others[qi].value = "";
+          } }, h("kbd", { text: qs.length === 1 && oi < 9 ? String(oi + 1) : String.fromCharCode(97 + oi) }), h("span", null, h("b", { text: o.label || "" }), o.description ? h("small", { text: o.description }) : null));
+          btns.push(b); list.appendChild(b);
+        });
+        box.appendChild(list);
+        var other = h("input", { type: "text", class: "other", placeholder: "Or type your own answer", "aria-label": "Your own answer", disabled: ro, oninput: function () {
+          if (other.value && !qq.multiSelect) { picked[qi] = {}; btns.forEach(function (x) { x.setAttribute("aria-checked", "false"); }); }
+        } });
+        others[qi] = other; box.appendChild(other);
+        box.pick = function (n) { if (qs.length === 1 && btns[n]) btns[n].click(); };
+      });
+      var go = holdButton("Hold to send", 600, function () {
+        var answers = {}, missing = false;
+        qs.forEach(function (qq, qi) {
+          var labels = (qq.options || []).filter(function (o, oi) { return picked[qi][oi]; }).map(function (o) { return o.label; });
+          var own = others[qi].value.trim(); if (own) labels.push(own);
+          if (labels.length) answers[qq.question] = labels.join(", "); else missing = true;
+        });
+        if (missing) { toast("Pick an answer for every question", true); go.reset(); return; }
+        send({ allow: true, answers: answers }, "Answered").catch(function (e) { toast(e.message, true); go.reset(); });
+      }, "q");
+      go.disabled = ro;
+      box.appendChild(h("div", { class: "acts" }, go,
+        h("button", { type: "button", class: "deny", disabled: ro, onclick: function () { send({ allow: false, message: "The user chose not to answer." }, "Skipped").catch(function (e) { toast(e.message, true); }); } }, "Skip")));
+      if (!ro) box.appendChild(h("div", { class: "hint", text: "Pick an option (or press its number), then hold Send." }));
+      return box;
+    }
+    var input = JSON.stringify(a.input, null, 2);
+    var shown = (a.input && typeof a.input.command === "string") ? a.input.command : input.length > 3000 ? input.slice(0, 3000) + "\n..." : input;
+    box.appendChild(h("div", null, "It asks to use ", h("b", { text: a.tool }), a.ts ? h("span", { class: "muted small", text: "  -  " + ago(a.ts) }) : null));
+    box.appendChild(h("pre", { text: shown }));
+    var always = (a.suggestions || []).length ? h("input", { type: "checkbox", disabled: ro }) : null;
+    if (always) box.appendChild(h("label", { class: "check", title: "Adds Claude Code's suggested rule for the rest of this session" }, always, " Always allow this for the rest of the session"));
+    var allow = holdButton("Hold to allow", 600, function () {
+      send({ allow: true, always: !!(always && always.checked) }, "Allowed").catch(function (e) { toast(e.message, true); allow.reset(); });
+    });
+    allow.disabled = ro;
+    var why = h("input", { type: "text", placeholder: "Why not? (optional, the agent reads it)", "aria-label": "Reason for denying", hidden: true });
+    var deny = h("button", { type: "button", class: "deny", disabled: ro, onclick: function () {
+      send({ allow: false, message: why.value.trim() || null }, "Denied").catch(function (e) { toast(e.message, true); });
+    } }, "Deny");
+    box.appendChild(h("div", { class: "acts" }, allow, deny));
+    box.appendChild(why);
+    if (!ro) box.appendChild(h("div", { class: "hint" }, "Hold Allow for a moment; a tap on Deny says no. ", h("button", { type: "button", class: "ghost small", onclick: function () { why.hidden = false; why.focus(); } }, "Add a reason")));
+    return box;
+  }
+
+  // ---- status pad -----------------------------------------------------------------
+  function chainTitle(c) { return firstLine(c.root.prompt, 90); }
+  function where(p) {
+    var dir = String(p.cwd || "").split(/[\\/]/).filter(Boolean).pop() || p.cwd || "";
+    return [dir, p.node === "local" ? "this machine" : p.node].filter(Boolean).join(", ");
+  }
+  // Every request waiting on you, across sessions, the longest-waiting first.
+  function waitingQueue(chains) {
+    var out = [];
+    chains.forEach(function (c) { (c.last.pending || []).forEach(function (a) { out.push({ c: c, p: c.last, a: a }); }); });
+    return out.sort(function (x, y) { return (x.a.ts || 0) - (y.a.ts || 0); });
+  }
+  function sheet(label) {
+    var dlg = h("dialog", { class: "sheet", "aria-label": label });
+    dlg.addEventListener("close", function () { dlg.remove(); });
+    document.body.appendChild(dlg); dlg.showModal();
+    return dlg;
+  }
+  function sheetHead(c, p, note) {
+    return h("div", { class: "answer-head" }, sym(p), h("div", null, h("div", { class: "t", text: chainTitle(c) }), phaseTag(p)), note ? h("span", { class: "n", text: note }) : null);
+  }
+  // Answer what waits, one request after another (`firstId`'s first), until
+  // nothing does. `after` runs after each answer.
+  function answerQueue(firstId, after) {
+    var dlg = sheet("Requests waiting for you");
+    dlg.addEventListener("keydown", function (e) {
+      if (/^[1-9]$/.test(e.key) && dlg.pick && !(e.target.closest && e.target.closest("input, textarea"))) { e.preventDefault(); dlg.pick(Number(e.key) - 1); }
+    });
+    function show() {
+      api("/api/procs").then(function (procs) {
+        if (!dlg.open) return;
+        var q = waitingQueue(sessionChains(procs));
+        if (firstId) q.sort(function (x, y) { return (y.p.id === firstId) - (x.p.id === firstId); });
+        firstId = null;
+        if (!q.length) { dlg.close(); toast("All clear: nothing waits for you"); return; }
+        var it = q[0], panel = answerPanel(it.p, it.a, function () { if (after) after(); show(); });
+        dlg.pick = panel.pick;
+        dlg.textContent = "";
+        dlg.appendChild(h("div", { class: "answer" }, sheetHead(it.c, it.p, q.length > 1 ? "1 of " + q.length : null), panel,
+          h("div", { class: "row" }, h("a", { class: "small", href: "#/sessions/" + it.p.id, onclick: function () { dlg.close(); }, text: "Open the session" }),
+            h("span", { class: "muted small", text: where(it.p) }), h("span", { class: "grow" }),
+            h("button", { type: "button", class: "ghost", onclick: function () { dlg.close(); } }, "Close"))));
+        var f = dlg.querySelector(".opt, .hold"); if (f) f.focus();
+      }).catch(function (e) { toast(e.message, true); dlg.close(); });
+    }
+    show();
+  }
+  // One session at a glance, with a way in and a way to stop it.
+  function infoSheet(c, after) {
+    var p = c.last, dlg = sheet(chainTitle(c)), close = function () { dlg.close(); };
+    dlg.appendChild(h("div", { class: "answer" }, sheetHead(c, p, p.status === "running" ? "started " + ago(p.started) : "ended " + ago(p.ended || p.started)),
+      p.last ? h("pre", { text: p.last }) : null,
+      h("div", { class: "muted small", text: where(p) + "  -  " + p.runner + (p.model ? ", " + p.model : "") }),
+      h("div", { class: "acts" },
+        h("a", { class: "btn primary", href: "#/sessions/" + p.id, onclick: close, text: "Open the session" }),
+        p.status === "running" && !S.ov.read_only ? h("button", { type: "button", class: "deny", onclick: function () {
+          if (!window.confirm("Stop this agent?")) return;
+          api("/api/procs/" + p.id + "/stop", { method: "POST" }).then(function () { toast("Stopping"); close(); if (after) after(); }).catch(function (e) { toast(e.message, true); });
+        } }, "Stop") : null,
+        h("button", { type: "button", onclick: close }, "Close"))));
+  }
+
+  // Alerts: a desktop notification (or a toast while you look at the page)
+  // and, if you want it, a chime, when an agent asks for you or finishes.
+  // They run on every page, from this browser, while the console is open.
+  var ALERTS = { on: store("indra.alerts") === "on", sound: store("indra.alerts.sound") === "on", prev: null, timer: null, ac: null };
+  function alertsStart() {
+    clearInterval(ALERTS.timer); ALERTS.timer = null; ALERTS.prev = null;
+    if (!ALERTS.on && !ALERTS.sound) return;
+    var tick = function () {
+      // Quietly: a signed-out console must not raise the sign-in wall from here.
+      fetch("/api/procs", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (procs) { if (procs) alertsCheck(procs); }).catch(function () { /* next tick */ });
+    };
+    tick(); ALERTS.timer = setInterval(tick, 4000);
+  }
+  function alertsCheck(procs) {
+    var now = {}, fire = [], first = !ALERTS.prev;
+    sessionChains(procs).forEach(function (c) {
+      var p = c.last, ph = phaseOf(p), reqs = (p.pending || []).map(function (a) { return a.request_id; });
+      var was = first ? null : ALERTS.prev[p.id];
+      now[p.id] = { ph: ph, reqs: reqs };
+      if (first) return;
+      if (reqs.some(function (r) { return !was || was.reqs.indexOf(r) < 0; })) fire.push({ p: p, urgent: true, title: PHASE[ph] + ": " + chainTitle(c), body: askLine(p.pending[0]) });
+      else if (was && was.ph !== ph && (ph === "done" || ph === "error")) fire.push({ p: p, title: PHASE[ph] + ": " + chainTitle(c), body: String(p.last || "").split("\n")[0] });
+    });
+    ALERTS.prev = now;
+    fire.slice(0, 3).forEach(function (x) {
+      if (ALERTS.sound) chime(x.urgent);
+      if (!ALERTS.on) return;
+      var go = function () { if (x.urgent) answerQueue(x.p.id); else location.hash = "#/sessions/" + x.p.id; };
+      if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+        try {
+          var n = new Notification("indra - " + x.title, { body: x.body, tag: "indra-" + x.p.id, icon: "/favicon.svg", requireInteraction: !!x.urgent });
+          n.onclick = function () { window.focus(); n.close(); go(); };
+        } catch (e) { /* not on this browser */ }
+      } else if (!document.querySelector("dialog[open]")) toastAction(x.title, x.urgent ? "Answer" : "Open", go);
+    });
+  }
+  function chime(urgent) {
+    try {
+      var ac = ALERTS.ac || (ALERTS.ac = new (window.AudioContext || window.webkitAudioContext)());
+      if (ac.state === "suspended") ac.resume();
+      var t = ac.currentTime;
+      (urgent ? [880, 1175] : [660]).forEach(function (f, i) {
+        var o = ac.createOscillator(), g = ac.createGain(), s = t + i * 0.16;
+        o.type = "sine"; o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, s); g.gain.exponentialRampToValueAtTime(0.16, s + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, s + 0.3);
+        o.connect(g); g.connect(ac.destination); o.start(s); o.stop(s + 0.32);
+      });
+    } catch (e) { /* no audio here */ }
+  }
+  function alertButtons() {
+    var a = h("button", { type: "button", class: "toggle", "aria-pressed": String(ALERTS.on), title: "A desktop notification when an agent needs you or finishes" }, "Alerts");
+    var s = h("button", { type: "button", class: "toggle", "aria-pressed": String(ALERTS.sound), title: "A short chime with each alert" }, "Sound");
+    a.addEventListener("click", function () {
+      ALERTS.on = !ALERTS.on; store("indra.alerts", ALERTS.on ? "on" : "off"); a.setAttribute("aria-pressed", String(ALERTS.on));
+      if (ALERTS.on && "Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission().then(function (r) { if (r !== "granted") toast("Notifications are blocked for this page: alerts show here, in the page, instead."); });
+      } else if (ALERTS.on && (!("Notification" in window) || Notification.permission === "denied")) toast("Notifications are blocked for this page: alerts show here, in the page, instead.");
+      alertsStart();
+    });
+    s.addEventListener("click", function () {
+      ALERTS.sound = !ALERTS.sound; store("indra.alerts.sound", ALERTS.sound ? "on" : "off"); s.setAttribute("aria-pressed", String(ALERTS.sound));
+      if (ALERTS.sound) chime(false);
+      alertsStart();
+    });
+    return [a, s];
+  }
+
+  function pagePad(m) {
+    var head = header("Status", "Every session, the ones waiting for you first.",
+      [alertButtons(), h("a", { class: "btn primary", href: "#/launch", text: "Run an agent" })]);
+    var sub = head.querySelector("p");
+    m.appendChild(head);
+    var body = h("div", { class: "pad" }); m.appendChild(body);
+    var chains = [], keyed = [], sig = "", ticks = 0;
+    function open(c) { if (WAITING[phaseOf(c.last)]) answerQueue(c.last.id, refresh); else infoSheet(c, refresh); }
+    function row(c, n) {
+      var p = c.last, ph = phaseOf(p), wait = WAITING[ph];
+      var detail = wait && (p.pending || [])[0] ? askLine(p.pending[0]) : String(p.last || (ph === "thinking" ? "Starting..." : ""));
+      return h("li", null, h("button", { type: "button", class: "prow", "data-sid": String(p.id), "aria-keyshortcuts": n <= 9 ? String(n) : null,
+        "aria-label": phaseLabel(p) + ": " + chainTitle(c), onclick: function () { open(c); } },
+        sym(p),
+        h("span", { class: "m" }, h("span", { class: "t", text: chainTitle(c) }), h("span", { class: "d", text: detail.split("\n")[0] })),
+        phaseTag(p),
+        h("span", { class: "w", text: where(p) }),
+        h("span", { class: "a", text: (p.status === "running" ? ago(p.started) : ago(p.ended || p.started)).replace(" ago", "") }),
+        n <= 9 ? h("kbd", { class: "row-key", text: String(n) }) : h("span")));
+    }
+    function draw() {
+      var focused = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute("data-sid");
+      body.textContent = "";
+      var q = waitingQueue(chains);
+      var need = chains.filter(function (c) { return WAITING[phaseOf(c.last)]; })
+        .sort(function (a, b) { return ((a.last.pending[0] || {}).ts || 0) - ((b.last.pending[0] || {}).ts || 0); });
+      var work = chains.filter(function (c) { return !WAITING[phaseOf(c.last)] && c.last.status === "running"; });
+      var done = chains.filter(function (c) { return c.last.status !== "running"; })
+        .sort(function (a, b) { return (b.last.ended || b.last.started) - (a.last.ended || a.last.started); });
+      sub.textContent = need.length + " waiting for you, " + work.length + " working, " + done.length + " finished.";
+      sub.appendChild(h("span", { class: "kbd-hint", text: " Keys 1-9 open a row; Enter answers the next request." }));
+      // What waits, said once, plainly, with the way to answer it.
+      var next = q[0];
+      if (next) {
+        body.appendChild(h("section", { class: "notice", "aria-label": "Waiting for you" },
+          sym(next.p),
+          h("div", null,
+            h("b", { text: q.length === 1 ? "1 request is waiting for you" : q.length + " requests are waiting for you" }),
+            h("p", null, "Oldest: ", h("span", { text: chainTitle(next.c) }), " wants ", h("code", { text: askLine(next.a).slice(0, 120) }))),
+          h("button", { type: "button", class: "primary", onclick: function () { answerQueue(null, refresh); } }, "Answer", h("kbd", { text: "Enter" }))));
+      }
+      keyed = [];
+      [["Waiting for you", need, need.length], ["Working", work, work.length], ["Finished", done.slice(0, 15), done.length]].forEach(function (g) {
+        if (!g[1].length) return;
+        var list = h("ul", { class: "rows" });
+        g[1].forEach(function (c) { keyed.push(c); list.appendChild(row(c, keyed.length)); });
+        body.appendChild(h("section", { class: "pad-group", "aria-label": g[0] }, h("h2", null, g[0], h("span", { text: String(g[2]) })), list));
+      });
+      if (done.length > 15) body.appendChild(h("p", { class: "muted small" }, (done.length - 15) + " older in ", h("a", { href: "#/sessions", text: "Sessions" }), "."));
+      if (!chains.length) body.appendChild(empty("No sessions yet. Run an agent and it shows up here, with what it is doing and anything it asks you."));
+      if (focused) { var f = body.querySelector('[data-sid="' + focused + '"]'); if (f) f.focus(); }
+    }
+    function refresh() {
+      return api("/api/procs").then(function (procs) {
+        chains = sessionChains(procs);
+        var s = JSON.stringify(chains.map(function (c) { var p = c.last; return [p.id, p.phase, p.activity, p.status, p.last, (p.pending || []).length]; }));
+        // Redraw on a change, and now and then for the times.
+        if (s !== sig || ++ticks % 12 === 0) { sig = s; draw(); }
+      }).catch(function (e) { if (!chains.length) { body.textContent = ""; body.appendChild(empty(e.message)); } });
+    }
+    function onKey(e) {
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || document.querySelector("dialog[open]")) return;
+      var t = e.target;
+      if (t && t.closest && t.closest("input, textarea, select, [contenteditable], button, a")) { if (!/^[1-9]$/.test(e.key) || t.closest("input, textarea, select, [contenteditable]")) return; }
+      if (/^[1-9]$/.test(e.key) && keyed[e.key - 1]) { e.preventDefault(); open(keyed[e.key - 1]); }
+      else if (e.key === "Enter" && waitingQueue(chains).length) { e.preventDefault(); answerQueue(null, refresh); }
+    }
+    document.addEventListener("keydown", onKey);
+    S.cleanup.push(function () { document.removeEventListener("keydown", onKey); });
+    refresh(); every(2500, refresh);
+  }
+
   function pageSessions(m, arg) {
     var ro = S.ov.read_only;
     var wrap = h("div", { class: "sessions" });
@@ -2843,15 +3220,15 @@
       shown.forEach(function (c) {
         var on = c.procs.some(function (p) { return p.id === selected; });
         listBox.appendChild(h("a", { class: "s-item" + (on ? " on" : ""), href: "#/sessions/" + c.last.id },
-          h("span", { class: "dot " + (DOT[c.last.status] || ""), title: c.last.status }),
+          sym(c.last),
           h("span", { class: "s-title", text: firstLine(c.root.prompt, 70) }),
-          h("span", { class: "muted small", text: c.last.node + "  -  " + ago(c.last.started) + (c.last.pending && c.last.pending.length ? "  -  needs you" : "") })));
+          h("span", { class: "muted small" }, phaseTag(c.last), "  " + c.last.node + ", " + ago(c.last.started))));
       });
     }
     function chainOf(id) { return chains.find(function (c) { return c.procs.some(function (p) { return p.id === id; }); }); }
 
     // The conversation: each process's prompt, then its events; tool steps fold.
-    var evs = {};
+    var evs = {}, panels = {};
     function drawChat() {
       var c = chainOf(selected);
       mid.textContent = "";
@@ -2881,11 +3258,9 @@
       var last = c.last;
       if ((last.pending || []).length && !ro) {
         last.pending.forEach(function (a) {
-          log.appendChild(h("div", { class: "msg ask" }, h("b", { text: "It asks to use " + a.tool }),
-            h("pre", { class: "view small", text: JSON.stringify(a.input, null, 2).slice(0, 2000) }),
-            h("div", { class: "row" },
-              h("button", { type: "button", class: "primary", onclick: function () { answer(last.id, a.request_id, true); } }, "Allow"),
-              h("button", { type: "button", onclick: function () { answer(last.id, a.request_id, false); } }, "Deny"))));
+          // The same panel across redraws: a hold or a pick in progress stays.
+          var panel = panels[a.request_id] || (panels[a.request_id] = answerPanel(last, a, refresh));
+          log.appendChild(h("div", { class: "msg ask" }, panel));
         });
       }
       if (last.status === "running") log.appendChild(h("div", { class: "msg status run", text: (last.pending || []).length ? "Waiting for you" : "Working..." }));
@@ -2910,9 +3285,6 @@
         mid.appendChild(form);
       }
       if (atBottom) log.scrollTop = log.scrollHeight;
-    }
-    function answer(id, rid, allow) {
-      api("/api/procs/" + id + "/permission", { method: "POST", body: { request_id: rid, allow: allow, always: false } }).then(refresh).catch(function (e) { toast(e.message, true); });
     }
 
     // The side panel: where it works and what it did.
@@ -3297,7 +3669,7 @@
         api("/api/procs/" + id + "/message", { method: "POST", body: { text: cv.msg.value } })
           .then(function () { cv.msg.value = ""; toast("Sent"); refresh(); }).catch(function (e) { toast(e.message, true); });
       } }, "Send message")), cv.note, modelList());
-    var ctlFilled = false;
+    var ctlFilled = false, askPanels = {};
     function renderControl(p) {
       var ro = S.ov.read_only;
       approvals.textContent = "";
@@ -3305,25 +3677,8 @@
       if (p.pending.length) {
         approvals.appendChild(h("h3", { text: "Waiting for you" }));
         p.pending.forEach(function (a) {
-          var answer = function (allow, always) {
-            var body = { request_id: a.request_id, allow: allow, always: !!always };
-            var send = function () {
-              return api("/api/procs/" + id + "/permission", { method: "POST", body: body }).then(function () { toast(allow ? "Allowed" : "Denied"); refresh(); });
-            };
-            if (!allow) {
-              ask("Deny " + a.tool, [{ name: "why", label: "Tell the agent why (optional)", optional: true }], "Deny", function (v) { body.message = v.why; return send(); });
-              return;
-            }
-            send().catch(function (e) { toast(e.message, true); });
-          };
-          var input = JSON.stringify(a.input, null, 2);
-          approvals.appendChild(h("div", { class: "ask" },
-            h("div", { class: "row" }, h("b", { text: a.tool }), h("span", { class: "muted small", text: ago(a.ts) })),
-            h("pre", { class: "view small", text: input.length > 1500 ? input.slice(0, 1500) + "\n..." : input }),
-            h("div", { class: "row" },
-              h("button", { type: "button", class: "primary", disabled: ro, onclick: function () { answer(true); } }, "Allow"),
-              (a.suggestions || []).length ? h("button", { type: "button", disabled: ro, title: "Allow, and add Claude Code's suggested rule for the rest of this session", onclick: function () { answer(true, true); } }, "Allow always") : null,
-              h("button", { type: "button", class: "danger", disabled: ro, onclick: function () { answer(false); } }, "Deny"))));
+          var panel = askPanels[a.request_id] || (askPanels[a.request_id] = answerPanel(p, a, refresh));
+          approvals.appendChild(h("div", { class: "ask" }, panel));
         });
       }
       controlCard.hidden = !p.interactive;
@@ -4997,8 +5352,8 @@
     });
     // The page is under More: show it open.
     var more = $("nav-more"), inMore = more && more.querySelector('a[data-route="' + navKey + '"]');
-    if (inMore) more.open = true;
-    var m = $("main"); m.textContent = ""; m.scrollTop = 0;
+    if (more) { more.open = false; more.classList.toggle("on", !!inMore); }
+    var m = $("main"); m.textContent = ""; window.scrollTo(0, 0);
     // A newer navigation wins: a slower, earlier one must not render too.
     var gen = S.gen = (S.gen || 0) + 1;
     refreshOverview().then(function () {
@@ -5025,6 +5380,7 @@
         launch: function () { pageLaunch(m); },
         procs: function () { pageProcs(m); },
         sessions: function () { pageSessions(m, arg); },
+        pad: function () { pagePad(m); },
         proc: function () { pageProc(m, arg); },
         settings: function () { pageSettings(m, arg); },
         board: function () { pageBoard(m); },
@@ -5042,7 +5398,7 @@
 
   $("harness").addEventListener("change", function (e) { setHarness(e.target.value); });
   $("theme").addEventListener("click", function () {
-    var dark = cssVar("--bg") === "#131312";
+    var dark = cssVar("--bg") === "#121214";
     var t = dark ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", t); store("indra.theme", t);
     // Only what draws with theme colors redraws: what you typed stays.
@@ -5069,5 +5425,9 @@
     S.dirty = false; S.hash = location.hash;
     route();
   });
+  // The More menu closes on a click elsewhere or Escape.
+  document.addEventListener("click", function (e) { var more = $("nav-more"); if (more && more.open && !more.contains(e.target)) more.open = false; });
+  document.addEventListener("keydown", function (e) { var more = $("nav-more"); if (e.key === "Escape" && more && more.open) { more.open = false; more.querySelector("summary").focus(); } });
   route();
+  alertsStart();
 })();

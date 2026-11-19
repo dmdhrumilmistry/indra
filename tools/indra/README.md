@@ -511,9 +511,12 @@ An agent started through a Claude Code runner (`format = "claude-stream-json"`) 
 Claude Code's control channel, the one the Agent SDK uses, so from its process page you can:
 
 - **Approve or deny tool requests.** When the agent wants to run a tool its permission mode does
-  not allow, the request appears under **Waiting for you** (and as a badge on Processes) with
-  **Allow**, **Allow always** (adds Claude Code's suggested rule for the rest of the session) and
-  **Deny** (with a reason the agent sees).
+  not allow, the request appears under **Waiting for you**, in Sessions and on **Status** (with
+  a badge in the header). **Hold to allow** approves it after a 0.6 s press and hold, so a stray
+  click never does. Tick **Always allow** first to add Claude Code's suggested rule for the rest
+  of the session. **Deny** is one tap, with an optional reason the agent sees.
+- **Answer its questions.** Claude Code's `AskUserQuestion` shows as numbered options. Pick one (or
+  several, or type your own), then hold **Send**. The answer goes back as the tool's `answers`.
 - **Change its permission mode**: `manual` (ask for everything), `acceptEdits`, `auto`, `plan`
   (read and plan only), `dontAsk` (deny whatever would ask) or `bypassPermissions`.
 - **Change its model** for the turns that follow.
@@ -522,7 +525,32 @@ Claude Code's control channel, the one the Agent SDK uses, so from its process p
 
 The prompt goes to the agent over stdin, and indra closes stdin after the last turn's result, so
 the agent still exits when its work is done. Remote agents get the same controls: the hub forwards
-them to the node. API: `POST /api/procs/{id}/permission`, `/control` and `/message`.
+them to the node. API: `POST /api/procs/{id}/permission` (`request_id`, `allow`, `always`,
+`message`, and `answers` for a question), `/control` and `/message`.
+
+### Status
+
+**Status** lists every session: the ones waiting for you first (the longest-waiting first), then
+the ones at work, then the recent finishes. Each row shows the session, what it is doing or
+asking, its state, and where it runs. A small symbol in front moves while the agent works and holds
+still while it waits for you or has finished. The state is also written on the row, so neither
+the symbol nor its colour is the only signal, and with reduced motion set the symbols stand still.
+
+| Symbol | State |
+|---|---|
+| `!` | Needs approval: it asks to use a tool |
+| `?` | Has a question (`AskUserQuestion`) |
+| spinner | Thinking: reading a tool's result |
+| blinking cursor | Writing a reply |
+| moving dot, filling dots, `>_`, turning arrow, braille spinner | Reading, Editing, Running a command, On the web, Delegating |
+| `=` | Compacting: Claude Code is summarising its context |
+| tick, cross, square | Done, Failed, Stopped |
+
+The notice at the top opens the waiting requests one after another. On the keyboard, `1`-`9` open
+a row and Enter opens the next request. In a question, `1`-`9` pick an option. **Alerts** sends a
+desktop notification (a toast while the console has focus) when an agent asks for you or finishes,
+and **Sound** adds a chime. Both are per browser and off until you switch them on. The states come
+from `GET /api/procs` (`phase`, and `activity` for the tool).
 
 ### Profiles
 

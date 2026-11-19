@@ -41,7 +41,7 @@ it needs.
 | | `indra user role NAME ROLE` |
 | | `indra user rm NAME` |
 
-Anyone signed in can change their own password from the sidebar (**Password**; the current one
+Anyone signed in can change their own password from the header bar (**Password**; the current one
 is asked again). Setting a password or removing a user ends their sessions at once; a role change
 applies to their open sessions immediately. The last admin cannot be removed or demoted.
 
