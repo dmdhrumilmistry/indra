@@ -1527,6 +1527,13 @@
       }).catch(function () { /* none */ });
       var memory = h("input", { type: "checkbox" }), reflect = h("input", { type: "checkbox" });
       var memNote = h("div", { class: "muted small" });
+      // Its own branch: a git worktree, so agents in one repository never clash.
+      var ownBranch = h("input", { type: "checkbox" });
+      try { ownBranch.checked = localStorage.getItem("indra.ownBranch") === "1"; } catch (e) { /* storage off */ }
+      ownBranch.addEventListener("change", function () { try { localStorage.setItem("indra.ownBranch", ownBranch.checked ? "1" : "0"); } catch (e) { /* storage off */ } update(); });
+      var ownLabel = h("label", { class: "check", title: "A git worktree on a new branch, under indra's data folder. When the agent is done, merge it, keep the branch, or discard it from its session." },
+        ownBranch, h("span", null, h("b", { text: "Work on its own branch" }), h("small", { text: " - a git worktree, so agents in the same repository never edit the same files. This machine only." })));
+      var budget = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: "no limit", "aria-label": "Spending limit in US dollars" });
       function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
       function fillProfile() {
         var p = prof() || {};
@@ -1535,11 +1542,12 @@
         model.placeholder = p.model || "default"; mode.options[0].text = p.permission_mode ? "profile: " + p.permission_mode : "default";
         where.options[0].text = p.provider === "ollama" ? "profile: Ollama" : p.subagent_provider === "ollama" ? "profile: subagents on Ollama" : "as configured";
         effort.options[0].text = p.effort ? "profile: " + p.effort : "default";
+        budget.placeholder = p.max_budget_usd ? "profile: $" + p.max_budget_usd : "no limit";
         mcp.options[0].text = p.mcp === "none" ? "profile: none" : "default (all, as Claude Code is set up)";
         update();
       }
       profile.addEventListener("change", fillProfile);
-      [model, mode, effort, mcp, where, subModel].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
+      [model, mode, effort, mcp, where, subModel, budget].forEach(function (el) { el.addEventListener("input", update); el.addEventListener("change", update); });
       var preview = h("div", { class: "cmd" });
       var go = h("button", { class: "primary", type: "submit" }, "Run");
       function cur() { return nodes.find(function (n) { return n.name === node.value; }) || nodes[0]; }
@@ -1559,6 +1567,7 @@
           if (r && r.format === "claude-stream-json") {
             [["--model", model.value || pr.model], ["--permission-mode", mode.value || pr.permission_mode], ["--effort", effort.value || pr.effort]]
               .forEach(function (f) { if (f[1]) extra.push(f[0], f[1]); });
+            var lim = budget.value || pr.max_budget_usd; if (lim) extra.push("--max-budget-usd", String(Number(lim)));
             if ((mcp.value || pr.mcp) === "none") extra.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
           }
           var viaStdin = r && r.format === "claude-stream-json" && r.args.indexOf("{prompt}") >= 0;
@@ -1566,6 +1575,7 @@
             .map(function (a) { return a.split("{target}").join(t).split("{prompt}").join(p); })).concat(viaStdin ? ["--input-format", "stream-json"] : []).concat(extra)
             .map(function (a) { return /[\s"'$`\;&|<>]/.test(a) ? JSON.stringify(a) : a; }).join(" ") : "";
           if (viaStdin) preview.textContent += "\n(the prompt goes over stdin, so you can approve its tool requests and change its mode and model while it runs)";
+          if (ownBranch.checked) preview.textContent += "\n(in a new git worktree on its own branch, indra/..., made from what " + (t.split(/[\\/]/).filter(Boolean).pop() || "the folder") + " has checked out)";
           var on = where.value || (pr.provider === "ollama" ? "ollama" : pr.subagent_provider === "ollama" ? "subagents" : "");
           if (on === "ollama") preview.textContent += "\n(on Ollama at " + (pr.ollama_url || "http://localhost:11434") + ": every model it asks for, subagents included, is " + (model.value || pr.model || "the model you pick") + ")";
           if (on === "subagents") preview.textContent += "\n(the main agent stays on Anthropic; requests for " + (subModel.value || pr.subagent_model || "the subagent model") + " go to Ollama through indra's model router)";
@@ -1575,6 +1585,7 @@
         var why = !runner.value ? (n.info ? "No agent (Claude Code, Codex, Gemini) is installed on this machine." : "This machine is offline" + (n.error ? ": " + n.error : ".")) : !n.targets.length ? "This machine has no folder for agents yet." + (n.kind === "local" ? " Start indra in your project folder, or pass --target." : " On it, run `indra node connect --target <folder>`.") : "";
         note.textContent = why; note.hidden = !why;
         subLabel.hidden = where.value !== "subagents";
+        ownBranch.disabled = n.kind !== "local"; ownLabel.classList.toggle("muted", n.kind !== "local");
         go.disabled = !prompt.value.trim() || !runner.value || !n.targets.length;
         preflight();
       }
@@ -1612,20 +1623,23 @@
         if (model.value.trim()) o.model = model.value.trim();
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
+        if (budget.value) o.max_budget_usd = Number(budget.value);
         if (mcp.value) o.mcp = mcp.value;
         var tools = Object.keys(toolPicks).filter(function (k) { return toolPicks[k].checked; });
         if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
         if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
-        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, tools: tools, memory: memory.checked, reflect: reflect.checked } })
-          .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } location.hash = "#/sessions/" + r.id; })
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, tools: tools, worktree: ownBranch.checked && cur().kind === "local", memory: memory.checked, reflect: reflect.checked } })
+          .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } if (r.branch) toast("Working on its own branch, " + r.branch); location.hash = "#/sessions/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
         h("label", null, "What should it do?", h("small", { text: "Plain words are fine. {target} becomes the folder, {node} the machine." }), prompt),
         h("div", { class: "fields" }, h("label", null, "Start from", preset), h("label", null, "Machine", node), h("label", null, "Agent", runner),
           h("label", { class: "wide" }, h("span", null, "Folder ", S.ov.is_admin ? h("a", { href: "#/nodes", class: "small", title: "Add or change the folders agents may work in, on any machine", text: "(change folders)" }) : null), target)),
         note,
-        h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, memory" }),
+        ownLabel,
+        h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, spending limit, memory" }),
           h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+          h("div", { class: "fields" }, h("label", null, "Spending limit (US$)", budget, h("small", { text: "Claude Code stops once its API calls cost this much. API billing only: a subscription login is not metered this way." }))),
           h("label", null, "Tools", h("small", { text: "MCP servers and data sources from Settings > MCP & tools, on top of those its profile gets. Claude Code agents only; data sources only for agents on this machine." }), toolBox),
           h("div", { class: "fields" }, h("label", null, "MCP servers", mcp, h("small", { text: "Each server's tools fill the context before the agent does anything." })), h("label", null, "Runs on", where), subLabel),
           pfNote,
@@ -3298,6 +3312,7 @@
       env.appendChild(h("div", { class: "kv" }, h("span", { text: "Machine" }), h("b", { text: p.node })));
       env.appendChild(h("div", { class: "kv" }, h("span", { text: "Folder" }), h("code", { class: "small", text: p.cwd })));
       if (ws && ws.git) env.appendChild(h("div", { class: "kv" }, h("span", { text: "Branch" }), h("code", { text: ws.branch })));
+      if (ws && ws.worktree) panel.appendChild(branchSection(c, p, ws.worktree, (ws.changed || []).length));
       env.appendChild(h("div", { class: "kv" }, h("span", { text: "Agent" }), h("span", { text: p.runner + (p.model ? ", " + p.model : "") + (p.mode ? ", " + p.mode : "") })));
       if (p.context_tokens && p.context_window) {
         var pct = Math.min(100, Math.round(100 * p.context_tokens / p.context_window));
@@ -3347,6 +3362,28 @@
         var lk = sec("Pull requests and issues");
         Object.keys(links).forEach(function (u) { var sh = u.replace("https://github.com/", ""); lk.appendChild(h("a", { class: "small block", href: safeUrl(u), target: "_blank", rel: "noopener noreferrer", text: sh })); });
       }
+    }
+    // An agent on its own branch: once it stops, merge the branch into the
+    // one it came from, keep it (to push or open a pull request), or drop it.
+    function branchSection(c, p, w, changed) {
+      var box = h("div", { class: "s-sec" }, h("h3", { text: "Its own branch" }));
+      var what = [w.commits ? w.commits + " commit" + (w.commits === 1 ? "" : "s") : null, changed ? changed + " uncommitted file" + (changed === 1 ? "" : "s") : null].filter(Boolean).join(" and ") || "no changes yet";
+      box.appendChild(h("p", { class: "small" }, h("code", { text: w.branch }), " from ", h("code", { text: w.base || "?" }), ": " + what + "."));
+      var running = c.procs.some(function (x) { return x.status === "running"; });
+      if (running) { box.appendChild(h("p", { class: "muted small", text: "When it stops, merge its work into " + (w.base || "its base") + ", keep the branch, or discard it." })); return box; }
+      if (S.ov.read_only || S.ov.role === "viewer") return box;
+      function act(action, confirmText) {
+        if (confirmText && !window.confirm(confirmText)) return;
+        api("/api/procs/" + p.id + "/worktree", { method: "POST", body: { action: action } })
+          .then(function (r) { toast(r.message); wsFor = null; refresh(); })
+          .catch(function (e) { toast(e.message, true); });
+      }
+      box.appendChild(h("div", { class: "row" },
+        h("button", { type: "button", class: "primary", title: "Commit what is left, merge the branch into " + w.base + " in " + w.repo + ", then remove the branch", onclick: function () { act("merge"); } }, "Merge into " + (w.base || "base")),
+        h("button", { type: "button", title: "Commit what is left and keep the branch (to push it or open a pull request); the worktree folder goes", onclick: function () { act("keep"); } }, "Keep branch"),
+        h("button", { type: "button", class: "ghost danger", onclick: function () { act("discard", "Discard " + w.branch + " and everything the agent changed on it?"); } }, "Discard")));
+      box.appendChild(h("p", { class: "muted small", text: "Merging leaves nothing changed if it conflicts; the branch then stays for you to merge by hand." }));
+      return box;
     }
     function showDiff(id, path) {
       api("/api/procs/" + id + "/diff" + q({ path: path })).then(function (d) {
@@ -4817,6 +4854,7 @@
       { k: "ollama_url", label: "Ollama server", placeholder: "http://localhost:11434", help: "Another machine's Ollama, e.g. http://gpu-box:11434. Leave empty for this machine." },
       { k: "permission_mode", label: "Permission mode", type: "select", options: [["", "default"]].concat(MODES) },
       { k: "effort", label: "Effort", type: "select", options: opts(["low", "medium", "high", "xhigh", "max"], "default") },
+      { k: "max_budget_usd", label: "Spending limit (US$)", type: "number", step: "0.01", placeholder: "no limit", help: "Claude Code stops its agents once their API calls cost this much (--max-budget-usd). API billing only." },
       { k: "mcp", label: "MCP servers", type: "select", options: [["", "as Claude Code is set up"], ["none", "none: a much smaller context"]], help: "Each MCP server's tools fill the agent's context before it does anything. Choose none for agents that do not need them." },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
@@ -4922,7 +4960,7 @@
       el = h("input", { type: "text", placeholder: ph }); el.value = (val || []).join(", ");
       get = function () { var v = el.value.split(/[\s,]+/).filter(Boolean); return v.length ? v : undefined; };
     } else if (f.type === "number") {
-      el = h("input", { type: "number", min: "0", step: "1", placeholder: ph }); el.value = val == null ? "" : String(val);
+      el = h("input", { type: "number", min: "0", step: f.step || "1", placeholder: ph }); el.value = val == null ? "" : String(val);
       get = function () { return el.value === "" ? undefined : Number(el.value); };
     } else if (f.type === "bool") {
       el = h("input", { type: "checkbox" }); el.checked = !!val;

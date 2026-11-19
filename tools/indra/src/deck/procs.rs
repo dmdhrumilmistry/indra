@@ -1187,7 +1187,19 @@ impl Proc {
                     text.push_str("\n\n");
                     text.push_str(&r);
                 }
-                self.push("result", text, agent);
+                self.push("result", text, agent.clone());
+                if s(&v, "subtype") == "error_max_budget_usd" {
+                    let limit = self
+                        .opts
+                        .max_budget_usd
+                        .map(|b| format!(" of ${}", crate::deck::nodes::budget_arg(b)))
+                        .unwrap_or_default();
+                    self.push(
+                        "error",
+                        format!("stopped: it reached its spending limit{}", limit),
+                        agent,
+                    );
+                }
                 self.turn_done();
             }
             "system" if s(&v, "subtype") == "compact_boundary" => {

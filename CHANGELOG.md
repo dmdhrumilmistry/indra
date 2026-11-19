@@ -3,6 +3,17 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.17.0
+
+- **Own branch per agent.** **Work on its own branch** under Run an agent gives the agent a git
+  worktree on a new branch, so agents working on one repository never edit the same files. When
+  it stops, its session offers **Merge into `<base>`**, **Keep branch** (to push it or open a pull
+  request) or **Discard**. A merge that conflicts is undone and leaves your branch as it was.
+  Inspired by Claude Squad, Vibe Kanban and ClickHouse's multiagent-terminal.
+- **Spending limit.** A Claude Code agent stops once its API calls cost a set amount, per launch
+  (Run an agent > More options) or per profile (`max_budget_usd`), through Claude Code's own
+  `--max-budget-usd`. Inspired by OpenHands' per-run budget.
+
 ## v0.16.0
 
 - **Status** (`#/pad` in the console): every session in one list, the ones waiting for you
