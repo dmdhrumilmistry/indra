@@ -112,7 +112,7 @@ the map, and `since:<ref>` reviews only what changed, so repeat reviews cost far
 - `sh-log-triage`: triages alerts and hunts in logs, read-only.
 - `sh-hardening`: an ordered, verifiable fix plan from findings, a threat model and detection gaps.
 
-With the indra CLI, `indra siem` searches Wazuh, Elastic, OpenSearch, Splunk or log files read-only, and `indra siem mcp` gives agents the same tools.
+With the indra console, Settings > MCP & tools gives agents any third-party MCP server and read-only Wazuh, Elastic, OpenSearch, Splunk or log-file data sources; `indra siem search` searches the data sources from a terminal.
 
 ## Knowledge bases
 

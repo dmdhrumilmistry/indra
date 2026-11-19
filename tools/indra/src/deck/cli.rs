@@ -1156,7 +1156,7 @@ pub struct McpArgs {
 /// `indra siem`: read-only SIEM and log sources for blue-team work.
 #[derive(Args)]
 #[command(
-    after_help = "Sources are [[siem]] tables in indra.toml, for example:\n\n  [[siem]]\n  name = \"wazuh\"\n  kind = \"wazuh\"                  # wazuh | elastic | opensearch | splunk | files\n  url = \"https://wazuh-indexer:9200\"\n  username = \"indra-ro\"\n  password = \"secret:wazuh-ro\"     # indra secret set wazuh-ro\n  ca_file = \"/etc/indra/wazuh-ca.pem\"\n\nGive agents the tools with `claude mcp add indra-siem -- indra siem mcp`."
+    after_help = "Data sources are [[tool]] entries in indra.toml (Settings > MCP & tools), for example:\n\n  [[tool]]\n  name = \"wazuh\"\n  kind = \"wazuh\"                  # wazuh | elastic | opensearch | splunk | files\n  url = \"https://wazuh-indexer:9200\"\n  username = \"indra-ro\"\n  password = \"secret:wazuh-ro\"     # indra secret set wazuh-ro\n  ca_file = \"/etc/indra/wazuh-ca.pem\"\n\nAgents launched by indra get them through MCP & tools; elsewhere: `claude mcp add indra-siem -- indra siem mcp`."
 )]
 pub struct SiemArgs {
     #[command(flatten)]
@@ -1192,13 +1192,24 @@ pub enum SiemCmd {
         json: bool,
     },
     /// An MCP server (stdio) with read-only SIEM tools for AI agents
-    Mcp,
+    Mcp {
+        /// Only these sources (comma-separated names)
+        #[arg(long)]
+        only: Option<String>,
+    },
 }
 
 pub fn run_siem(a: SiemArgs) -> Result<ExitCode, String> {
     let s = load(a.opts, None, true)?;
     match a.cmd {
-        SiemCmd::Mcp => crate::deck::siem::serve_mcp(s),
+        SiemCmd::Mcp { only } => {
+            let mut s = s;
+            if let Some(o) = only {
+                let keep: Vec<&str> = o.split(',').map(str::trim).collect();
+                s.siem.retain(|c| keep.contains(&c.name.as_str()));
+            }
+            crate::deck::siem::serve_mcp(s)
+        }
         SiemCmd::List => {
             crate::deck::siem::run_cli(s, "list", None, &serde_json::Value::Null, false)
         }

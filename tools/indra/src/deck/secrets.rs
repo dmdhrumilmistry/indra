@@ -310,11 +310,11 @@ impl Vault {
             }
         }
         for p in c.profiles.iter().flatten() {
-            // A profile, a connector as "connector:<name>", or a SIEM
-            // source as "siem:<name>".
+            // A profile, a connector as "connector:<name>", or one of the
+            // MCP & tools as "tool:<name>".
             let name = p
                 .strip_prefix("connector:")
-                .or_else(|| p.strip_prefix("siem:"))
+                .or_else(|| p.strip_prefix("tool:"))
                 .unwrap_or(p);
             crate::deck::nodes::validate_name(name).map_err(|e| format!("profile: {}", e))?;
         }

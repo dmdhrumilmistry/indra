@@ -85,8 +85,8 @@ file = "docs/guides/engagements.md"
 [[page]]
 group = "Guides"
 slug = "blue-team"
-title = "Blue team"
-description = "Read-only SIEM sources (Wazuh, Elastic, OpenSearch, Splunk, log files), detection checks for engagements, and agents that draft detection rules, triage logs and plan hardening."
+title = "Blue team and MCP & tools"
+description = "Third-party MCP servers and read-only data sources (Wazuh, Elastic, OpenSearch, Splunk, log files) managed from the dashboard, detection checks for engagements, and agents that draft detection rules, triage logs and plan hardening."
 [[page.source]]
 file = "docs/guides/blue-team.md"
 

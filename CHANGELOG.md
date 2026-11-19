@@ -5,9 +5,15 @@ section from this file.
 
 ## v0.14.0
 
-- **SIEM sources, read-only:** Wazuh, Elastic, OpenSearch, Splunk and log files (Settings > SIEM, or
-  `[[siem]]`). Search them with `indra siem search`, and give agents the tools with
-  `claude mcp add indra-siem -- indra siem mcp`.
+- **MCP & tools: any third-party tool for agents, managed from the dashboard.** Settings > MCP & tools
+  (or `[[tool]]`) holds:
+  - any MCP server, started from a command or reached at a URL: EDR, threat intel, ticketing,
+    scanners, a vendor's own SIEM server;
+  - read-only data sources: Wazuh, Elastic, OpenSearch, Splunk and log files.
+
+  Give each tool to profiles, or pick tools per launch. Test checks a tool works. Secrets go into a
+  private config file, never onto a command line, and the file is deleted when the agent exits.
+- **Search data sources** with `indra siem search`.
 - **Check detections:** on an engagement, see which of its steps your SIEM alerted on, which it
   missed, and the ATT&CK techniques its rules named. One click drafts detection rules for what was missed.
 - **Blue-team skills:** `sh-detection-rules` (Sigma rules with noise measured on your logs and a test for

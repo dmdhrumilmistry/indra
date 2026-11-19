@@ -41,9 +41,9 @@ pub struct ConfigFile {
     pub account: Vec<crate::deck::accounts::AccountCfg>,
     /// How a launch picks among the accounts.
     pub routing: crate::deck::accounts::RoutingCfg,
-    /// SIEM and log sources for blue-team work (Wazuh, Elastic, OpenSearch,
-    /// Splunk, log files), read-only.
-    pub siem: Vec<crate::deck::siem::SiemCfg>,
+    /// MCP & tools: third-party MCP servers, and read-only data sources
+    /// (Wazuh, Elastic, OpenSearch, Splunk, log files).
+    pub tool: Vec<crate::deck::integrations::ToolCfg>,
     /// The hub `indra join` joins when given no hub and code (an
     /// organization's defaults.toml or managed.toml, deployed by MDM).
     #[serde(skip_serializing_if = "JoinCfg::is_empty")]
@@ -1136,6 +1136,7 @@ impl ProfileCfg {
             effort: self.effort.clone(),
             mcp: self.mcp.clone(),
             engagement: None,
+            mcp_servers: Default::default(),
             allowed_tools: self.allowed_tools.clone(),
             disallowed_tools: self.disallowed_tools.clone(),
             env: {
@@ -1293,7 +1294,9 @@ pub struct Settings {
     pub terminal: TerminalCfg,
     pub accounts: Vec<crate::deck::accounts::AccountCfg>,
     pub routing: crate::deck::accounts::RoutingCfg,
-    /// SIEM and log sources (read-only).
+    /// MCP & tools, as configured.
+    pub tools: Vec<crate::deck::integrations::ToolCfg>,
+    /// The data sources among them (read-only).
     pub siem: Vec<crate::deck::siem::SiemCfg>,
     /// Workflow shell steps may run on this machine.
     pub shell_steps: bool,
@@ -2302,8 +2305,8 @@ pub fn build_settings(
         }
     }
     unique("connector", file.connector.iter().map(|c| c.name.as_str()))?;
-    unique("siem", file.siem.iter().map(|c| c.name.as_str()))?;
-    for c in &file.siem {
+    unique("tool", file.tool.iter().map(|c| c.name.as_str()))?;
+    for c in &file.tool {
         c.validate()?;
     }
     for c in &file.connector {
@@ -2593,7 +2596,8 @@ pub fn build_settings(
         terminal: file.terminal.clone(),
         accounts: file.account.clone(),
         routing: file.routing.clone(),
-        siem: file.siem.clone(),
+        tools: file.tool.clone(),
+        siem: file.tool.iter().filter_map(|t| t.source()).collect(),
         shell_steps: file.local.shell_steps.unwrap_or(true),
         workflow_errors,
         repo_dirs,

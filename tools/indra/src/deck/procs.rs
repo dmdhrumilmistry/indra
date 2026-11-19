@@ -1549,6 +1549,8 @@ impl Procs {
             control: Option<Vec<String>>,
             /// Remote: the job line for `indra node exec`.
             job: Option<String>,
+            /// A private file to delete when the agent exits (its MCP config).
+            temp: Option<PathBuf>,
             /// Remote over the agent link: the node and the job.
             link: Option<(String, crate::deck::nodes::Job)>,
             node: String,
@@ -1567,12 +1569,17 @@ impl Procs {
             Launch::Local { .. } => crate::deck::nodes::LOCAL.to_string(),
             Launch::Remote { node, .. } => node.name.clone(),
         };
-        let (env, redact) =
+        let (env, mut redact) =
             self.vault
                 .resolve(&opts.agent.env, opts.profile.as_deref(), &node_name)?;
+        // MCP & tools: their secrets too.
+        let (servers, more) =
+            crate::deck::integrations::resolve(&opts.agent.mcp_servers, &self.vault, &node_name)?;
+        redact.extend(more);
         let shown = opts.agent.clone();
         let mut opts = opts;
         opts.agent.env = env;
+        opts.agent.mcp_servers = servers;
         let plan = match l {
             Launch::Local {
                 runner,
@@ -1597,6 +1604,7 @@ impl Procs {
                     env: ac.env,
                     control: ac.control,
                     job: None,
+                    temp: ac.temp,
                     link: None,
                     node: crate::deck::nodes::LOCAL.into(),
                     runner: runner.name.clone(),
@@ -1642,6 +1650,7 @@ impl Procs {
                     cwd: None,
                     env: Vec::new(),
                     control: None,
+                    temp: None,
                     job: (!linked)
                         .then(|| serde_json::to_string(&job))
                         .transpose()
@@ -1737,9 +1746,12 @@ impl Procs {
         }
         #[cfg(unix)]
         cmd.process_group(0);
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("cannot start {}: {}", plan.program.display(), e))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            if let Some(t) = &plan.temp {
+                let _ = std::fs::remove_file(t);
+            }
+            format!("cannot start {}: {}", plan.program.display(), e)
+        })?;
         // Stdin carries the remote job (and then control lines wrapped for the
         // node), or a local interactive agent's control lines. A writer task
         // owns it; a remote job lives as long as it stays open.
@@ -1894,6 +1906,7 @@ impl Procs {
         });
         drop(ctl_tx);
 
+        let temp = plan.temp.clone();
         let p3 = proc.clone();
         tokio::spawn(async move {
             let mut stopped = false;
@@ -1914,6 +1927,9 @@ impl Procs {
             let _ = t_out.await;
             let _ = t_err.await;
             writer.abort();
+            if let Some(t) = &temp {
+                let _ = std::fs::remove_file(t);
+            }
             *p3.ctl.lock().unwrap() = None;
             let (kind, text) = {
                 let mut st = p3.state.lock().unwrap();

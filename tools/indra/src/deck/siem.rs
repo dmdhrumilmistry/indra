@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 
 pub const KINDS: [&str; 5] = ["wazuh", "elastic", "opensearch", "splunk", "files"];
 
-/// A `[[siem]]` source in indra.toml.
+/// A data source: a `[[tool]]` of a data-source kind (integrations.rs).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SiemCfg {
@@ -134,7 +134,7 @@ pub struct Source {
     secrets: BTreeMap<String, String>,
 }
 
-/// Resolve a source's secret references (scope `siem:<name>`).
+/// Resolve a source's secret references (scope `tool:<name>`).
 pub fn open(cfg: &SiemCfg, vault: &crate::deck::secrets::Vault) -> Result<Source, String> {
     let mut env = BTreeMap::new();
     for (k, v) in [
@@ -146,7 +146,7 @@ pub fn open(cfg: &SiemCfg, vault: &crate::deck::secrets::Vault) -> Result<Source
             env.insert(k.to_string(), v.clone());
         }
     }
-    let scope = format!("siem:{}", cfg.name);
+    let scope = format!("tool:{}", cfg.name);
     let (secrets, _) = vault.resolve(&env, Some(&scope), crate::deck::nodes::LOCAL)?;
     Ok(Source {
         cfg: cfg.clone(),
@@ -943,7 +943,7 @@ pub fn run_cli(
     match cmd {
         "list" => {
             if s.siem.is_empty() {
-                println!("No SIEM sources: add a [[siem]] table to indra.toml (see `indra siem --help`).");
+                println!("No data sources: add one in Settings > MCP & tools, or a [[tool]] in indra.toml (see `indra siem --help`).");
             }
             for c in &s.siem {
                 println!(

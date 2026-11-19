@@ -930,6 +930,9 @@ pub(crate) struct LaunchReq {
     /// The engagement it runs in (its scope, window and machine apply).
     #[serde(default)]
     engagement: Option<String>,
+    /// MCP & tools to give it, on top of those of its profile.
+    #[serde(default)]
+    tools: Vec<String>,
 }
 
 /// A profile and per-launch overrides, resolved into a runner and options.
@@ -1183,6 +1186,16 @@ pub(crate) async fn proc_start(
         }
         None => None,
     };
+    // MCP & tools: its profile's, and the ones the launch picked. Only the
+    // console's configuration sets MCP servers, never the request.
+    agent.mcp_servers = crate::deck::integrations::servers_for(
+        &settings.tools,
+        r.profile.as_deref().filter(|p| !p.is_empty()),
+        &r.tools,
+        node == LOCAL,
+        settings.config_path.as_deref(),
+    )
+    .map_err(bad)?;
     // On Ollama here: a model the server cannot load fails now, clearly.
     // (A remote machine checks its own Ollama when the job arrives.)
     if node == LOCAL {
@@ -1544,6 +1557,7 @@ async fn proc_pivot(
     };
     // An agent in an engagement stays in it, under its current terms.
     let mut agent = agent;
+    agent.mcp_servers = p.opts().mcp_servers.clone();
     agent.engagement = p.opts().engagement.as_ref().map(|e| {
         app.engagements
             .get(&e.id)
@@ -3102,7 +3116,7 @@ async fn engagement_detections(
         .filter(|c| r.sources.is_empty() || r.sources.contains(&c.name))
         .collect();
     if chosen.is_empty() {
-        return Err(bad("no SIEM source to ask: add one under Settings > SIEM"));
+        return Err(bad("no data source to ask: add a Wazuh, Elastic, OpenSearch, Splunk or log-file tool under Settings > MCP & tools"));
     }
     let slack = r.slack.unwrap_or(900).clamp(60, 86_400);
     let (entries, intact, machine) = merged_audit(&app, &e).await;
@@ -3207,24 +3221,40 @@ async fn engagement_detections(
     Ok(Json(report))
 }
 
-/// `GET /api/siem`: the configured SIEM and log sources (no credentials).
-async fn siem_list(State(app): State<Arc<App>>) -> Json<Value> {
+/// `GET /api/integrations`: MCP & tools (no secret values).
+async fn integrations_list(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!(app
         .settings()
-        .siem
+        .tools
         .iter()
-        .map(crate::deck::siem::SiemCfg::view)
+        .map(crate::deck::integrations::ToolCfg::view)
         .collect::<Vec<_>>()))
 }
 
-/// `POST /api/siem/{name}/test`: does it answer, with its credentials?
-async fn siem_test(
+/// `POST /api/integrations/{name}/test` (admins): a data source answers
+/// with its credentials; an MCP server starts (or answers at its URL) and
+/// lists its tools.
+async fn integration_test(
     State(app): State<Arc<App>>,
     UrlPath(name): UrlPath<String>,
 ) -> ApiResult<Json<Value>> {
-    let src = crate::deck::siem::source(&app.settings(), &name).map_err(bad)?;
-    let msg = crate::deck::siem::check(&src).await.map_err(bad)?;
-    Ok(Json(json!({ "ok": true, "message": msg })))
+    let settings = app.settings();
+    let t = settings
+        .tools
+        .iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| not_found("no such tool"))?;
+    if t.is_source() {
+        let src = crate::deck::siem::source(&settings, &name).map_err(bad)?;
+        let msg = crate::deck::siem::check(&src).await.map_err(bad)?;
+        return Ok(Json(json!({ "ok": true, "message": msg })));
+    }
+    let vault = crate::deck::secrets::Vault::open(settings.data_dir.join("secrets"));
+    let tools = crate::deck::integrations::probe(t, &vault)
+        .await
+        .map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "tools": tools,
+        "message": format!("{} tool(s): {}", tools.len(), tools.join(", ")) })))
 }
 
 fn download(name: &str, kind: &str, body: String) -> axum::response::Response {
@@ -4384,8 +4414,8 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/engagements/{id}/detections",
             post(engagement_detections),
         )
-        .route("/api/siem", get(siem_list))
-        .route("/api/siem/{name}/test", post(siem_test))
+        .route("/api/integrations", get(integrations_list))
+        .route("/api/integrations/{name}/test", post(integration_test))
         .route("/api/nodes/{name}", axum::routing::delete(node_remove))
         .route("/api/nodes/{name}/dirs", get(node_dirs))
         .route(
@@ -4499,6 +4529,7 @@ mod tests {
             terminal: Default::default(),
             accounts: vec![],
             routing: Default::default(),
+            tools: vec![],
             siem: vec![],
             shell_steps: true,
             workflow_errors: vec![],
@@ -6675,12 +6706,14 @@ while True:
         let logs = dir.join("siem");
         std::fs::create_dir_all(&logs).unwrap();
         let mut settings = (*base.settings()).clone();
-        settings.siem.push(crate::deck::siem::SiemCfg {
+        let t = crate::deck::integrations::ToolCfg {
             name: "logs".into(),
             kind: "files".into(),
             paths: vec![logs.join("*.log").display().to_string()],
             ..Default::default()
-        });
+        };
+        settings.siem.push(t.source().unwrap());
+        settings.tools.push(t);
         let app = App::new(settings, TOKEN.into(), true);
         let origin = ("origin", "http://127.0.0.1:7878");
         let t = crate::deck::engage::now();
@@ -6735,11 +6768,92 @@ while True:
         assert_eq!(r["techniques"], json!(["T1190"]));
         assert_eq!(r["steps"][1]["detected"], false);
         assert!(d.join("detections.json").is_file());
-        let (s, _, b) = call(&app, "GET", "/api/siem", &[AUTH], None).await;
+        let (s, _, b) = call(&app, "GET", "/api/integrations", &[AUTH], None).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(
             serde_json::from_str::<Value>(&b).unwrap()[0]["name"],
             "logs"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn agents_get_their_tools_and_nothing_else() {
+        let (base, dir) = fixture("tools", false);
+        let mut settings = (*base.settings()).clone();
+        settings.runners.push(Runner {
+            name: "fakeclaude".into(),
+            command: "echo".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            format: "claude-stream-json".into(),
+            resume_args: vec![],
+            fork_args: vec![],
+            model_args: vec![],
+            program: crate::deck::config::which("echo"),
+        });
+        let mcp = |name: &str, profiles: &[&str]| crate::deck::integrations::ToolCfg {
+            name: name.into(),
+            kind: "mcp".into(),
+            command: "intel-server".into(),
+            profiles: profiles.iter().map(|p| p.to_string()).collect(),
+            ..Default::default()
+        };
+        settings.tools = vec![mcp("intel", &["*"]), mcp("tickets", &[])];
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let forged = json!({ "evil": { "command": "sh", "args": ["-c", "id"] } });
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "fakeclaude", "prompt": "go", "target": 0,
+            "tools": ["tickets"], "opts": { "mcp_servers": forged } })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let p = app.procs.get(id).unwrap();
+        let names: Vec<String> = p.view().opts.mcp_servers.keys().cloned().collect();
+        assert_eq!(
+            names,
+            ["intel", "tickets"],
+            "its profile's (*) and its pick; never the request's own"
+        );
+        let cmd = p.view().command;
+        let i = cmd
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .expect("an MCP config");
+        let file = std::path::PathBuf::from(&cmd[i + 1]);
+        assert_eq!(i + 2, cmd.len(), "last");
+        for _ in 0..200 {
+            if !p.is_running() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !file.exists(),
+            "the config, with its secrets, is gone once the agent exits"
+        );
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/api/procs",
+            &[AUTH, origin],
+            Some(json!({ "runner": "fakeclaude", "prompt": "go", "target": 0, "tools": ["nope"] })),
+        )
+        .await;
+        assert!(s == StatusCode::BAD_REQUEST && b.contains("nope"), "{}", b);
+        let (s, _, b) = call(&app, "GET", "/api/integrations", &[AUTH], None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&b).unwrap()[0]["transport"],
+            "stdio"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

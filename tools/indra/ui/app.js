@@ -1450,6 +1450,16 @@
         ["subagents", "Anthropic, with its subagents on Ollama"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var subModel = h("input", { type: "text", list: "models", "aria-label": "Subagent model", placeholder: "an Ollama model, e.g. qwen3-coder" });
       var subLabel = h("label", { hidden: true }, "Subagents' Ollama model", subModel);
+      var toolBox = h("div", { class: "chips" }), toolPicks = {};
+      api("/api/integrations").then(function (ts) {
+        ts.filter(function (t) { return !t.disabled; }).forEach(function (t) {
+          var always = (t.profiles || []).indexOf("*") >= 0;
+          var cb = h("input", { type: "checkbox", value: t.name, checked: always, disabled: always }); if (!always) toolPicks[t.name] = cb;
+          toolBox.appendChild(h("label", { class: "check", title: always ? "Given to every Claude Code agent" : (t.description || "") }, cb,
+            h("span", { text: t.name + (t.category ? " (" + t.category + ")" : "") + (always ? ", every agent" : (t.profiles || []).length ? ", profiles " + t.profiles.join(", ") : "") })));
+        });
+        if (!ts.length) toolBox.appendChild(h("span", { class: "muted small", text: "None yet: an admin adds MCP servers and data sources in Settings > MCP & tools." }));
+      }).catch(function () { /* none */ });
       var memory = h("input", { type: "checkbox" }), reflect = h("input", { type: "checkbox" });
       var memNote = h("div", { class: "muted small" });
       function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
@@ -1538,9 +1548,10 @@
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
         if (mcp.value) o.mcp = mcp.value;
+        var tools = Object.keys(toolPicks).filter(function (k) { return toolPicks[k].checked; });
         if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
         if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
-        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, tools: tools, memory: memory.checked, reflect: reflect.checked } })
           .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } location.hash = "#/sessions/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
@@ -1550,6 +1561,7 @@
         note,
         h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, memory" }),
           h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+          h("label", null, "Tools", h("small", { text: "MCP servers and data sources from Settings > MCP & tools, on top of those its profile gets. Claude Code agents only; data sources only for agents on this machine." }), toolBox),
           h("div", { class: "fields" }, h("label", null, "MCP servers", mcp, h("small", { text: "Each server's tools fill the context before the agent does anything." })), h("label", null, "Runs on", where), subLabel),
           pfNote,
           modelList(),
@@ -4267,7 +4279,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Saved tasks"], ["accounts", "Accounts"],
-    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["siem", "SIEM"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
+    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["tools", "MCP & tools"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -4281,6 +4293,17 @@
   function cfgProfileNames(c) {
     var n = {}; (c.config.profile || []).concat(c.config.builtins === false ? [] : (c.builtin.profiles || [])).forEach(function (p) { n[p.name] = 1; }); return Object.keys(n);
   }
+  // Starting points for "Add tool". Vendors' MCP servers differ: their docs
+  // give the command or URL and the variables to set.
+  var TOOL_TEMPLATES = [
+    { label: "MCP server (command)", v: { name: "", kind: "mcp", category: "other", command: "", args: [], description: "Started on the agent's machine" } },
+    { label: "MCP server (URL)", v: { name: "", kind: "mcp", category: "other", url: "https://", headers: { Authorization: "secret:" } } },
+    { label: "Wazuh", v: { name: "wazuh", kind: "wazuh", category: "siem", url: "https://wazuh-indexer:9200", username: "indra-ro", password: "secret:wazuh-ro", ca_file: "" } },
+    { label: "Elastic", v: { name: "elastic", kind: "elastic", category: "siem", url: "https://elasticsearch:9200", api_key: "secret:elastic-ro", index: ".alerts-security.alerts-*,logs-*" } },
+    { label: "OpenSearch", v: { name: "opensearch", kind: "opensearch", category: "siem", url: "https://opensearch:9200", username: "indra-ro", password: "secret:opensearch-ro" } },
+    { label: "Splunk", v: { name: "splunk", kind: "splunk", category: "siem", url: "https://splunk:8089", token: "secret:splunk-ro" } },
+    { label: "Log files", v: { name: "logs", kind: "files", category: "siem", paths: ["/var/log/auth.log"] } }
+  ];
   // Starting points for "Add profile".
   var PROFILE_TEMPLATES = [
     { label: "Planner (Opus, read-only)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "dontAsk", effort: "high",
@@ -4328,20 +4351,31 @@
       { k: "target", label: "Target" },
       { k: "retries", label: "Retries", type: "number", placeholder: "0" }]; },
       summary: function (x) { return x.prompt || x.description || ""; } },
-    siem: { tab: "siem", noun: "SIEM source", fields: function () { return [
-      { k: "name", label: "Name", req: true, help: "Agents and detection checks name the source by it: indra siem search <name> ..." },
-      { k: "kind", label: "Kind", type: "select", req: true, options: [["wazuh", "Wazuh (its indexer)"], ["elastic", "Elastic / Elasticsearch"], ["opensearch", "OpenSearch"], ["splunk", "Splunk"], ["files", "Log files"]] },
-      { k: "url", label: "Search API URL", placeholder: "https://wazuh-indexer:9200", help: "Wazuh indexer, Elasticsearch or OpenSearch: port 9200. Splunk: the management port, https://splunk:8089. Not for log files." },
-      { k: "index", label: "Index pattern", placeholder: "wazuh-alerts-* or logs-*" },
-      { k: "time_field", label: "Time field", placeholder: "timestamp (Wazuh) or @timestamp" },
-      { k: "username", label: "User", help: "A read-only account." },
-      { k: "password", label: "Password", placeholder: "secret:wazuh-ro", help: "A secret reference, never the password itself: add it in the Secrets tab (scope it to siem:<this name>)." },
+    tool: { tab: "tools", noun: "tool", fields: function (c) { return [
+      { k: "name", label: "Name", req: true, help: "Agents see an MCP server under this name; detection checks and indra siem name a data source by it." },
+      { k: "kind", label: "Kind", type: "select", req: true, options: [["mcp", "MCP server (any vendor or tool)"], ["wazuh", "Data source: Wazuh (its indexer)"], ["elastic", "Data source: Elastic"], ["opensearch", "Data source: OpenSearch"], ["splunk", "Data source: Splunk"], ["files", "Data source: log files"]] },
+      { k: "category", label: "Category", type: "select", options: [["", "none"], ["siem", "SIEM and logs"], ["edr", "EDR"], ["threat-intel", "Threat intel"], ["ticketing", "Ticketing"], ["scanner", "Scanner"], ["cloud", "Cloud"], ["identity", "Identity"], ["other", "Other"]] },
+      { k: "description", label: "Description", help: "What it is for, for the people who pick it." },
+      { k: "profiles", label: "Give it to these profiles", type: "list", placeholder: "only when picked at launch", help: "One profile per line; * for every Claude Code agent. Anyone can still pick it on Run an agent." },
+      { k: "disabled", label: "Turned off", type: "bool" },
+      { k: "command", label: "Command (MCP server)", placeholder: "the server's start command", help: "An MCP server started on the agent's machine: its program (from the vendor's docs). Leave empty for one reached at a URL." },
+      { k: "args", label: "Arguments (MCP server)", type: "list", help: "One per line." },
+      { k: "env", label: "Environment (MCP server)", type: "kv", help: "KEY=value, one per line; keys and tokens as secret:<name> (Secrets tab, scope tool:<this name>)." },
+      { k: "url", label: "URL", placeholder: "https://edr.example.com/mcp, or a data source's search API", help: "An MCP server reached over HTTP, or a data source's API: Wazuh indexer, Elasticsearch or OpenSearch on 9200, Splunk's management port 8089." },
+      { k: "headers", label: "Headers (MCP server at a URL)", type: "kv", help: "Authorization=secret:<name>, one per line. Store the whole value, Bearer included, in the secret." },
+      { k: "index", label: "Index pattern (data source)", placeholder: "wazuh-alerts-* or logs-*" },
+      { k: "time_field", label: "Time field (data source)", placeholder: "timestamp (Wazuh) or @timestamp" },
+      { k: "username", label: "User (data source)", help: "A read-only account." },
+      { k: "password", label: "Password (data source)", placeholder: "secret:wazuh-ro" },
       { k: "token", label: "Bearer token (Splunk)", placeholder: "secret:splunk-ro" },
       { k: "api_key", label: "API key (Elastic)", placeholder: "secret:elastic-ro" },
-      { k: "ca_file", label: "CA certificate", placeholder: "/etc/indra/siem-ca.pem", help: "For a SIEM with its own certificate authority (Wazuh's default)." },
-      { k: "insecure_tls", label: "Skip certificate checks (prefer a CA certificate)", type: "bool" },
+      { k: "ca_file", label: "CA certificate (data source)", placeholder: "/etc/indra/siem-ca.pem", help: "For a source with its own certificate authority (Wazuh's default)." },
+      { k: "insecure_tls", label: "Skip certificate checks (data source; prefer a CA certificate)", type: "bool" },
       { k: "paths", label: "Log files", type: "list", help: "Log files: one path or folder/*.log pattern per line." }]; },
-      summary: function (x) { return x.kind + " " + (x.kind === "files" ? (x.paths || []).join(", ") : x.url); } },
+      summary: function (x) {
+        var where = x.kind === "mcp" ? (x.url || [x.command].concat(x.args || []).join(" ")) : x.kind === "files" ? (x.paths || []).join(", ") : x.url;
+        return (x.disabled ? "off: " : "") + (x.kind === "mcp" ? "MCP" : x.kind) + (x.category ? " (" + x.category + ")" : "") + "  " + where + ((x.profiles || []).length ? "  -> " + x.profiles.join(", ") : "");
+      } },
     connector: { tab: "connectors", noun: "connector", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
       { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"], ["linear", "Linear"]] },
@@ -4595,7 +4629,7 @@
       }
       ({ general: general, profiles: function () { list("profile", c.config.builtins === false ? [] : c.builtin.profiles); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, siem: function () { list("siem"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, tools: function () { list("tool"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
     }
 
     function general() {
@@ -4670,7 +4704,7 @@
           saveSection(section, next, "Imported " + got.length + " " + d.noun + "(s)").catch(function (e) { toast(e.message, true); });
         });
       } }, "Import");
-      var templates = section === "profile" ? PROFILE_TEMPLATES : section === "team" ? TEAM_TEMPLATES : [];
+      var templates = section === "profile" ? PROFILE_TEMPLATES : section === "team" ? TEAM_TEMPLATES : section === "tool" ? TOOL_TEMPLATES : [];
       body.appendChild(h("div", { class: "row cfgbar" }, add, templates.map(function (t) {
         return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New " + d.noun + ": " + t.label); } }, "+ " + t.label);
       }), exportBtn, importBtn));
@@ -4687,6 +4721,12 @@
           h("p", { class: "muted clip", text: d.summary(it) }),
           h("div", { class: "row" },
             section === "workflow" ? h("a", { class: "btn", href: "#/wfedit/" + encodeURIComponent(it.name), text: "Edit graph" }) : null,
+            section === "tool" && S.ov.is_admin ? h("button", { type: "button", title: "A data source: search it. An MCP server: start it and list its tools.", onclick: function (e) {
+              var b = e.target; b.disabled = true; b.textContent = "Testing...";
+              api("/api/integrations/" + encodeURIComponent(it.name) + "/test", { method: "POST" })
+                .then(function (r) { toast(it.name + ": " + r.message); }).catch(function (err) { toast(it.name + ": " + err.message, true); })
+                .then(function () { b.disabled = false; b.textContent = "Test"; });
+            } }, "Test") : null,
             h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(i, it, "Edit " + d.noun + " " + it.name); } }, section === "workflow" ? "Edit as form" : "Edit"),
             h("button", { type: "button", disabled: !c.editable, onclick: function () {
               var copy = JSON.parse(JSON.stringify(it)); copy.name = it.name + "-copy"; edit(null, copy, "New " + d.noun);

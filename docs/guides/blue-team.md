@@ -1,56 +1,97 @@
-# Blue team: SIEM sources, detection checks, rules, triage and hardening
+# Blue team: MCP & tools, detection checks, rules, triage and hardening
 
-indra connects to your SIEM **read-only** and gives its agents three defensive skills.
+**MCP & tools** gives indra's agents any third-party tool you need. It also connects to your SIEM
+**read-only**, and indra adds three defensive skills.
 
 | Piece | What it does |
 |---|---|
-| **SIEM sources** (`[[siem]]`) | Wazuh, Elastic, OpenSearch, Splunk, or plain log files. Searched by `indra siem`, by the `indra siem mcp` tools, and by detection checks |
+| **MCP & tools** (`[[tool]]`) | Any MCP server: EDR, threat intel, ticketing, scanners, a vendor's own SIEM server. Also read-only data sources: Wazuh, Elastic, OpenSearch, Splunk, log files. Managed in **Settings > MCP & tools** |
 | **Check detections** on an engagement | Which of the engagement's steps your SIEM alerted on: detected, missed, and the ATT&CK techniques its rules named |
 | **`sh-detection-rules`** | Drafts Sigma rules for what was missed, with the log source each needs, noise counted against your real logs, and a test for each. Never deploys them |
 | **`sh-log-triage`** | Triages alerts and hunts in logs: incidents, timelines, indicators, verdicts with evidence. Takes no response action |
 | **`sh-hardening`** | Turns findings, a threat model and detection gaps into an ordered plan of fixes, each with how to verify it |
 
-## Add a source
+## MCP & tools
 
-**Settings > SIEM > Add SIEM source**, or in `indra.toml`:
+**Settings > MCP & tools** (admins) lists every tool. Start from a template, or **Add tool**. **Test**
+checks that a tool works:
+- a data source runs a search;
+- an MCP server is started (or called at its URL) and asked for its tools.
+
+The same list in `indra.toml`:
 
 ```toml
-[[siem]]
+# Any MCP server started on the agent's machine. The vendor's docs give the command and variables.
+[[tool]]
+name = "intel"
+kind = "mcp"
+category = "threat-intel"              # siem | edr | threat-intel | ticketing | scanner | cloud | identity | other
+command = "<the server's command>"
+args = ["<its>", "<arguments>"]
+env = { API_KEY = "secret:intel-key" } # indra secret set intel-key  (scope it to tool:intel)
+profiles = ["blue"]                    # agents of these profiles get it; "*" for every Claude Code agent
+
+# An MCP server reached over HTTP.
+[[tool]]
+name = "edr"
+kind = "mcp"
+category = "edr"
+url = "https://edr.example.com/mcp"
+headers = { Authorization = "secret:edr-token" }   # the whole value, "Bearer ..." included
+
+# Read-only data sources.
+[[tool]]
 name = "wazuh"
 kind = "wazuh"                         # wazuh | elastic | opensearch | splunk | files
 url = "https://wazuh-indexer:9200"     # the Wazuh indexer (OpenSearch), not the manager API on 55000
 username = "indra-ro"
-password = "secret:wazuh-ro"           # indra secret set wazuh-ro  (scope it to siem:wazuh)
+password = "secret:wazuh-ro"
 ca_file = "/etc/indra/wazuh-root-ca.pem"
-# index = "wazuh-alerts-*"             # the default for Wazuh
-# time_field = "timestamp"             # the default for Wazuh
+profiles = ["blue"]
 
-[[siem]]
+[[tool]]
 name = "elastic"
 kind = "elastic"
 url = "https://es.internal:9200"
 api_key = "secret:elastic-ro"
 index = ".alerts-security.alerts-*,logs-*"
 
-[[siem]]
+[[tool]]
 name = "splunk"
 kind = "splunk"
 url = "https://splunk.internal:8089"   # the management port
 token = "secret:splunk-ro"
 
-[[siem]]
+[[tool]]
 name = "logs"
 kind = "files"
 paths = ["/var/log/auth.log", "/var/log/nginx/*.log"]
 ```
 
-**Credentials** are always secret references, never values in the file. A secret scoped to
-`siem:<name>` is given to that source only. Use an account that can only read.
+**How an agent gets its tools:**
+- **By profile:** every tool whose `profiles` names the agent's profile, or `*`.
+- **Per launch:** the tools ticked under **Run an agent > More options > Tools**.
+- **MCP servers** are written to a config file for the agent:
+  - readable by its owner only, in indra's data folder;
+  - passed with `--mcp-config`, so their secrets are resolved at launch and never appear on a command
+    line;
+  - deleted when the agent exits.
 
-**Certificates:** for a SIEM with its own certificate authority, Wazuh's default among them, point
-`ca_file` at that authority's certificate. `insecure_tls = true` skips the check, but prefer `ca_file`.
+  With **MCP servers: none**, the agent gets only these tools.
+- **Data sources** reach agents through indra's own MCP server, with read-only `siem_sources`,
+  `siem_search` and `siem_alerts` tools. This works for agents on the console's machine, where the
+  sources are configured.
+- **Only the console's configuration** sets an agent's MCP servers. A launch request can only pick tools
+  from the list, by name.
 
-Check a source with **Test**, or `indra siem test wazuh`.
+**Secrets:**
+- Every key, token and password is a secret reference (`secret:<name>`), never a value in the file.
+- A secret scoped to `tool:<name>` is given to that tool only.
+- For a data source, use an account that can only read.
+
+**Certificates:** for a data source with its own certificate authority, Wazuh's default among them,
+point `ca_file` at that authority's certificate. `insecure_tls = true` skips the check, but prefer
+`ca_file`.
 
 ## Read-only by construction
 
@@ -74,18 +115,13 @@ indra siem search splunk '10.20.0.7 "failed password"' --since 7d --json
 Times are Unix seconds or `15m`, `24h`, `7d` ago. Wazuh, Elastic and OpenSearch take Lucene query
 syntax. Splunk and log files take terms and "quoted phrases", all of which must match.
 
-## Give agents the SIEM
+## Outside indra
+
+To give the data sources to a Claude Code you run yourself:
 
 ```bash
 claude mcp add indra-siem -- indra siem mcp
 ```
-
-This adds three read-only tools: `siem_sources`, `siem_search` and `siem_alerts`. Agents can also run
-`indra siem search` in Bash.
-
-Other security tools with their own MCP servers (an official Wazuh, Elastic or Splunk MCP server, a
-threat-intel lookup, an EDR's) work the same way: add them to Claude Code, or install them from
-**Marketplace**, and agents started by indra have them.
 
 ## Check detections (purple team)
 
@@ -121,6 +157,7 @@ make a hardening plan from the last review and its threat model
 
 | Call | What it does |
 |---|---|
-| `GET /api/siem` | The configured sources, without credentials |
-| `POST /api/siem/{name}/test` | Can it be reached with its credentials |
+| `GET /api/integrations` | MCP & tools, with no secret values (only which keys are set) |
+| `POST /api/integrations/{name}/test` (admins) | Search a data source, or start an MCP server and list its tools |
+| `POST /api/procs` with `"tools": [names]` | Start an agent with these tools on top of its profile's |
 | `POST /api/engagements/{id}/detections` `{sources?, slack?}` (operators) | Run the detection check |

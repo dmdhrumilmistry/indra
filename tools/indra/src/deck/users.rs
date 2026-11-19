@@ -368,6 +368,10 @@ pub fn needed(method: &str, path: &str) -> Role {
     if under("/api/engagements") && (path.ends_with("/audit") || path.ends_with("/detections")) {
         return Role::Operator;
     }
+    // Testing a tool starts its command on this machine.
+    if under("/api/integrations") && !read {
+        return Role::Admin;
+    }
     // Creating and ending engagements (what may be tested, and when).
     if under("/api/engagements") && !read {
         return Role::Admin;

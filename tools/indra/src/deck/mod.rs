@@ -15,6 +15,7 @@ pub mod discover;
 pub mod engage;
 pub mod enroll;
 pub mod flow;
+pub mod integrations;
 pub mod knowledge;
 pub mod link;
 pub mod managed;
