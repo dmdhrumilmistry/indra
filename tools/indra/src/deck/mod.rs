@@ -12,6 +12,7 @@ pub mod config;
 pub mod cron;
 pub mod delegate;
 pub mod discover;
+pub mod engage;
 pub mod enroll;
 pub mod flow;
 pub mod knowledge;

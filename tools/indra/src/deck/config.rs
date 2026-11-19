@@ -1132,6 +1132,7 @@ impl ProfileCfg {
             permission_mode: self.permission_mode.clone(),
             effort: self.effort.clone(),
             mcp: self.mcp.clone(),
+            engagement: None,
             allowed_tools: self.allowed_tools.clone(),
             disallowed_tools: self.disallowed_tools.clone(),
             env: {

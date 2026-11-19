@@ -885,6 +885,10 @@ pub struct AgentOpts {
     /// unset, as Claude Code is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<String>,
+    /// The engagement it runs in: `indra guard` checks every tool call
+    /// against its scope and window, paces it and logs it (Claude Code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engagement: Option<crate::deck::engage::Spec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1005,6 +1009,9 @@ impl AgentOpts {
                 return Err(format!("effort must be one of {}", EFFORTS.join(", ")));
             }
         }
+        if let Some(e) = &self.engagement {
+            e.validate()?;
+        }
         if let Some(m) = &self.mcp {
             if !MCP_CHOICES.contains(&m.as_str()) {
                 return Err(format!(
@@ -1049,6 +1056,7 @@ impl AgentOpts {
         if other.mcp.is_some() {
             o.mcp = other.mcp.clone();
         }
+        // Never `engagement`: only the console sets it, from its own store.
         if !other.allowed_tools.is_empty() {
             o.allowed_tools = other.allowed_tools.clone();
         }
@@ -1166,16 +1174,28 @@ pub fn agent_command(
         if o.permission_mode.is_some()
             || o.effort.is_some()
             || o.mcp.as_deref() == Some("none")
+            || o.engagement.is_some()
             || !o.allowed_tools.is_empty()
             || !o.disallowed_tools.is_empty()
         {
             return Err(format!(
-                "runner '{}' is not Claude Code, so permission mode, effort, MCP servers and tool rules do not apply to it",
+                "runner '{}' is not Claude Code, so permission mode, effort, MCP servers, engagements and tool rules do not apply to it",
                 r.name
             ));
         }
     }
-    let env = provider_env(r, claude, o, &mut args)?;
+    let mut env = provider_env(r, claude, o, &mut args)?;
+    if let (true, Some(e)) = (claude, &o.engagement) {
+        // indra guard checks, paces and logs every tool call; the agent
+        // cannot change its hooks or its engagement once started.
+        let exe = std::env::current_exe().map_err(|e| format!("where is indra? {}", e))?;
+        args.push("--settings".into());
+        args.push(crate::deck::engage::hook_settings(&exe));
+        env.insert(
+            "INDRA_ENGAGEMENT".into(),
+            serde_json::to_string(e).map_err(|e| e.to_string())?,
+        );
+    }
     if claude && o.mcp.as_deref() == Some("none") {
         // Last, as --mcp-config takes every value up to the next flag.
         args.extend(

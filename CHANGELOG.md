@@ -3,6 +3,19 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.13.0
+
+- **Engagements: test live systems inside a written scope.** Each engagement records:
+  - who authorized it;
+  - what may be tested (hosts, `*.domain`, IPs and CIDRs, minus exclusions) and when;
+  - the one machine its agents run on;
+  - how many calls per second each host takes.
+- **Every tool call is checked.** Agents in an engagement run Claude Code with `indra guard` as a hook.
+  Each call that names a host outside the scope, or runs outside the window, is refused with the
+  reason. The rest are paced per host and logged.
+- **A tamper-evident audit log**: launches, approvals, every tool call and its result, chained by
+  SHA-256, merged across the console and the machine, and exported as CSV or JSONL.
+
 ## v0.12.1
 
 - **Ollama models that cannot load fail before the agent starts**, with what to do (update Ollama,
