@@ -364,6 +364,18 @@ pub fn needed(method: &str, path: &str) -> Role {
     if under("/api/nodes/keys") {
         return Role::Admin;
     }
+    // An engagement's audit log holds the commands its agents ran.
+    if under("/api/engagements") && (path.ends_with("/audit") || path.ends_with("/detections")) {
+        return Role::Operator;
+    }
+    // Testing a tool starts its command on this machine.
+    if under("/api/integrations") && !read {
+        return Role::Admin;
+    }
+    // Creating and ending engagements (what may be tested, and when).
+    if under("/api/engagements") && !read {
+        return Role::Admin;
+    }
     // Browsing a machine's folders, and changing where agents work.
     if under("/api/nodes") && (path.ends_with("/dirs") || path.ends_with("/folders")) {
         return Role::Admin;
@@ -404,6 +416,13 @@ mod tests {
         assert_eq!(needed("POST", "/api/workflows"), Role::Operator);
         assert_eq!(needed("PUT", "/api/workflow-files"), Role::Admin);
         assert_eq!(needed("POST", "/api/run/post"), Role::Operator);
+        assert_eq!(needed("GET", "/api/engagements"), Role::Viewer);
+        assert_eq!(needed("POST", "/api/engagements"), Role::Admin);
+        assert_eq!(needed("POST", "/api/engagements/abcd1234/end"), Role::Admin);
+        assert_eq!(
+            needed("GET", "/api/engagements/abcd1234/audit"),
+            Role::Operator
+        );
         assert_eq!(needed("GET", "/api/config"), Role::Admin);
         assert_eq!(needed("GET", "/api/secrets"), Role::Admin);
         assert_eq!(needed("PUT", "/api/secrets/x"), Role::Admin);

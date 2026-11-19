@@ -89,10 +89,19 @@ enum Cmd {
     Completions(completions::CompletionsArgs),
     /// MCP server for AI agents to design workflows (`claude mcp add indra -- indra mcp`)
     Mcp(deck::cli::McpArgs),
+    /// SIEM and log sources (Wazuh, Elastic, OpenSearch, Splunk, files): list, test, search, mcp
+    Siem(deck::cli::SiemArgs),
     /// Accounts agents run with: what each used today and this month, and its limits
     Accounts(deck::cli::AccountsArgs),
     /// Console users and roles: add, list, passwd, role, rm
     User(deck::users::UserArgs),
+    /// Claude Code's hook for agents in an engagement (scope, window, pace, audit); indra sets it up
+    #[command(hide = true)]
+    Guard {
+        /// pre (before a tool runs: allow or refuse) or post (record what came of it)
+        #[arg(value_parser = ["pre", "post"])]
+        phase: String,
+    },
     /// Maintainer tools: build the website
     #[command(hide = true)]
     Dev {
@@ -122,7 +131,13 @@ fn main() -> ExitCode {
     // (its output is read by the hub).
     if !matches!(
         cli.cmd,
-        Cmd::Update(_) | Cmd::Completions(_) | Cmd::Node(_) | Cmd::Mcp(_) | Cmd::Dev { .. }
+        Cmd::Update(_)
+            | Cmd::Completions(_)
+            | Cmd::Node(_)
+            | Cmd::Mcp(_)
+            | Cmd::Guard { .. }
+            | Cmd::Siem(_)
+            | Cmd::Dev { .. }
     ) {
         update::on_start();
     }
@@ -144,10 +159,12 @@ fn main() -> ExitCode {
         Cmd::Completions(a) => completions::run(a),
         Cmd::Mcp(a) => deck::cli::run_mcp(a),
         Cmd::Accounts(a) => deck::cli::run_accounts(a),
+        Cmd::Siem(a) => deck::cli::run_siem(a),
         Cmd::User(a) => deck::users::run(a),
         Cmd::Publish(a) => publish::run(a),
         Cmd::Review(a) => review::run(a),
         Cmd::Skills(a) => skills::run(a),
+        Cmd::Guard { phase } => return deck::engage::guard_main(&phase),
         Cmd::Dev {
             cmd: DevCmd::Site(a),
         } => site::run(a),

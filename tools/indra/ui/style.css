@@ -600,6 +600,10 @@ dialog.code .code-title { margin: 0; flex: 1; font-family: var(--mono, monospace
 .tm .row h4 { margin: 0; }
 .warn-text { color: var(--warn, #b45309); }
 .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.surface .row h4 { margin: 0; }
+.surface-graph { margin-top: 12px; }
+.surface-graph > summary { cursor: pointer; font-weight: 600; }
+.surface-graph .graphbox { height: 540px; margin-top: 8px; }
 
 
 /* ---- agent states: animated symbols -------------------------------------------

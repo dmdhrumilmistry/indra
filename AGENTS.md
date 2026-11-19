@@ -38,7 +38,7 @@ indra dev dashes --fix    # replace them with a plain hyphen
 .claude-plugin/marketplace.json     # Claude Code marketplace manifest
 plugins/indra/                      # the plugin itself
   agents/                           # sh-recon, sh-threat-modeler, sh-hunter, sh-chainer, sh-verifier, sh-reporter
-  skills/                           # CANONICAL skills: indra, sh-security-review, sh-threat-model, sh-pr-review, sh-memory, sh-publish, sh-kb-* (15)
+  skills/                           # CANONICAL skills: indra, sh-security-review, sh-threat-model, sh-pr-review, sh-memory, sh-publish, sh-detection-rules, sh-log-triage, sh-hardening, sh-attack-surface, sh-kb-* (15)
   references/                       # shared reference docs
 gemini-extension.json               # Gemini CLI extension manifest
 GEMINI.md                           # Gemini context file

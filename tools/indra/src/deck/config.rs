@@ -41,6 +41,9 @@ pub struct ConfigFile {
     pub account: Vec<crate::deck::accounts::AccountCfg>,
     /// How a launch picks among the accounts.
     pub routing: crate::deck::accounts::RoutingCfg,
+    /// MCP & tools: third-party MCP servers, and read-only data sources
+    /// (Wazuh, Elastic, OpenSearch, Splunk, log files).
+    pub tool: Vec<crate::deck::integrations::ToolCfg>,
     /// The hub `indra join` joins when given no hub and code (an
     /// organization's defaults.toml or managed.toml, deployed by MDM).
     #[serde(skip_serializing_if = "JoinCfg::is_empty")]
@@ -1132,6 +1135,8 @@ impl ProfileCfg {
             permission_mode: self.permission_mode.clone(),
             effort: self.effort.clone(),
             mcp: self.mcp.clone(),
+            engagement: None,
+            mcp_servers: Default::default(),
             allowed_tools: self.allowed_tools.clone(),
             disallowed_tools: self.disallowed_tools.clone(),
             env: {
@@ -1289,6 +1294,10 @@ pub struct Settings {
     pub terminal: TerminalCfg,
     pub accounts: Vec<crate::deck::accounts::AccountCfg>,
     pub routing: crate::deck::accounts::RoutingCfg,
+    /// MCP & tools, as configured.
+    pub tools: Vec<crate::deck::integrations::ToolCfg>,
+    /// The data sources among them (read-only).
+    pub siem: Vec<crate::deck::siem::SiemCfg>,
     /// Workflow shell steps may run on this machine.
     pub shell_steps: bool,
     /// Workflow files in repositories that could not be used, and why.
@@ -2296,6 +2305,10 @@ pub fn build_settings(
         }
     }
     unique("connector", file.connector.iter().map(|c| c.name.as_str()))?;
+    unique("tool", file.tool.iter().map(|c| c.name.as_str()))?;
+    for c in &file.tool {
+        c.validate()?;
+    }
     for c in &file.connector {
         let at = |m: String| format!("connector '{}': {}", c.name, m);
         crate::deck::nodes::validate_name(&c.name).map_err(at)?;
@@ -2583,6 +2596,8 @@ pub fn build_settings(
         terminal: file.terminal.clone(),
         accounts: file.account.clone(),
         routing: file.routing.clone(),
+        tools: file.tool.clone(),
+        siem: file.tool.iter().filter_map(|t| t.source()).collect(),
         shell_steps: file.local.shell_steps.unwrap_or(true),
         workflow_errors,
         repo_dirs,

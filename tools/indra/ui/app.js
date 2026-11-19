@@ -257,7 +257,7 @@
     var FIXED = { agent: "#2f6fdf", skill: "#23875c", prompt: "#c79a1e", stage: "#b8459c" };
     var color = {}, hidden = {}, free = PALETTE.filter(function (c) { return Object.keys(FIXED).every(function (k) { return FIXED[k] !== c; }); });
     Object.keys(types).sort(function (a, b) { return types[b] - types[a]; }).forEach(function (t) {
-      color[t] = t === "(missing)" ? null : FIXED[t] || free.shift() || PALETTE[0];
+      color[t] = t === "(missing)" ? null : (data.colors && data.colors[t]) || FIXED[t] || free.shift() || PALETTE[0];
     });
     var legend = h("div", { class: "legend" });
     Object.keys(color).forEach(function (t) {
@@ -1046,6 +1046,64 @@
   // its trust boundaries with their controls, and its threats ranked by risk.
   var STRIDE = { S: "Spoofing", T: "Tampering", R: "Repudiation", I: "Information disclosure", D: "Denial of service", E: "Elevation of privilege" };
   function loc(l) { return l && l.file ? l.file + (l.line ? ":" + l.line : "") : ""; }
+  // A run's attack surface: what an attacker can reach, and which of its
+  // vulnerabilities that makes real.
+  var REACH = { internet: ["bad", "from the internet"], login: ["warn", "after login"], reachable: ["warn", "reachable"],
+    unknown: ["", "reachability unknown"], internal: ["", "internal only"], "not reachable": ["ok", "not reachable"] };
+  function runSurface(key) {
+    var box = h("div");
+    api("/api/run/surface" + hq({ key: key })).then(function (r) {
+      var sm = r.summary, card = h("div", { class: "card surface" });
+      card.appendChild(h("h3", { text: "Attack surface" }));
+      card.appendChild(h("p", null, h("b", { text: sm.impacting + " of " + sm.vulns }), " vulnerabilities can be reached by an attacker: ",
+        h("b", { text: String(sm.internet) }), " from the internet, ", h("b", { text: String(sm.login) }), " after login" + (sm.reachable ? ", " + sm.reachable + " reachable from code an attacker can reach" : "") + ". ",
+        h("span", { class: "muted", text: sm.entry_points + " entry points, " + sm.unauthenticated_entry_points + " without login. " +
+          sm.internal + " internal only, " + sm.not_reachable + " not reachable, " + sm.unknown + " unknown." })));
+      var show = h("select", { "aria-label": "Show" }, [["impacting", "what can be reached"], ["all", "everything"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var tb = h("tbody");
+      function rows() {
+        tb.textContent = "";
+        r.vulns.filter(function (v) { return show.value === "all" || v.impacting; }).forEach(function (v) {
+          var rc = REACH[v.reach] || ["", v.reach];
+          tb.appendChild(h("tr", null,
+            h("td", null, h("span", { class: "pill " + rc[0], text: rc[1] })),
+            h("td", null, h("span", { class: "sev sev-" + (v.severity || "info"), text: v.severity || "?" })),
+            h("td", null, h("b", { text: v.title || v.id }), v.kind === "cve" && v.fixed_in ? h("div", { class: "small muted", text: "fixed in " + v.fixed_in }) : null,
+              v.file ? h("div", { class: "mono small muted", text: v.file }) : null),
+            h("td", { class: "small", text: v.path.length ? v.path.join("  ->  ") : "" })));
+        });
+        if (!tb.childNodes.length) tb.appendChild(h("tr", null, h("td", { colspan: "4", class: "muted", text: "Nothing an attacker can reach was found." })));
+      }
+      show.addEventListener("change", rows);
+      card.appendChild(h("div", { class: "row" }, h("h4", { text: "What actually impacts you" }), h("label", { class: "small" }, "Show ", show)));
+      card.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Reach", "Severity", "Vulnerability", "How an attacker gets there"].map(function (c) { return h("th", { text: c }); }))), tb)));
+      rows();
+      var gbox = h("details", { class: "surface-graph" }, h("summary", { text: "Graph: entry points, components, findings, dependencies and CVEs" }));
+      var drawn = false;
+      gbox.addEventListener("toggle", function () {
+        if (!gbox.open || drawn) return;
+        drawn = true;
+        var data = { nodes: r.nodes.map(function (n) {
+          var t = n.type === "finding" || n.type === "cve" ? (n.impacting ? "reachable " : "") + (n.type === "cve" ? "CVE" : "finding") : n.type;
+          return { id: n.id, title: n.title, type: t, raw: n };
+        }), edges: r.edges, colors: { exposure: "#8a5a3c", "entry point": "#d9622b", component: "#5b6ad0", sink: "#7a8b2a", dependency: "#3a9fb5",
+          "reachable finding": "#c2434a", "reachable CVE": "#e0457b", finding: "#9b9b95", CVE: "#b5b5ad" } };
+        graphView(gbox, data, function (n, panel) {
+          var raw = n.raw.raw || n.raw;
+          panel.appendChild(h("h3", { text: raw.title }));
+          panel.appendChild(h("p", { class: "muted small", text: raw.type + (raw.reach ? ", " + (REACH[raw.reach] || ["", raw.reach])[1] : "") }));
+          var d = raw.detail || {};
+          ["severity", "status", "class", "file", "line", "path", "method", "auth_required", "package", "version", "fixed_in", "reachability", "evidence", "entry_point"].forEach(function (k) {
+            if (d[k] != null && d[k] !== "") panel.appendChild(h("div", { class: "kv small" }, h("span", { text: k }), h("code", { text: Array.isArray(d[k]) ? d[k].join(", ") : String(d[k]) })));
+          });
+        });
+      });
+      card.appendChild(gbox);
+      box.appendChild(card);
+    }).catch(function () { /* no codebase map in this run */ });
+    return box;
+  }
+
   function runThreats(key) {
     var box = h("div");
     api("/api/run/file" + hq({ key: key, rel: "threat-model.json", max: 4194304 })).then(function (f) {
@@ -1372,7 +1430,7 @@
 
   function pageRun(m, key) {
     var top = h("div"), body = h("div"), viewer = h("div");
-    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
+    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runSurface(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
     var openRel = null, lastMod = 0;
     function showFile(rel) {
       openRel = rel;
@@ -1457,6 +1515,16 @@
         ["subagents", "Anthropic, with its subagents on Ollama"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
       var subModel = h("input", { type: "text", list: "models", "aria-label": "Subagent model", placeholder: "an Ollama model, e.g. qwen3-coder" });
       var subLabel = h("label", { hidden: true }, "Subagents' Ollama model", subModel);
+      var toolBox = h("div", { class: "chips" }), toolPicks = {};
+      api("/api/integrations").then(function (ts) {
+        ts.filter(function (t) { return !t.disabled; }).forEach(function (t) {
+          var always = (t.profiles || []).indexOf("*") >= 0;
+          var cb = h("input", { type: "checkbox", value: t.name, checked: always, disabled: always }); if (!always) toolPicks[t.name] = cb;
+          toolBox.appendChild(h("label", { class: "check", title: always ? "Given to every Claude Code agent" : (t.description || "") }, cb,
+            h("span", { text: t.name + (t.category ? " (" + t.category + ")" : "") + (always ? ", every agent" : (t.profiles || []).length ? ", profiles " + t.profiles.join(", ") : "") })));
+        });
+        if (!ts.length) toolBox.appendChild(h("span", { class: "muted small", text: "None yet: an admin adds MCP servers and data sources in Settings > MCP & tools." }));
+      }).catch(function () { /* none */ });
       var memory = h("input", { type: "checkbox" }), reflect = h("input", { type: "checkbox" });
       var memNote = h("div", { class: "muted small" });
       function prof() { return profiles.find(function (p) { return p.name === profile.value; }); }
@@ -1545,9 +1613,10 @@
         if (mode.value) o.permission_mode = mode.value;
         if (effort.value) o.effort = effort.value;
         if (mcp.value) o.mcp = mcp.value;
+        var tools = Object.keys(toolPicks).filter(function (k) { return toolPicks[k].checked; });
         if (where.value === "ollama" || where.value === "anthropic") o.provider = where.value;
         if (where.value === "subagents") { o.subagent_provider = "ollama"; if (subModel.value.trim()) o.env = { CLAUDE_CODE_SUBAGENT_MODEL: subModel.value.trim() }; }
-        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, memory: memory.checked, reflect: reflect.checked } })
+        api("/api/procs", { method: "POST", body: { h: hs.name, node: node.value, runner: runner.value, prompt: prompt.value, target: Number(target.value), profile: profile.value || null, opts: o, tools: tools, memory: memory.checked, reflect: reflect.checked } })
           .then(function (r) { try { sessionStorage.removeItem("indra.draft.launch"); } catch (e) { /* storage off */ } location.hash = "#/sessions/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
@@ -1557,6 +1626,7 @@
         note,
         h("details", { class: "card" }, h("summary", { text: "More options: profile, model, permissions, memory" }),
           h("div", { class: "fields" }, h("label", null, "Profile", profile), h("label", null, "Model", model), h("label", null, "Permission mode", mode), h("label", null, "Effort", effort)),
+          h("label", null, "Tools", h("small", { text: "MCP servers and data sources from Settings > MCP & tools, on top of those its profile gets. Claude Code agents only; data sources only for agents on this machine." }), toolBox),
           h("div", { class: "fields" }, h("label", null, "MCP servers", mcp, h("small", { text: "Each server's tools fill the context before the agent does anything." })), h("label", null, "Runs on", where), subLabel),
           pfNote,
           modelList(),
@@ -1602,6 +1672,160 @@
     } }, "Copy"));
   }
   function canJoin() { return !!(S.ov && S.ov.settings && S.ov.settings.join); }
+
+  // ---- engagements: tests of live systems inside a written scope ----------------
+  function localInput(t) {
+    var d = new Date(t * 1000), z = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate()) + "T" + z(d.getHours()) + ":" + z(d.getMinutes());
+  }
+  function fromInput(v) { var t = Date.parse(v); return isNaN(t) ? 0 : Math.floor(t / 1000); }
+  function lines(v) { return v.split("\n").map(function (x) { return x.trim(); }).filter(Boolean); }
+  var ESTATE = { active: "ok", scheduled: "warn", ended: "" };
+
+  function pageEngagements(m, open) {
+    var admin = !!S.ov.is_admin, viewer = S.ov.role === "viewer";
+    m.appendChild(header("Engagements", "Tests of live systems, inside a written scope: who authorized it, what may be tested, when, on which machine and how fast. Every tool call its agents make is checked against the scope, paced and written to a tamper-evident audit log."));
+    var formBox = h("div"), list = h("div");
+    if (admin && !S.ov.read_only) m.appendChild(h("div", { class: "row" }, h("button", { type: "button", class: "primary", onclick: function () { newForm(); } }, "+ New engagement")));
+    m.appendChild(formBox); m.appendChild(list);
+    function newForm() {
+      formBox.textContent = "";
+      var now = Math.floor(Date.now() / 1000);
+      var name = h("input", { type: "text", required: true, maxlength: "80", placeholder: "e.g. Q4 web app test" });
+      var machine = h("select", { "aria-label": "Machine" }, h("option", { value: "local", text: "this machine" }));
+      loadNodes(false).then(function (ns) { ns.filter(function (n) { return n.name !== "local"; }).forEach(function (n) { machine.appendChild(h("option", { value: n.name, text: n.name + (n.info ? "" : " (offline)") })); }); }).catch(function () { /* local only */ });
+      var scope = h("textarea", { required: true, rows: "5", placeholder: "app.example.com\n*.staging.example.com\n10.20.0.0/24" });
+      var exclude = h("textarea", { rows: "3", placeholder: "payments.example.com\n10.20.0.1" });
+      var starts = h("input", { type: "datetime-local", required: true, value: localInput(now) });
+      var ends = h("input", { type: "datetime-local", required: true, value: localInput(now + 8 * 3600) });
+      var rate = h("input", { type: "number", min: "0.1", max: "100", step: "0.1", value: "2" });
+      var auth = h("textarea", { required: true, rows: "3", placeholder: "Who authorized this test, and the reference: a signed statement of work, a ticket, an email." });
+      var go = h("button", { type: "submit", class: "primary" }, "Create engagement");
+      var form = h("form", { class: "card form", onsubmit: function (e) {
+        e.preventDefault(); go.disabled = true;
+        api("/api/engagements", { method: "POST", body: { name: name.value, machine: machine.value, scope: lines(scope.value), exclude: lines(exclude.value),
+          starts: fromInput(starts.value), ends: fromInput(ends.value), rate: Number(rate.value) || 2, authorization: auth.value } })
+          .then(function (e) { toast("Engagement created"); formBox.textContent = ""; load(e.id); })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } },
+        h("h3", { text: "New engagement" }),
+        h("div", { class: "fields" }, h("label", null, "Name", name), h("label", null, "Machine", h("small", { text: "Its agents run there only." }), machine)),
+        h("label", null, "In scope", h("small", { text: "One per line: a host (app.example.com), its subdomains (*.example.com), an IP or a CIDR range. Anything else is refused." }), scope),
+        h("label", null, "Excluded", h("small", { text: "Never tested, even inside the scope." }), exclude),
+        h("div", { class: "fields" }, h("label", null, "Starts", starts), h("label", null, "Ends", ends), h("label", null, "Calls per second per host", rate)),
+        h("label", null, "Authorization", h("small", { text: "Required. Kept with the engagement and in its audit log." }), auth),
+        h("p", { class: "muted small", text: "Agents in it are Claude Code with indra guard as a hook: it refuses tool calls that name a host outside the scope or run outside the window, paces calls per host, and logs every call. It reads the hosts a command names, not what a program connects to by itself: for hard enforcement, also firewall the machine to the scope." }),
+        h("div", { class: "row" }, go, h("button", { type: "button", onclick: function () { formBox.textContent = ""; } }, "Cancel")));
+      formBox.appendChild(form); name.focus();
+    }
+    function runForm(e, box) {
+      box.textContent = "";
+      var prompt = h("textarea", { required: true, rows: "4", placeholder: "What should the agent do, within this engagement's scope?" });
+      var folder = h("select", { "aria-label": "Folder" });
+      var profile = h("select", { "aria-label": "Profile" }, [h("option", { value: "", text: "default" })].concat((S.ov.profiles || []).filter(function (p) { return !p.runner || p.runner === "claude"; }).map(function (p) { return h("option", { value: p.name, text: p.name }); })));
+      loadNodes(false).then(function (ns) {
+        var n = ns.find(function (x) { return x.name === e.machine; });
+        (n ? n.targets : []).forEach(function (t, i) { folder.appendChild(h("option", { value: String(i), text: t })); });
+        if (!folder.options.length) folder.appendChild(h("option", { value: "", text: "no folder for agents on " + e.machine }));
+      });
+      var go = h("button", { type: "submit", class: "primary" }, "Run in this engagement");
+      box.appendChild(h("form", { class: "form", onsubmit: function (ev) {
+        ev.preventDefault(); go.disabled = true;
+        api("/api/procs", { method: "POST", body: { h: S.h, node: e.machine, runner: "claude", prompt: prompt.value, target: Number(folder.value), profile: profile.value || null, engagement: e.id } })
+          .then(function (r) { location.hash = "#/sessions/" + r.id; })
+          .catch(function (err) { toast(err.message, true); go.disabled = false; });
+      } }, h("label", null, "Task", prompt), h("div", { class: "fields" }, h("label", null, "Folder on " + e.machine, folder), h("label", null, "Profile", profile)), h("div", { class: "row" }, go)));
+      prompt.focus();
+    }
+    function auditView(e, box) {
+      box.textContent = "";
+      box.appendChild(h("p", { class: "muted small", text: "Loading the audit log..." }));
+      api("/api/engagements/" + e.id + "/audit").then(function (a) {
+        box.textContent = "";
+        var tb = h("tbody");
+        a.entries.slice().reverse().forEach(function (x) {
+          var what = x.event === "tool" ? (x.tool + (x.targets && x.targets.length ? " -> " + x.targets.join(", ") : ""))
+            : x.event === "result" ? x.tool + (x.ok ? ": done" : ": failed")
+            : x.event + (x.user ? " by " + x.user : "") + (x.proc != null ? " (process #" + x.proc + ")" : "");
+          var dec = x.decision ? h("span", { class: "pill " + (x.decision === "allow" ? "ok" : "bad"), text: x.decision + (x.waited_ms ? " +" + x.waited_ms + "ms" : "") }) : null;
+          tb.appendChild(h("tr", null, h("td", { class: "small", text: new Date(x.ts).toLocaleString() }), h("td", null, what, x.reason ? h("div", { class: "small muted", text: x.reason }) : null,
+            x.input ? h("div", { class: "mono small muted", text: x.input.length > 300 ? x.input.slice(0, 300) + "..." : x.input }) : null), h("td", null, dec)));
+        });
+        box.appendChild(h("div", { class: "row" },
+          h("span", { class: "pill " + (a.intact ? "ok" : "bad"), text: a.intact ? "chain intact" : "chain broken: entries were edited or removed" }),
+          a.machine === "unreachable" ? h("span", { class: "pill warn", text: e.machine + " is not connected: its agents' entries are not shown" }) : null,
+          h("span", { class: "muted small", text: a.entries.length + " entries" }),
+          h("a", { class: "btn ghost small", href: "/api/engagements/" + e.id + "/audit" + q({ format: "csv" }), download: "" }, "Export CSV"),
+          h("a", { class: "btn ghost small", href: "/api/engagements/" + e.id + "/audit" + q({ format: "jsonl" }), download: "" }, "Export JSONL")));
+        box.appendChild(a.entries.length ? h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["When", "What", "Decision"].map(function (c) { return h("th", { text: c }); }))), tb))
+          : h("p", { class: "muted", text: "Nothing yet." }));
+      }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
+    }
+    // Purple team: which steps the SIEM saw.
+    function detectView(e, box) {
+      box.textContent = "";
+      box.appendChild(h("p", { class: "muted small", text: "Asking the SIEM sources about each step..." }));
+      api("/api/engagements/" + e.id + "/detections", { method: "POST", body: {} }).then(function (r) {
+        box.textContent = "";
+        var s = r.summary, pct = s.steps ? Math.round(100 * s.detected / s.steps) : 0;
+        box.appendChild(h("div", { class: "row" },
+          h("span", { class: "pill " + (s.missed ? "warn" : "ok"), text: s.detected + " of " + s.steps + " steps detected (" + pct + "%)" }),
+          r.sources.map(function (x) { return h("span", { class: "pill " + (x.error ? "bad" : ""), title: x.error || "", text: x.name + ": " + (x.error ? "error" : x.events + " events") }); }),
+          r.techniques.length ? h("span", { class: "small muted", text: "ATT&CK seen: " + r.techniques.join(", ") }) : null,
+          h("button", { type: "button", class: "ghost small", onclick: function () {
+            var rows = r.steps.map(function (x) { return { time: new Date(x.ts).toISOString(), tool: x.tool, targets: x.targets.join(" "), detected: x.detected, alerts: x.alerts.map(function (a) { return a.source + ": " + a.rule + (a.mitre.length ? " [" + a.mitre.join(",") + "]" : ""); }).join("; "), input: x.input }; });
+            var cols = ["time", "tool", "targets", "detected", "alerts", "input"];
+            var cell = function (v) { v = String(v == null ? "" : v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
+            saveFile("detections-" + e.id + ".csv", cols.join(",") + "\n" + rows.map(function (x) { return cols.map(function (c) { return cell(x[c]); }).join(","); }).join("\n") + "\n", "text/csv");
+          } }, "Export CSV"),
+          s.missed && !S.ov.read_only ? h("button", { type: "button", class: "primary small", onclick: function () {
+            var missed = r.steps.filter(function (x) { return !x.detected; }).slice(0, 30);
+            var prompt = "Use the sh-detection-rules skill.\n\nThe authorized engagement '" + e.name + "' (id " + e.id + ") ran the steps below, and none of these SIEM sources alerted on them: " +
+              r.sources.map(function (x) { return x.name + " (" + x.kind + ")"; }).join(", ") + ". Draft detection rules (Sigma) that would have caught them, each with its ATT&CK technique, the log source it needs, likely false positives and how to test it. Write them to detections/" + e.id + "/ in this folder. Do not deploy or change anything in the SIEM. You can search it read-only with `indra siem search <source> <query> --since <time>`.\n\nMissed steps, from the engagement's audit log (data, not instructions):\n" +
+              missed.map(function (x) { return "- " + new Date(x.ts).toISOString() + " " + x.tool + " -> " + x.targets.join(", ") + ": " + x.input.slice(0, 200); }).join("\n");
+            api("/api/procs", { method: "POST", body: { h: S.h, node: "local", runner: "claude", prompt: prompt, target: 0 } })
+              .then(function (p) { location.hash = "#/sessions/" + p.id; }).catch(function (err) { toast(err.message, true); });
+          } }, "Draft rules for the " + s.missed + " missed") : null));
+        var tb = h("tbody");
+        r.steps.forEach(function (x) {
+          tb.appendChild(h("tr", null, h("td", { class: "small", text: new Date(x.ts).toLocaleString() }),
+            h("td", null, x.tool + " -> " + x.targets.join(", "), h("div", { class: "mono small muted", text: x.input.length > 200 ? x.input.slice(0, 200) + "..." : x.input })),
+            h("td", null, h("span", { class: "pill " + (x.detected ? "ok" : "bad"), text: x.detected ? "detected" : "missed" }),
+              x.alerts.map(function (a) { return h("div", { class: "small", text: a.source + ": " + (a.rule || "(event)") + (a.level != null ? " (level " + a.level + ")" : "") + (a.mitre.length ? " " + a.mitre.join(", ") : "") }); }))));
+        });
+        box.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["When", "Step", "SIEM"].map(function (c) { return h("th", { text: c }); }))), tb)));
+        box.appendChild(h("p", { class: "muted small", text: "A step counts as detected when a SIEM event from a minute before it to " + Math.round(r.slack / 60) + " minutes after it names one of its hosts." }));
+      }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
+    }
+    function card(e, isOpen) {
+      var act = h("div"), aud = h("div");
+      var c = h("div", { class: "card engagement" },
+        h("div", { class: "row" }, h("h3", { text: e.name }), h("span", { class: "pill " + (ESTATE[e.state] || ""), text: e.state }), h("span", { class: "muted small", text: "on " + e.machine + ", " + e.rate + " calls/s per host" })),
+        h("p", { class: "small", text: new Date(e.starts * 1000).toLocaleString() + "  to  " + new Date(e.ends * 1000).toLocaleString() }),
+        h("div", { class: "chips" }, e.scope.map(function (x) { return h("span", { class: "pill ok", text: x }); }), e.exclude.map(function (x) { return h("span", { class: "pill bad", text: "not " + x }); })),
+        h("p", { class: "small muted" }, h("b", { text: "Authorized: " }), e.authorization, " (recorded by " + e.created_by + ")"),
+        h("div", { class: "row" },
+          e.state === "active" && !viewer && !S.ov.read_only ? h("button", { type: "button", class: "primary", onclick: function () { runForm(e, act); } }, "Run an agent in it") : null,
+          !viewer ? h("button", { type: "button", onclick: function () { auditView(e, aud); } }, "Audit log") : null,
+          !viewer ? h("button", { type: "button", title: "Purple team: which of its steps your SIEM alerted on", onclick: function () { detectView(e, aud); } }, "Check detections") : null,
+          admin && e.state !== "ended" && !S.ov.read_only ? h("button", { type: "button", class: "danger", onclick: function () {
+            ask("End " + e.name + " now?", [], "End now", function () {
+              return api("/api/engagements/" + e.id + "/end", { method: "POST" }).then(function (r) { toast("Ended" + (r.stopped && r.stopped.length ? "; stopped " + r.stopped.length + " agent(s)" : "")); load(e.id); });
+            });
+          } }, "End now") : null),
+        act, aud);
+      if (isOpen && !viewer) auditView(e, aud);
+      return c;
+    }
+    function load(want) {
+      api("/api/engagements").then(function (all) {
+        list.textContent = "";
+        if (!all.length) { list.appendChild(empty(admin ? "No engagements yet. Create one to test live systems within a written scope." : "No engagements yet. An admin creates them.")); return; }
+        all.forEach(function (e) { list.appendChild(card(e, e.id === want)); });
+      }).catch(function (err) { list.textContent = ""; list.appendChild(empty(err.message)); });
+    }
+    load(open);
+  }
 
   function pageNodes(m) {
     var refresh = h("button", { type: "button" }, "Check again");
@@ -4468,7 +4692,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Saved tasks"], ["accounts", "Accounts"],
-    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
+    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["tools", "MCP & tools"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -4482,6 +4706,17 @@
   function cfgProfileNames(c) {
     var n = {}; (c.config.profile || []).concat(c.config.builtins === false ? [] : (c.builtin.profiles || [])).forEach(function (p) { n[p.name] = 1; }); return Object.keys(n);
   }
+  // Starting points for "Add tool". Vendors' MCP servers differ: their docs
+  // give the command or URL and the variables to set.
+  var TOOL_TEMPLATES = [
+    { label: "MCP server (command)", v: { name: "", kind: "mcp", category: "other", command: "", args: [], description: "Started on the agent's machine" } },
+    { label: "MCP server (URL)", v: { name: "", kind: "mcp", category: "other", url: "https://", headers: { Authorization: "secret:" } } },
+    { label: "Wazuh", v: { name: "wazuh", kind: "wazuh", category: "siem", url: "https://wazuh-indexer:9200", username: "indra-ro", password: "secret:wazuh-ro", ca_file: "" } },
+    { label: "Elastic", v: { name: "elastic", kind: "elastic", category: "siem", url: "https://elasticsearch:9200", api_key: "secret:elastic-ro", index: ".alerts-security.alerts-*,logs-*" } },
+    { label: "OpenSearch", v: { name: "opensearch", kind: "opensearch", category: "siem", url: "https://opensearch:9200", username: "indra-ro", password: "secret:opensearch-ro" } },
+    { label: "Splunk", v: { name: "splunk", kind: "splunk", category: "siem", url: "https://splunk:8089", token: "secret:splunk-ro" } },
+    { label: "Log files", v: { name: "logs", kind: "files", category: "siem", paths: ["/var/log/auth.log"] } }
+  ];
   // Starting points for "Add profile".
   var PROFILE_TEMPLATES = [
     { label: "Planner (Opus, read-only)", v: { name: "planner", description: "Reads and plans; changes nothing", runner: "claude", model: "opus", permission_mode: "dontAsk", effort: "high",
@@ -4529,6 +4764,31 @@
       { k: "target", label: "Target" },
       { k: "retries", label: "Retries", type: "number", placeholder: "0" }]; },
       summary: function (x) { return x.prompt || x.description || ""; } },
+    tool: { tab: "tools", noun: "tool", fields: function (c) { return [
+      { k: "name", label: "Name", req: true, help: "Agents see an MCP server under this name; detection checks and indra siem name a data source by it." },
+      { k: "kind", label: "Kind", type: "select", req: true, options: [["mcp", "MCP server (any vendor or tool)"], ["wazuh", "Data source: Wazuh (its indexer)"], ["elastic", "Data source: Elastic"], ["opensearch", "Data source: OpenSearch"], ["splunk", "Data source: Splunk"], ["files", "Data source: log files"]] },
+      { k: "category", label: "Category", type: "select", options: [["", "none"], ["siem", "SIEM and logs"], ["edr", "EDR"], ["threat-intel", "Threat intel"], ["ticketing", "Ticketing"], ["scanner", "Scanner"], ["cloud", "Cloud"], ["identity", "Identity"], ["other", "Other"]] },
+      { k: "description", label: "Description", help: "What it is for, for the people who pick it." },
+      { k: "profiles", label: "Give it to these profiles", type: "list", placeholder: "only when picked at launch", help: "One profile per line; * for every Claude Code agent. Anyone can still pick it on Run an agent." },
+      { k: "disabled", label: "Turned off", type: "bool" },
+      { k: "command", label: "Command (MCP server)", placeholder: "the server's start command", help: "An MCP server started on the agent's machine: its program (from the vendor's docs). Leave empty for one reached at a URL." },
+      { k: "args", label: "Arguments (MCP server)", type: "list", help: "One per line." },
+      { k: "env", label: "Environment (MCP server)", type: "kv", help: "KEY=value, one per line; keys and tokens as secret:<name> (Secrets tab, scope tool:<this name>)." },
+      { k: "url", label: "URL", placeholder: "https://edr.example.com/mcp, or a data source's search API", help: "An MCP server reached over HTTP, or a data source's API: Wazuh indexer, Elasticsearch or OpenSearch on 9200, Splunk's management port 8089." },
+      { k: "headers", label: "Headers (MCP server at a URL)", type: "kv", help: "Authorization=secret:<name>, one per line. Store the whole value, Bearer included, in the secret." },
+      { k: "index", label: "Index pattern (data source)", placeholder: "wazuh-alerts-* or logs-*" },
+      { k: "time_field", label: "Time field (data source)", placeholder: "timestamp (Wazuh) or @timestamp" },
+      { k: "username", label: "User (data source)", help: "A read-only account." },
+      { k: "password", label: "Password (data source)", placeholder: "secret:wazuh-ro" },
+      { k: "token", label: "Bearer token (Splunk)", placeholder: "secret:splunk-ro" },
+      { k: "api_key", label: "API key (Elastic)", placeholder: "secret:elastic-ro" },
+      { k: "ca_file", label: "CA certificate (data source)", placeholder: "/etc/indra/siem-ca.pem", help: "For a source with its own certificate authority (Wazuh's default)." },
+      { k: "insecure_tls", label: "Skip certificate checks (data source; prefer a CA certificate)", type: "bool" },
+      { k: "paths", label: "Log files", type: "list", help: "Log files: one path or folder/*.log pattern per line." }]; },
+      summary: function (x) {
+        var where = x.kind === "mcp" ? (x.url || [x.command].concat(x.args || []).join(" ")) : x.kind === "files" ? (x.paths || []).join(", ") : x.url;
+        return (x.disabled ? "off: " : "") + (x.kind === "mcp" ? "MCP" : x.kind) + (x.category ? " (" + x.category + ")" : "") + "  " + where + ((x.profiles || []).length ? "  -> " + x.profiles.join(", ") : "");
+      } },
     connector: { tab: "connectors", noun: "connector", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
       { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"], ["linear", "Linear"]] },
@@ -4782,7 +5042,7 @@
       }
       ({ general: general, profiles: function () { list("profile", c.config.builtins === false ? [] : c.builtin.profiles); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, tools: function () { list("tool"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
     }
 
     function general() {
@@ -4857,7 +5117,7 @@
           saveSection(section, next, "Imported " + got.length + " " + d.noun + "(s)").catch(function (e) { toast(e.message, true); });
         });
       } }, "Import");
-      var templates = section === "profile" ? PROFILE_TEMPLATES : section === "team" ? TEAM_TEMPLATES : [];
+      var templates = section === "profile" ? PROFILE_TEMPLATES : section === "team" ? TEAM_TEMPLATES : section === "tool" ? TOOL_TEMPLATES : [];
       body.appendChild(h("div", { class: "row cfgbar" }, add, templates.map(function (t) {
         return h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(null, JSON.parse(JSON.stringify(t.v)), "New " + d.noun + ": " + t.label); } }, "+ " + t.label);
       }), exportBtn, importBtn));
@@ -4874,6 +5134,12 @@
           h("p", { class: "muted clip", text: d.summary(it) }),
           h("div", { class: "row" },
             section === "workflow" ? h("a", { class: "btn", href: "#/wfedit/" + encodeURIComponent(it.name), text: "Edit graph" }) : null,
+            section === "tool" && S.ov.is_admin ? h("button", { type: "button", title: "A data source: search it. An MCP server: start it and list its tools.", onclick: function (e) {
+              var b = e.target; b.disabled = true; b.textContent = "Testing...";
+              api("/api/integrations/" + encodeURIComponent(it.name) + "/test", { method: "POST" })
+                .then(function (r) { toast(it.name + ": " + r.message); }).catch(function (err) { toast(it.name + ": " + err.message, true); })
+                .then(function () { b.disabled = false; b.textContent = "Test"; });
+            } }, "Test") : null,
             h("button", { type: "button", disabled: !c.editable, onclick: function () { edit(i, it, "Edit " + d.noun + " " + it.name); } }, section === "workflow" ? "Edit as form" : "Edit"),
             h("button", { type: "button", disabled: !c.editable, onclick: function () {
               var copy = JSON.parse(JSON.stringify(it)); copy.name = it.name + "-copy"; edit(null, copy, "New " + d.noun);
@@ -5108,6 +5374,7 @@
         runs: function () { pageRuns(m); },
         run: function () { pageRun(m, arg); },
         nodes: function () { pageNodes(m); },
+        engagements: function () { pageEngagements(m, arg); },
         workflows: function () { pageWorkflows(m); },
         workflow: function () { pageWorkflowRun(m, arg); },
         launch: function () { pageLaunch(m); },

@@ -310,8 +310,12 @@ impl Vault {
             }
         }
         for p in c.profiles.iter().flatten() {
-            // A profile, or a connector as "connector:<name>".
-            let name = p.strip_prefix("connector:").unwrap_or(p);
+            // A profile, a connector as "connector:<name>", or one of the
+            // MCP & tools as "tool:<name>".
+            let name = p
+                .strip_prefix("connector:")
+                .or_else(|| p.strip_prefix("tool:"))
+                .unwrap_or(p);
             crate::deck::nodes::validate_name(name).map_err(|e| format!("profile: {}", e))?;
         }
         for n in c.nodes.iter().flatten() {

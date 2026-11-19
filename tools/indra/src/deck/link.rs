@@ -1300,6 +1300,19 @@ async fn node_frame(
                     .and_then(crate::deck::nodes::run_files),
                 // The console's folder browser: folder names only, never files.
                 "dirs" => crate::deck::nodes::list_dirs(args.get("path").and_then(Value::as_str)),
+                // An engagement's audit log here (indra guard writes it).
+                "audit" => {
+                    let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+                    if crate::deck::engage::valid_id(id) {
+                        let (entries, intact) = crate::deck::engage::read_audit(
+                            &crate::deck::engage::local_dir(id),
+                            20_000,
+                        );
+                        Ok(json!({ "entries": entries, "intact": intact }))
+                    } else {
+                        Err("bad engagement id".to_string())
+                    }
+                }
                 // The console's file viewer: only inside a folder agents may
                 // work in here, so the hub cannot read anything else.
                 "ls" | "cat" => {

@@ -1,0 +1,1101 @@
+//! Engagements: tests against live systems, inside a written scope.
+//!
+//! An engagement names what may be tested (hosts, `*.domain` suffixes,
+//! IPs and CIDRs, minus exclusions), when (a time window), on which one
+//! machine its agents run, at what pace (requests per second per host),
+//! and who authorized it. Agents started in it run with `indra guard` as
+//! Claude Code's PreToolUse and PostToolUse hook: every tool call that
+//! names a host is checked against the scope and the window, paced per
+//! host, and written to an append-only audit log whose entries are chained
+//! by SHA-256, so an edit or a deletion shows.
+//!
+//! The guard reads the hosts a tool call names (URLs, IPs, CIDRs, host
+//! names); it does not see what a program resolves or connects to on its
+//! own. It is a policy layer for the agent, not a network sandbox: pair it
+//! with a firewall on the test machine for hard enforcement.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, Write};
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// What an agent in an engagement is given (through its environment).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Spec {
+    pub id: String,
+    pub name: String,
+    pub scope: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Unix seconds.
+    pub starts: u64,
+    pub ends: u64,
+    /// Tool calls per second, per host.
+    pub rate: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Engagement {
+    #[serde(flatten)]
+    pub spec: Spec,
+    /// The machine its agents run on ("local" or a node's name).
+    pub machine: String,
+    /// Who authorized the test, and the reference (contract, ticket).
+    pub authorization: String,
+    pub created_by: String,
+    pub created: u64,
+}
+
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// An engagement id: 8 lowercase letters and digits.
+pub fn valid_id(id: &str) -> bool {
+    id.len() == 8
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+// ---- scope ----------------------------------------------------------------------
+
+/// One scope or exclusion entry.
+#[derive(Debug, Clone, PartialEq)]
+enum Rule {
+    /// Exactly this host name.
+    Host(String),
+    /// `*.example.com`: any subdomain of it (not the name itself).
+    Sub(String),
+    /// An address or a network.
+    Net(IpAddr, u8),
+}
+
+fn norm_host(h: &str) -> String {
+    h.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn valid_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && h.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+fn parse_net(s: &str) -> Option<(IpAddr, u8)> {
+    let (a, p) = match s.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (s, None),
+    };
+    let ip: IpAddr = a.trim_matches(|c| c == '[' || c == ']').parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    let p = match p {
+        Some(p) => p.parse::<u8>().ok().filter(|p| *p <= max)?,
+        None => max,
+    };
+    Some((ip, p))
+}
+
+impl Rule {
+    fn parse(entry: &str) -> Result<Rule, String> {
+        let e = entry.trim();
+        // A URL: its host.
+        let e = match e.split_once("://") {
+            Some((_, rest)) => rest
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .rsplit('@')
+                .next()
+                .unwrap_or(""),
+            None => e,
+        };
+        if let Some(n) = parse_net(e) {
+            return Ok(Rule::Net(n.0, n.1));
+        }
+        // host:port -> host
+        let e = match e.rsplit_once(':') {
+            Some((h, p)) if p.parse::<u16>().is_ok() && !h.contains(':') => h,
+            _ => e,
+        };
+        if let Some(base) = e.strip_prefix("*.") {
+            let b = norm_host(base);
+            if valid_host(&b) && b.contains('.') {
+                return Ok(Rule::Sub(b));
+            }
+        } else {
+            let h = norm_host(e);
+            if valid_host(&h) {
+                return Ok(Rule::Host(h));
+            }
+        }
+        Err(format!(
+            "{:?} is not a host, *.domain, IP or CIDR (like app.example.com, *.example.com, 10.0.0.5 or 10.0.0.0/24)",
+            entry
+        ))
+    }
+
+    fn covers(&self, t: &Target) -> bool {
+        match (self, t) {
+            (Rule::Host(h), Target::Host(x)) => h == x,
+            (Rule::Sub(b), Target::Host(x)) => {
+                x.len() > b.len() + 1 && x.ends_with(&format!(".{}", b))
+            }
+            (Rule::Net(n, p), Target::Net(a, q)) => q >= p && in_net(*a, *n, *p),
+            _ => false,
+        }
+    }
+
+    /// For an exclusion: does it touch any part of the target?
+    fn overlaps(&self, t: &Target) -> bool {
+        match (self, t) {
+            (Rule::Net(n, p), Target::Net(a, q)) => in_net(*a, *n, *p) || in_net(*n, *a, *q),
+            _ => self.covers(t),
+        }
+    }
+}
+
+fn in_net(a: IpAddr, net: IpAddr, prefix: u8) -> bool {
+    match (a, net) {
+        (IpAddr::V4(a), IpAddr::V4(n)) => {
+            let m = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix as u32)
+            };
+            u32::from(a) & m == u32::from(n) & m
+        }
+        (IpAddr::V6(a), IpAddr::V6(n)) => {
+            let m = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix as u32)
+            };
+            u128::from(a) & m == u128::from(n) & m
+        }
+        _ => false,
+    }
+}
+
+/// A host a tool call names.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    Host(String),
+    /// An address (prefix 32 or 128) or a range.
+    Net(IpAddr, u8),
+}
+
+impl Target {
+    pub fn show(&self) -> String {
+        match self {
+            Target::Host(h) => h.clone(),
+            Target::Net(a, p) if (a.is_ipv4() && *p == 32) || *p == 128 => a.to_string(),
+            Target::Net(a, p) => format!("{}/{}", a, p),
+        }
+    }
+
+    fn loopback(&self) -> bool {
+        match self {
+            Target::Host(h) => h == "localhost" || h.ends_with(".localhost"),
+            Target::Net(a, _) => a.is_loopback(),
+        }
+    }
+}
+
+impl Spec {
+    pub fn validate(&self) -> Result<(), String> {
+        if !valid_id(&self.id) {
+            return Err("bad engagement id".into());
+        }
+        if self.name.trim().is_empty() || self.name.chars().count() > 80 {
+            return Err("an engagement needs a name of up to 80 characters".into());
+        }
+        if self.scope.is_empty() {
+            return Err(
+                "an engagement needs a scope: the hosts, domains, IPs or CIDRs that may be tested"
+                    .into(),
+            );
+        }
+        if self.scope.len() + self.exclude.len() > 500 {
+            return Err("at most 500 scope and exclusion entries".into());
+        }
+        for e in self.scope.iter().chain(&self.exclude) {
+            Rule::parse(e)?;
+        }
+        if self.ends <= self.starts {
+            return Err("the window must end after it starts".into());
+        }
+        if self.ends - self.starts > 90 * 86_400 {
+            return Err("the window can be at most 90 days".into());
+        }
+        if !(0.1..=100.0).contains(&self.rate) {
+            return Err("the rate is 0.1 to 100 requests per second per host".into());
+        }
+        Ok(())
+    }
+
+    pub fn active(&self, t: u64) -> bool {
+        t >= self.starts && t < self.ends
+    }
+
+    /// Whether `t` may be tested: in the scope, not excluded. Loopback is
+    /// this machine itself, always allowed.
+    pub fn allows(&self, t: &Target) -> bool {
+        if t.loopback() {
+            return true;
+        }
+        let rules =
+            |v: &[String]| -> Vec<Rule> { v.iter().filter_map(|e| Rule::parse(e).ok()).collect() };
+        if rules(&self.exclude).iter().any(|r| r.overlaps(t)) {
+            return false;
+        }
+        rules(&self.scope).iter().any(|r| r.covers(t))
+    }
+}
+
+/// Whether `text` (an alert) mentions `target` (as the audit log shows it):
+/// the host name, or an IPv4 address inside the address or range.
+pub fn mentions(target: &str, text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    if let Some((net, p)) = parse_net(target) {
+        let mut found = Vec::new();
+        targets_in_text(text, None, &mut found);
+        return found.iter().any(|t| match t {
+            Target::Net(a, q) => *q == if a.is_ipv4() { 32 } else { 128 } && in_net(*a, net, p),
+            _ => false,
+        });
+    }
+    let t = norm_host(target);
+    !t.is_empty() && low.contains(&t)
+}
+
+// ---- what a tool call names -----------------------------------------------------
+
+/// Top-level domains a bare host name is recognised by. File extensions
+/// that are also country domains (.md, .rs, .py, .sh, .pl, .so, .cc, .ps)
+/// are left out, so file names are not taken for hosts.
+const TLDS: &[&str] = &[
+    "com", "net", "org", "io", "dev", "app", "ai", "co", "gov", "edu", "mil", "int", "info", "biz",
+    "cloud", "tech", "xyz", "me", "us", "uk", "de", "fr", "in", "jp", "cn", "ru", "br", "au", "ca",
+    "nl", "es", "it", "ch", "se", "no", "fi", "dk", "be", "at", "cz", "nz", "za", "kr", "tw", "hk",
+    "sg", "id", "my", "ph", "vn", "th", "tr", "il", "ae", "sa", "eg", "ng", "ke", "ar", "mx", "cl",
+    "pe", "ie", "pt", "gr", "hu", "ro", "ua", "eu", "asia", "online", "site", "store", "shop",
+    "page", "live", "blog", "news", "local", "internal", "lan", "corp", "home", "test", "example",
+    "invalid", "onion", "arpa", "global", "company", "services", "systems", "network",
+];
+
+fn targets_in_text(s: &str, cwd: Option<&Path>, out: &mut Vec<Target>) {
+    use std::sync::OnceLock;
+    static URL: OnceLock<regex::Regex> = OnceLock::new();
+    static IP4: OnceLock<regex::Regex> = OnceLock::new();
+    static NAME: OnceLock<regex::Regex> = OnceLock::new();
+    let url = URL.get_or_init(|| {
+        regex::Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]{1,15}://([^\s/?#'"<>\\`|;,)]+)"#).unwrap()
+    });
+    let ip4 = IP4.get_or_init(|| {
+        regex::Regex::new(r"\b(\d{1,3}(?:\.\d{1,3}){3})(?:/(\d{1,2}))?\b").unwrap()
+    });
+    let name = NAME.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b((?:[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z]{2,24})\b")
+            .unwrap()
+    });
+    let mut push = |t: Target| {
+        if !out.contains(&t) {
+            out.push(t)
+        }
+    };
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for c in url.captures_iter(s) {
+        let m = c.get(1).unwrap();
+        spans.push((m.start(), m.end()));
+        let auth = m.as_str().rsplit('@').next().unwrap_or("");
+        let host = if let Some(rest) = auth.strip_prefix('[') {
+            rest.split(']').next().unwrap_or("").to_string()
+        } else {
+            auth.split(':').next().unwrap_or("").to_string()
+        };
+        if let Some((a, p)) = parse_net(&host) {
+            push(Target::Net(a, p));
+        } else {
+            let h = norm_host(&host);
+            if valid_host(&h) {
+                push(Target::Host(h));
+            }
+        }
+    }
+    let inside = |i: usize| spans.iter().any(|(a, b)| i >= *a && i < *b);
+    for c in ip4.captures_iter(s) {
+        let m = c.get(0).unwrap();
+        if inside(m.start()) {
+            continue;
+        }
+        // Part of a version string or a longer dotted number (1.2.3.4.5).
+        let before = s[..m.start()].chars().next_back();
+        let after = s[m.end()..].chars().next();
+        if matches!(before, Some('.') | Some('v') | Some('V'))
+            || matches!(after, Some('.'))
+                && s[m.end() + 1..].starts_with(|c: char| c.is_ascii_digit())
+        {
+            continue;
+        }
+        if let Some((a, p)) = parse_net(m.as_str()) {
+            push(Target::Net(a, p));
+        }
+    }
+    for c in name.captures_iter(s) {
+        let m = c.get(1).unwrap();
+        if inside(m.start()) {
+            continue;
+        }
+        let tok = m.as_str();
+        let tld = tok.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        if !TLDS.contains(&tld.as_str()) || tok.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            continue;
+        }
+        // A path component (dir/name.ext) or a file that exists here.
+        if matches!(
+            s[..m.start()].chars().next_back(),
+            Some('/') | Some('\\') | Some('.')
+        ) {
+            continue;
+        }
+        if let Some(d) = cwd {
+            if d.join(tok).exists() {
+                continue;
+            }
+        }
+        push(Target::Host(norm_host(tok)));
+    }
+}
+
+/// Tools that never reach another machine by themselves.
+const LOCAL_TOOLS: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "NotebookRead",
+    "Glob",
+    "Grep",
+    "LS",
+    "TodoWrite",
+    "Task",
+    "Agent",
+    "WebSearch",
+    "ExitPlanMode",
+    "Skill",
+    "SlashCommand",
+    "BashOutput",
+    "KillShell",
+    "KillBash",
+];
+
+/// The hosts a tool call names.
+pub fn targets(tool: &str, input: &Value, cwd: Option<&Path>) -> Vec<Target> {
+    let mut out = Vec::new();
+    if LOCAL_TOOLS.contains(&tool) {
+        return out;
+    }
+    match tool {
+        "Bash" => targets_in_text(input["command"].as_str().unwrap_or(""), cwd, &mut out),
+        "WebFetch" => targets_in_text(input["url"].as_str().unwrap_or(""), None, &mut out),
+        _ => {
+            // Any other tool (MCP tools included): every string it is given.
+            fn walk(v: &Value, cwd: Option<&Path>, out: &mut Vec<Target>) {
+                match v {
+                    Value::String(s) => targets_in_text(s, cwd, out),
+                    Value::Array(a) => a.iter().for_each(|x| walk(x, cwd, out)),
+                    Value::Object(o) => o.values().for_each(|x| walk(x, cwd, out)),
+                    _ => {}
+                }
+            }
+            walk(input, cwd, &mut out);
+        }
+    }
+    out
+}
+
+// ---- audit log ------------------------------------------------------------------
+
+pub fn dir_of(base: &Path, id: &str) -> PathBuf {
+    base.join("engagements").join(id)
+}
+
+/// Where this machine keeps engagement audit logs and pacing state.
+pub fn local_dir(id: &str) -> PathBuf {
+    dir_of(&crate::paths::data_dir(), id)
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n).collect::<String>() + "..."
+    }
+}
+
+/// Run `f` holding the engagement directory's lock (across processes).
+fn locked<T>(dir: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))?;
+    lock.lock()?;
+    let r = f();
+    let _ = lock.unlock();
+    Ok(r)
+}
+
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let mut f = o.open(path)?;
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    f.sync_data()
+}
+
+/// Append an entry to the audit log in `dir`, chained to the one before.
+pub fn audit(dir: &Path, mut entry: Value) -> std::io::Result<()> {
+    locked(dir, || -> std::io::Result<()> {
+        let head = dir.join("audit.head");
+        let prev = std::fs::read_to_string(&head).unwrap_or_default();
+        let o = entry.as_object_mut().expect("an object");
+        o.insert("ts".into(), json!(now_ms()));
+        o.insert("prev".into(), json!(prev.trim()));
+        o.remove("hash");
+        let body = serde_json::to_string(&entry).unwrap_or_default();
+        let hash = hex(&Sha256::digest(body.as_bytes()));
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("hash".into(), json!(hash));
+        append_line(
+            &dir.join("audit.jsonl"),
+            &serde_json::to_string(&entry).unwrap_or_default(),
+        )?;
+        std::fs::write(&head, &hash)
+    })?
+}
+
+/// The audit log's entries (the newest `max`), and whether its chain is
+/// intact: each entry's hash matches its content and names the one before.
+pub fn read_audit(dir: &Path, max: usize) -> (Vec<Value>, bool) {
+    let Ok(f) = std::fs::File::open(dir.join("audit.jsonl")) else {
+        return (vec![], true);
+    };
+    let mut all = Vec::new();
+    let mut prev = String::new();
+    let mut intact = true;
+    for line in std::io::BufReader::new(f).lines() {
+        let Ok(line) = line else {
+            intact = false;
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(mut v) = serde_json::from_str::<Value>(&line) else {
+            intact = false;
+            continue;
+        };
+        let hash = v["hash"].as_str().unwrap_or("").to_string();
+        if v["prev"].as_str().unwrap_or("") != prev {
+            intact = false;
+        }
+        v.as_object_mut().map(|o| o.remove("hash"));
+        let body = serde_json::to_string(&v).unwrap_or_default();
+        if hex(&Sha256::digest(body.as_bytes())) != hash {
+            intact = false;
+        }
+        v.as_object_mut()
+            .map(|o| o.insert("hash".into(), json!(hash.clone())));
+        prev = hash;
+        all.push(v);
+    }
+    let head = std::fs::read_to_string(dir.join("audit.head")).unwrap_or_default();
+    if !all.is_empty() && head.trim() != prev {
+        // The newest entries were cut off.
+        intact = false;
+    }
+    let skip = all.len().saturating_sub(max);
+    (all.split_off(skip), intact)
+}
+
+// ---- pacing ---------------------------------------------------------------------
+
+/// How long to wait before the next call to each of `hosts`, reserving
+/// the slots: calls to one host are spaced 1/rate seconds apart.
+fn pace(dir: &Path, hosts: &[String], rate: f64) -> std::io::Result<u64> {
+    locked(dir, || {
+        let p = dir.join("pace.json");
+        let mut state: std::collections::BTreeMap<String, u64> = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let t = now_ms();
+        let step = (1000.0 / rate).ceil() as u64;
+        let mut wait = 0;
+        for h in hosts {
+            let next = state.get(h).copied().unwrap_or(0).max(t);
+            wait = wait.max(next - t);
+            state.insert(h.clone(), next + step);
+        }
+        // Forget hosts not called for an hour.
+        state.retain(|_, v| *v + 3_600_000 > t);
+        let _ = std::fs::write(&p, serde_json::to_string(&state).unwrap_or_default());
+        wait
+    })
+}
+
+/// Waits longer than this are refused instead of slept through.
+const MAX_WAIT_MS: u64 = 30_000;
+
+// ---- the guard ------------------------------------------------------------------
+
+/// What the guard decided for one PreToolUse call.
+#[derive(Debug, PartialEq)]
+pub enum Decision {
+    Allow { waited_ms: u64 },
+    Deny(String),
+}
+
+/// Decide a PreToolUse call: scope, window, pace. Writes the audit entry.
+pub fn decide(spec: &Spec, dir: &Path, hook: &Value) -> Decision {
+    let tool = hook["tool_name"].as_str().unwrap_or("");
+    let input = &hook["tool_input"];
+    let cwd = hook["cwd"].as_str().map(Path::new);
+    let ts = targets(tool, input, cwd);
+    let shown: Vec<String> = ts.iter().map(Target::show).collect();
+    let d = if ts.is_empty() {
+        Decision::Allow { waited_ms: 0 }
+    } else if !spec.active(now()) {
+        Decision::Deny(format!(
+            "The engagement '{}' is not active now: it runs from {} to {} (UTC). Nothing that reaches another host may run outside its window.",
+            spec.name,
+            when(spec.starts),
+            when(spec.ends)
+        ))
+    } else if let Some(out) = ts.iter().find(|t| !spec.allows(t)) {
+        Decision::Deny(format!(
+            "{} is outside the scope of the engagement '{}'. In scope: {}{}. Test only those hosts; ask the operator to widen the scope if this one is needed.",
+            out.show(),
+            spec.name,
+            spec.scope.join(", "),
+            if spec.exclude.is_empty() {
+                String::new()
+            } else {
+                format!(" (excluded: {})", spec.exclude.join(", "))
+            }
+        ))
+    } else {
+        let hosts: Vec<String> = ts
+            .iter()
+            .filter(|t| !t.loopback())
+            .map(Target::show)
+            .collect();
+        match pace(dir, &hosts, spec.rate) {
+            Ok(w) if w > MAX_WAIT_MS => Decision::Deny(format!(
+                "Rate limit: this engagement allows {} calls per second per host, and {} is booked for the next {}s. Slow down and try again later.",
+                spec.rate,
+                hosts.join(", "),
+                w / 1000
+            )),
+            Ok(w) => {
+                if w > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(w));
+                }
+                Decision::Allow { waited_ms: w }
+            }
+            Err(e) => Decision::Deny(format!("the engagement's pacing state cannot be read: {}", e)),
+        }
+    };
+    let (decision, reason, waited) = match &d {
+        Decision::Allow { waited_ms } => ("allow", String::new(), *waited_ms),
+        Decision::Deny(r) => ("deny", r.clone(), 0),
+    };
+    let logged = audit(
+        dir,
+        json!({
+            "event": "tool", "engagement": spec.id, "session": hook["session_id"],
+            "tool": tool, "input": clip(&input.to_string(), 2000), "targets": shown,
+            "decision": decision, "reason": reason, "waited_ms": waited,
+        }),
+    );
+    match (d, logged) {
+        // An unlogged action does not run.
+        (Decision::Allow { .. }, Err(e)) => {
+            Decision::Deny(format!("the audit log cannot be written: {}", e))
+        }
+        (d, _) => d,
+    }
+}
+
+/// Record a PostToolUse call: what came of it.
+pub fn record_result(spec: &Spec, dir: &Path, hook: &Value) {
+    let tool = hook["tool_name"].as_str().unwrap_or("");
+    let r = &hook["tool_response"];
+    let failed = r["is_error"].as_bool().unwrap_or(false)
+        || r["interrupted"].as_bool().unwrap_or(false)
+        || r.get("error").map(|e| !e.is_null()).unwrap_or(false);
+    let _ = audit(
+        dir,
+        json!({
+            "event": "result", "engagement": spec.id, "session": hook["session_id"],
+            "tool": tool, "ok": !failed, "output": clip(&r.to_string(), 600),
+        }),
+    );
+}
+
+fn when(t: u64) -> String {
+    let w = crate::deck::cron::from_utc(t as i64);
+    format!("{:02}-{:02} {:02}:{:02}", w.month, w.day, w.hour, w.minute)
+}
+
+/// `indra guard pre|post`: Claude Code's hook for agents in an engagement.
+/// The engagement comes from INDRA_ENGAGEMENT; the call from stdin.
+pub fn guard_main(phase: &str) -> std::process::ExitCode {
+    use std::io::Read;
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let spec: Option<Spec> = std::env::var("INDRA_ENGAGEMENT")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|s: &Spec| s.validate().is_ok());
+    let hook: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    let Some(spec) = spec else {
+        // Fail closed: without its engagement, nothing runs.
+        eprintln!("indra guard: no valid engagement (INDRA_ENGAGEMENT); refusing");
+        return std::process::ExitCode::from(2);
+    };
+    let dir = local_dir(&spec.id);
+    if phase == "post" {
+        record_result(&spec, &dir, &hook);
+        return std::process::ExitCode::SUCCESS;
+    }
+    match decide(&spec, &dir, &hook) {
+        // Silence: the usual permission rules still apply.
+        Decision::Allow { .. } => std::process::ExitCode::SUCCESS,
+        Decision::Deny(reason) => {
+            println!(
+                "{}",
+                json!({ "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                } })
+            );
+            std::process::ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Claude Code's `--settings` for an agent in an engagement: indra guard as
+/// its PreToolUse and PostToolUse hook, for every tool.
+pub fn hook_settings(exe: &Path) -> String {
+    let cmd = |p: &str| format!("\"{}\" guard {}", exe.display(), p);
+    json!({ "hooks": {
+        "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd("pre"), "timeout": 120 }] }],
+        "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd("post"), "timeout": 30 }] }],
+    } })
+    .to_string()
+}
+
+// ---- the hub's store ----------------------------------------------------------------
+
+pub struct Store {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+fn random_id() -> Result<String, String> {
+    const A: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).map_err(|e| format!("no OS randomness: {}", e))?;
+    Ok(b.iter()
+        .map(|x| A[(*x as usize) % A.len()] as char)
+        .collect())
+}
+
+/// The fields a new engagement is made from.
+#[derive(Deserialize, Debug, Default)]
+pub struct New {
+    pub name: String,
+    pub machine: String,
+    pub scope: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    pub starts: u64,
+    pub ends: u64,
+    #[serde(default)]
+    pub rate: Option<f64>,
+    pub authorization: String,
+}
+
+impl Store {
+    pub fn open(data_dir: &Path) -> Store {
+        Store {
+            path: data_dir.join("engagements.json"),
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn load(&self) -> Vec<Engagement> {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, all: &[Engagement]) -> Result<(), String> {
+        if let Some(d) = self.path.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let text = serde_json::to_string_pretty(all).map_err(|e| e.to_string())?;
+        o.open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all()))
+            .and_then(|_| std::fs::rename(&tmp, &self.path))
+            .map_err(|e| format!("{}: {}", self.path.display(), e))
+    }
+
+    pub fn list(&self) -> Vec<Engagement> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v = self.load();
+        v.reverse();
+        v
+    }
+
+    pub fn get(&self, id: &str) -> Option<Engagement> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.load().into_iter().find(|e| e.spec.id == id)
+    }
+
+    pub fn create(&self, n: New, by: &str) -> Result<Engagement, String> {
+        let auth = n.authorization.trim();
+        if auth.chars().count() < 10 || auth.chars().count() > 2000 {
+            return Err("say who authorized this test and the reference (a contract, ticket or email), 10 to 2000 characters".into());
+        }
+        crate::deck::nodes::validate_name(&n.machine).map_err(|e| format!("machine: {}", e))?;
+        let clean = |v: Vec<String>| -> Vec<String> {
+            v.into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                .collect()
+        };
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let e = Engagement {
+            spec: Spec {
+                id: random_id()?,
+                name: n.name.trim().to_string(),
+                scope: clean(n.scope),
+                exclude: clean(n.exclude),
+                starts: n.starts,
+                ends: n.ends,
+                rate: n.rate.unwrap_or(2.0),
+            },
+            machine: n.machine,
+            authorization: auth.to_string(),
+            created_by: by.to_string(),
+            created: now(),
+        };
+        e.spec.validate()?;
+        let mut all = self.load();
+        all.push(e.clone());
+        self.save(&all)?;
+        Ok(e)
+    }
+
+    /// End it now: nothing in it may reach a host from here on.
+    pub fn end(&self, id: &str) -> Result<Engagement, String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.load();
+        let e = all
+            .iter_mut()
+            .find(|e| e.spec.id == id)
+            .ok_or("no such engagement")?;
+        let t = now();
+        if e.spec.ends > t {
+            e.spec.ends = t.max(e.spec.starts + 1);
+        }
+        let out = e.clone();
+        self.save(&all)?;
+        Ok(out)
+    }
+}
+
+/// An engagement as the console shows it.
+pub fn view(e: &Engagement, t: u64) -> Value {
+    let state = if t < e.spec.starts {
+        "scheduled"
+    } else if e.spec.active(t) {
+        "active"
+    } else {
+        "ended"
+    };
+    json!({
+        "id": e.spec.id, "name": e.spec.name, "scope": e.spec.scope, "exclude": e.spec.exclude,
+        "starts": e.spec.starts, "ends": e.spec.ends, "rate": e.spec.rate, "machine": e.machine,
+        "authorization": e.authorization, "created_by": e.created_by, "created": e.created, "state": state,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> Spec {
+        Spec {
+            id: "abcd1234".into(),
+            name: "lab".into(),
+            scope: vec![
+                "app.example.com".into(),
+                "*.lab.example.com".into(),
+                "10.0.0.0/24".into(),
+                "https://api.example.org/v1".into(),
+            ],
+            exclude: vec!["db.lab.example.com".into(), "10.0.0.5".into()],
+            starts: now() - 60,
+            ends: now() + 3600,
+            rate: 50.0,
+        }
+    }
+
+    fn hosts(tool: &str, input: Value) -> Vec<String> {
+        targets(tool, &input, None)
+            .iter()
+            .map(Target::show)
+            .collect()
+    }
+
+    #[test]
+    fn scope_rules() {
+        let s = spec();
+        s.validate().unwrap();
+        let t = |h: &str| Target::Host(h.into());
+        let ip = |a: &str| {
+            let (a, p) = parse_net(a).unwrap();
+            Target::Net(a, p)
+        };
+        assert!(s.allows(&t("app.example.com")));
+        assert!(!s.allows(&t("www.example.com")));
+        assert!(s.allows(&t("x.lab.example.com")));
+        assert!(!s.allows(&t("lab.example.com")), "*.x is subdomains only");
+        assert!(!s.allows(&t("db.lab.example.com")), "excluded");
+        assert!(s.allows(&t("api.example.org")), "a URL entry is its host");
+        assert!(s.allows(&ip("10.0.0.9")));
+        assert!(!s.allows(&ip("10.0.0.5")), "excluded address");
+        assert!(
+            !s.allows(&ip("10.0.0.0/24")),
+            "a range that holds an exclusion"
+        );
+        assert!(s.allows(&ip("10.0.0.128/25")));
+        assert!(!s.allows(&ip("10.0.0.0/16")), "wider than the scope");
+        assert!(!s.allows(&ip("10.0.1.1")));
+        assert!(
+            s.allows(&t("localhost")) && s.allows(&ip("127.0.0.1")),
+            "this machine"
+        );
+        let mut bad = spec();
+        bad.scope = vec!["not a host!".into()];
+        assert!(bad.validate().is_err());
+        bad.scope = vec![];
+        assert!(bad.validate().is_err());
+        let mut late = spec();
+        late.ends = late.starts;
+        assert!(late.validate().is_err());
+    }
+
+    #[test]
+    fn targets_from_tool_calls() {
+        assert_eq!(
+            hosts(
+                "Bash",
+                json!({ "command": "curl -s https://user:pw@App.Example.com:8443/x?y=1 && nmap -p 80 10.0.0.0/28" })
+            ),
+            ["app.example.com", "10.0.0.0/28"]
+        );
+        assert_eq!(
+            hosts(
+                "Bash",
+                json!({ "command": "dig www.example.com; ping 10.0.0.7" })
+            ),
+            ["10.0.0.7", "www.example.com"]
+        );
+        assert_eq!(
+            hosts("WebFetch", json!({ "url": "http://[::1]:8080/" })),
+            ["::1"]
+        );
+        // File names, paths, versions and local tools are not hosts.
+        assert!(hosts("Bash", json!({ "command": "cat src/main.rs notes.md README.md && python3 x.py && pip install foo==1.2.3" })).is_empty());
+        assert!(hosts("Bash", json!({ "command": "ls docs/report.com" })).is_empty());
+        assert!(hosts(
+            "Read",
+            json!({ "file_path": "/etc/hosts", "note": "app.example.com" })
+        )
+        .is_empty());
+        // MCP tools: every string.
+        assert_eq!(
+            hosts(
+                "mcp__scan__probe",
+                json!({ "args": { "target": "db.lab.example.com" } })
+            ),
+            ["db.lab.example.com"]
+        );
+    }
+
+    #[test]
+    fn the_guard_decides_logs_and_chains() {
+        let dir = std::env::temp_dir().join(format!("indra-engage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = spec();
+        let call = |cmd: &str| json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": cmd }, "cwd": "/" });
+        assert!(matches!(
+            decide(&s, &dir, &call("curl https://app.example.com/")),
+            Decision::Allow { .. }
+        ));
+        let d = decide(&s, &dir, &call("curl https://evil.example.net/"));
+        assert!(
+            matches!(&d, Decision::Deny(r) if r.contains("evil.example.net is outside the scope")),
+            "{:?}",
+            d
+        );
+        assert!(matches!(
+            decide(&s, &dir, &call("ls -la")),
+            Decision::Allow { waited_ms: 0 }
+        ));
+        // Outside the window, nothing that names a host runs.
+        let mut over = s.clone();
+        over.ends = now() - 1;
+        over.starts = over.ends - 10;
+        assert!(
+            matches!(decide(&over, &dir, &call("curl https://app.example.com/")), Decision::Deny(r) if r.contains("not active"))
+        );
+        record_result(
+            &s,
+            &dir,
+            &json!({ "tool_name": "Bash", "tool_response": { "stdout": "ok" } }),
+        );
+        let (log, intact) = read_audit(&dir, 100);
+        assert!(intact);
+        assert_eq!(log.len(), 5);
+        assert_eq!(log[1]["decision"], "deny");
+        assert_eq!(log[1]["targets"], json!(["evil.example.net"]));
+        assert_eq!(log[4]["event"], "result");
+        // Editing an entry breaks the chain.
+        let p = dir.join("audit.jsonl");
+        let text = std::fs::read_to_string(&p)
+            .unwrap()
+            .replace("\"deny\"", "\"allow\"");
+        std::fs::write(&p, text).unwrap();
+        assert!(!read_audit(&dir, 100).1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn alerts_that_mention_a_step() {
+        assert!(mentions(
+            "app.example.com",
+            "GET https://APP.example.com/login from 10.9.9.9"
+        ));
+        assert!(!mentions("app.example.com", "www.example.com"));
+        assert!(mentions("10.20.0.0/24", "scan from 10.20.0.77 to 8.8.8.8"));
+        assert!(!mentions("10.20.0.0/24", "10.21.0.77"));
+        assert!(mentions("10.20.0.7", "deny tcp 10.20.0.7:443"));
+        assert!(!mentions("10.20.0.7", "10.20.0.70"));
+    }
+
+    #[test]
+    fn calls_to_one_host_are_paced() {
+        let dir = std::env::temp_dir().join(format!("indra-pace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let h = vec!["app.example.com".to_string()];
+        assert_eq!(pace(&dir, &h, 1.0).unwrap(), 0);
+        let w = pace(&dir, &h, 1.0).unwrap();
+        assert!((900..=1000).contains(&w), "{}", w);
+        assert!(pace(&dir, &h, 1.0).unwrap() >= 1900);
+        assert_eq!(
+            pace(&dir, &["other.example.com".to_string()], 1.0).unwrap(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_store_keeps_engagements() {
+        let dir = std::env::temp_dir().join(format!("indra-engstore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let st = Store::open(&dir);
+        let n = || New {
+            name: "Q4 web test".into(),
+            machine: "attack-box".into(),
+            scope: vec!["app.example.com".into(), " ".into(), "# a comment".into()],
+            starts: now(),
+            ends: now() + 3600,
+            authorization: "Signed SOW #42 by J. Doe".into(),
+            ..Default::default()
+        };
+        let e = st.create(n(), "admin").unwrap();
+        assert_eq!(e.spec.scope, ["app.example.com"]);
+        assert_eq!(e.spec.rate, 2.0);
+        assert!(st
+            .create(
+                New {
+                    authorization: "ok".into(),
+                    ..n()
+                },
+                "admin"
+            )
+            .is_err());
+        assert!(st
+            .create(
+                New {
+                    scope: vec![],
+                    ..n()
+                },
+                "admin"
+            )
+            .is_err());
+        assert_eq!(view(&st.get(&e.spec.id).unwrap(), now())["state"], "active");
+        let ended = st.end(&e.spec.id).unwrap();
+        assert!(!ended.spec.active(now() + 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

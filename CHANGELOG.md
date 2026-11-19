@@ -3,7 +3,7 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
-## v0.13.0
+## v0.16.0
 
 - **Status** (`#/pad` in the console): every session in one list, the ones waiting for you
   first, then the ones at work, then what just finished. Each row has a small animated symbol
@@ -29,6 +29,48 @@ section from this file.
   width.
 - `GET /api/procs` reports each agent's `phase` and current `activity` (the tool it uses or asks
   for).
+
+## v0.15.0
+
+- **Attack surface: what actually impacts you.** A review run's page:
+  - ranks its vulnerabilities by who can reach them: from the internet, after login, internal only, or
+    not at all;
+  - shows the path an attacker takes to each (Internet, then `POST /api/login`, then the finding);
+  - draws the whole surface as a graph: entry points, components, findings, sinks, dependencies and
+    their CVEs.
+- **CVE reachability:** recon now records whether each CVE's vulnerable code is called, with the call
+  sites, and the verifier records each finding's entry point and who can reach it. The new
+  `sh-attack-surface` skill fills these in for older runs.
+
+## v0.14.0
+
+- **MCP & tools: any third-party tool for agents, managed from the dashboard.** Settings > MCP & tools
+  (or `[[tool]]`) holds:
+  - any MCP server, started from a command or reached at a URL: EDR, threat intel, ticketing,
+    scanners, a vendor's own SIEM server;
+  - read-only data sources: Wazuh, Elastic, OpenSearch, Splunk and log files.
+
+  Give each tool to profiles, or pick tools per launch. Test checks a tool works. Secrets go into a
+  private config file, never onto a command line, and the file is deleted when the agent exits.
+- **Search data sources** with `indra siem search`.
+- **Check detections:** on an engagement, see which of its steps your SIEM alerted on, which it
+  missed, and the ATT&CK techniques its rules named. One click drafts detection rules for what was missed.
+- **Blue-team skills:** `sh-detection-rules` (Sigma rules with noise measured on your logs and a test for
+  each), `sh-log-triage` (incidents, timelines, indicators and verdicts) and `sh-hardening` (an ordered
+  fix plan, each step with how to verify it).
+
+## v0.13.0
+
+- **Engagements: test live systems inside a written scope.** Each engagement records:
+  - who authorized it;
+  - what may be tested (hosts, `*.domain`, IPs and CIDRs, minus exclusions) and when;
+  - the one machine its agents run on;
+  - how many calls per second each host takes.
+- **Every tool call is checked.** Agents in an engagement run Claude Code with `indra guard` as a hook.
+  Each call that names a host outside the scope, or runs outside the window, is refused with the
+  reason. The rest are paced per host and logged.
+- **A tamper-evident audit log**: launches, approvals, every tool call and its result, chained by
+  SHA-256, merged across the console and the machine, and exported as CSV or JSONL.
 
 ## v0.12.1
 

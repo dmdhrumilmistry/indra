@@ -106,6 +106,14 @@ Run the threat model on its own with `threat model this repo` (`sh-threat-model`
 document (`design:<file>`), or on a change (`since:<ref>`). A second review of the same code reuses
 the map, and `since:<ref>` reviews only what changed, so repeat reviews cost far fewer tokens.
 
+## Blue team
+
+- `sh-detection-rules`: drafts Sigma rules for activity a SIEM missed, with noise measured on your logs and a test for each. It never deploys them.
+- `sh-log-triage`: triages alerts and hunts in logs, read-only.
+- `sh-hardening`: an ordered, verifiable fix plan from findings, a threat model and detection gaps.
+
+With the indra console, Settings > MCP & tools gives agents any third-party MCP server and read-only Wazuh, Elastic, OpenSearch, Splunk or log-file data sources; `indra siem search` searches the data sources from a terminal.
+
 ## Knowledge bases
 
 One skill per vulnerability class, each with sources, sinks, detection queries,

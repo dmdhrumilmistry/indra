@@ -144,6 +144,18 @@ their section; nothing is deleted, items are checked off with the change that di
       More, plain page names (Run an agent, Running, Results, Machines), and Run an agent with
       four fields and the rest under More options
 
+- [x] Engagements: written scope (hosts, *.domains, IPs, CIDRs, exclusions), window, one machine,
+      pace and authorization; `indra guard` hook refuses out-of-scope or out-of-window tool calls,
+      paces and logs the rest; SHA-256-chained audit log merged across console and machine, CSV/JSONL
+- [x] MCP & tools (Settings > MCP & tools, `[[tool]]`): any third-party MCP server (command or URL)
+      and read-only data sources (Wazuh, Elastic, OpenSearch, Splunk, log files), Test, given to
+      agents by profile or per launch through a private, temporary MCP config
+- [x] Blue team: Check detections on an engagement; sh-detection-rules, sh-log-triage and
+      sh-hardening skills
+- [x] Attack surface graph on a run: entry points to components to findings and CVEs; what is reachable
+      from the internet or after login, with paths; CVE reachability from recon; sh-attack-surface
+- [ ] Recording proxy and evidence-verified findings
+
 ## Not planned yet (the docs say so)
 
 - [ ] OS keychain backend for secrets
