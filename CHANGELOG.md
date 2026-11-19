@@ -3,6 +3,17 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.14.0
+
+- **SIEM sources, read-only:** Wazuh, Elastic, OpenSearch, Splunk and log files (Settings > SIEM, or
+  `[[siem]]`). Search them with `indra siem search`, and give agents the tools with
+  `claude mcp add indra-siem -- indra siem mcp`.
+- **Check detections:** on an engagement, see which of its steps your SIEM alerted on, which it
+  missed, and the ATT&CK techniques its rules named. One click drafts detection rules for what was missed.
+- **Blue-team skills:** `sh-detection-rules` (Sigma rules with noise measured on your logs and a test for
+  each), `sh-log-triage` (incidents, timelines, indicators and verdicts) and `sh-hardening` (an ordered
+  fix plan, each step with how to verify it).
+
 ## v0.13.0
 
 - **Engagements: test live systems inside a written scope.** Each engagement records:

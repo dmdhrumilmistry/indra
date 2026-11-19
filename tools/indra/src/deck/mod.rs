@@ -26,6 +26,7 @@ pub mod procs;
 pub mod router;
 pub mod runs;
 pub mod secrets;
+pub mod siem;
 pub mod term;
 pub mod tools;
 pub mod trackers;

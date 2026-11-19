@@ -1,6 +1,6 @@
 ---
 name: indra
-description: "indra - the entry point for application-security work. Dispatcher for the indra security harness. Use when the user asks for any application-security work - 'security review', 'audit this codebase', 'pentest', 'find vulnerabilities', 'check for SQLi/XSS/IDOR/SSRF', 'generate a security report/SARIF'. Interprets the request and routes it to the full sh-security-review pipeline, a single stage, or a single vulnerability-class knowledge base."
+description: "indra - the entry point for application-security work. Dispatcher for the indra security harness. Use when the user asks for any application-security work - 'security review', 'audit this codebase', 'pentest', 'find vulnerabilities', 'check for SQLi/XSS/IDOR/SSRF', 'generate a security report/SARIF', 'threat model', 'detection rules', 'triage these alerts', 'hardening plan'. Interprets the request and routes it to the full sh-security-review pipeline, a single stage, or a single vulnerability-class knowledge base."
 argument-hint: "[what to do - e.g. 'full security review of ./api' or 'find SQLi and IDOR in src/']"
 ---
 
@@ -20,6 +20,9 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
 | To review again what changed since an earlier review ("what changed since v1.2", "re-review the new code") | Invoke **`sh-security-review`** with `since:<ref>`: it reuses the earlier map and threat model and hunts only the change. |
 | Just to learn how a class is detected/exploited, or to hand a hunter its knowledge | Invoke the matching **`sh-kb-<class>`** skill directly (no pipeline). |
 | A **threat model**, trust boundaries, a data flow diagram, STRIDE, "what could go wrong", or a review of a design document or architecture | Invoke the **`sh-threat-model`** skill. Pass `design:<path>` for a design document, `since:<ref>` for a change. |
+| **Detection rules**, Sigma, SIEM rules, "why didn't we alert", detection gaps, purple-team follow-up | Invoke the **`sh-detection-rules`** skill. |
+| To **triage alerts**, investigate a host or alert, **hunt** for a technique or indicator, or review logs | Invoke the **`sh-log-triage`** skill (read-only; SIEM sources through `indra siem`). |
+| A **hardening** or remediation plan, "what do we fix first", secure configuration | Invoke the **`sh-hardening`** skill. |
 | To map/understand a codebase only (no vuln hunt) | Invoke `sh-security-review` with `stage:recon`. |
 | To recall or record what reviews have learned ("what do we know about X", "remember this", "show the knowledge graph", "forget/skip memory") | Invoke the **`sh-memory`** skill. For "don't use memory" on a review, pass `memory:off` to `sh-security-review`. |
 | To put findings where the team works ("file these in Jira", "open GitHub issues", "put the report in Confluence/Notion") | Invoke the **`sh-publish`** skill. It asks before creating anything and never sends evidence or payloads. |

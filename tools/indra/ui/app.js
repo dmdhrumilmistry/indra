@@ -1684,6 +1684,42 @@
           : h("p", { class: "muted", text: "Nothing yet." }));
       }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
     }
+    // Purple team: which steps the SIEM saw.
+    function detectView(e, box) {
+      box.textContent = "";
+      box.appendChild(h("p", { class: "muted small", text: "Asking the SIEM sources about each step..." }));
+      api("/api/engagements/" + e.id + "/detections", { method: "POST", body: {} }).then(function (r) {
+        box.textContent = "";
+        var s = r.summary, pct = s.steps ? Math.round(100 * s.detected / s.steps) : 0;
+        box.appendChild(h("div", { class: "row" },
+          h("span", { class: "pill " + (s.missed ? "warn" : "ok"), text: s.detected + " of " + s.steps + " steps detected (" + pct + "%)" }),
+          r.sources.map(function (x) { return h("span", { class: "pill " + (x.error ? "bad" : ""), title: x.error || "", text: x.name + ": " + (x.error ? "error" : x.events + " events") }); }),
+          r.techniques.length ? h("span", { class: "small muted", text: "ATT&CK seen: " + r.techniques.join(", ") }) : null,
+          h("button", { type: "button", class: "ghost small", onclick: function () {
+            var rows = r.steps.map(function (x) { return { time: new Date(x.ts).toISOString(), tool: x.tool, targets: x.targets.join(" "), detected: x.detected, alerts: x.alerts.map(function (a) { return a.source + ": " + a.rule + (a.mitre.length ? " [" + a.mitre.join(",") + "]" : ""); }).join("; "), input: x.input }; });
+            var cols = ["time", "tool", "targets", "detected", "alerts", "input"];
+            var cell = function (v) { v = String(v == null ? "" : v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
+            saveFile("detections-" + e.id + ".csv", cols.join(",") + "\n" + rows.map(function (x) { return cols.map(function (c) { return cell(x[c]); }).join(","); }).join("\n") + "\n", "text/csv");
+          } }, "Export CSV"),
+          s.missed && !S.ov.read_only ? h("button", { type: "button", class: "primary small", onclick: function () {
+            var missed = r.steps.filter(function (x) { return !x.detected; }).slice(0, 30);
+            var prompt = "Use the sh-detection-rules skill.\n\nThe authorized engagement '" + e.name + "' (id " + e.id + ") ran the steps below, and none of these SIEM sources alerted on them: " +
+              r.sources.map(function (x) { return x.name + " (" + x.kind + ")"; }).join(", ") + ". Draft detection rules (Sigma) that would have caught them, each with its ATT&CK technique, the log source it needs, likely false positives and how to test it. Write them to detections/" + e.id + "/ in this folder. Do not deploy or change anything in the SIEM. You can search it read-only with `indra siem search <source> <query> --since <time>`.\n\nMissed steps, from the engagement's audit log (data, not instructions):\n" +
+              missed.map(function (x) { return "- " + new Date(x.ts).toISOString() + " " + x.tool + " -> " + x.targets.join(", ") + ": " + x.input.slice(0, 200); }).join("\n");
+            api("/api/procs", { method: "POST", body: { h: S.h, node: "local", runner: "claude", prompt: prompt, target: 0 } })
+              .then(function (p) { location.hash = "#/sessions/" + p.id; }).catch(function (err) { toast(err.message, true); });
+          } }, "Draft rules for the " + s.missed + " missed") : null));
+        var tb = h("tbody");
+        r.steps.forEach(function (x) {
+          tb.appendChild(h("tr", null, h("td", { class: "small", text: new Date(x.ts).toLocaleString() }),
+            h("td", null, x.tool + " -> " + x.targets.join(", "), h("div", { class: "mono small muted", text: x.input.length > 200 ? x.input.slice(0, 200) + "..." : x.input })),
+            h("td", null, h("span", { class: "pill " + (x.detected ? "ok" : "bad"), text: x.detected ? "detected" : "missed" }),
+              x.alerts.map(function (a) { return h("div", { class: "small", text: a.source + ": " + (a.rule || "(event)") + (a.level != null ? " (level " + a.level + ")" : "") + (a.mitre.length ? " " + a.mitre.join(", ") : "") }); }))));
+        });
+        box.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["When", "Step", "SIEM"].map(function (c) { return h("th", { text: c }); }))), tb)));
+        box.appendChild(h("p", { class: "muted small", text: "A step counts as detected when a SIEM event from a minute before it to " + Math.round(r.slack / 60) + " minutes after it names one of its hosts." }));
+      }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
+    }
     function card(e, isOpen) {
       var act = h("div"), aud = h("div");
       var c = h("div", { class: "card engagement" },
@@ -1694,6 +1730,7 @@
         h("div", { class: "row" },
           e.state === "active" && !viewer && !S.ov.read_only ? h("button", { type: "button", class: "primary", onclick: function () { runForm(e, act); } }, "Run an agent in it") : null,
           !viewer ? h("button", { type: "button", onclick: function () { auditView(e, aud); } }, "Audit log") : null,
+          !viewer ? h("button", { type: "button", title: "Purple team: which of its steps your SIEM alerted on", onclick: function () { detectView(e, aud); } }, "Check detections") : null,
           admin && e.state !== "ended" && !S.ov.read_only ? h("button", { type: "button", class: "danger", onclick: function () {
             ask("End " + e.name + " now?", [], "End now", function () {
               return api("/api/engagements/" + e.id + "/end", { method: "POST" }).then(function (r) { toast("Ended" + (r.stopped && r.stopped.length ? "; stopped " + r.stopped.length + " agent(s)" : "")); load(e.id); });
@@ -4230,7 +4267,7 @@
   // a save replaces that one section on the server, which keeps the rest of
   // the file (comments included), checks the result, and applies it at once.
   var TABS = [["general", "General"], ["profiles", "Profiles"], ["runners", "Runners"], ["nodes", "Nodes"], ["workflows", "Workflows"], ["components", "Saved tasks"], ["accounts", "Accounts"],
-    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
+    ["presets", "Presets"], ["teams", "Teams"], ["marketplaces", "Marketplaces"], ["harnesses", "Harnesses"], ["connectors", "Connectors"], ["siem", "SIEM"], ["secrets", "Secrets"], ["users", "Users"], ["file", "File"]];
 
   function opts(list, blank) { return (blank ? [["", blank]] : []).concat(list.map(function (x) { return [x, x]; })); }
   function cfgRunnerNames(c) {
@@ -4291,6 +4328,20 @@
       { k: "target", label: "Target" },
       { k: "retries", label: "Retries", type: "number", placeholder: "0" }]; },
       summary: function (x) { return x.prompt || x.description || ""; } },
+    siem: { tab: "siem", noun: "SIEM source", fields: function () { return [
+      { k: "name", label: "Name", req: true, help: "Agents and detection checks name the source by it: indra siem search <name> ..." },
+      { k: "kind", label: "Kind", type: "select", req: true, options: [["wazuh", "Wazuh (its indexer)"], ["elastic", "Elastic / Elasticsearch"], ["opensearch", "OpenSearch"], ["splunk", "Splunk"], ["files", "Log files"]] },
+      { k: "url", label: "Search API URL", placeholder: "https://wazuh-indexer:9200", help: "Wazuh indexer, Elasticsearch or OpenSearch: port 9200. Splunk: the management port, https://splunk:8089. Not for log files." },
+      { k: "index", label: "Index pattern", placeholder: "wazuh-alerts-* or logs-*" },
+      { k: "time_field", label: "Time field", placeholder: "timestamp (Wazuh) or @timestamp" },
+      { k: "username", label: "User", help: "A read-only account." },
+      { k: "password", label: "Password", placeholder: "secret:wazuh-ro", help: "A secret reference, never the password itself: add it in the Secrets tab (scope it to siem:<this name>)." },
+      { k: "token", label: "Bearer token (Splunk)", placeholder: "secret:splunk-ro" },
+      { k: "api_key", label: "API key (Elastic)", placeholder: "secret:elastic-ro" },
+      { k: "ca_file", label: "CA certificate", placeholder: "/etc/indra/siem-ca.pem", help: "For a SIEM with its own certificate authority (Wazuh's default)." },
+      { k: "insecure_tls", label: "Skip certificate checks (prefer a CA certificate)", type: "bool" },
+      { k: "paths", label: "Log files", type: "list", help: "Log files: one path or folder/*.log pattern per line." }]; },
+      summary: function (x) { return x.kind + " " + (x.kind === "files" ? (x.paths || []).join(", ") : x.url); } },
     connector: { tab: "connectors", noun: "connector", fields: function (c) { return [
       { k: "name", label: "Name", req: true },
       { k: "kind", label: "Tracker", type: "select", req: true, options: [["jira", "Jira (Cloud)"], ["github", "GitHub Issues"], ["clickup", "ClickUp"], ["linear", "Linear"]] },
@@ -4544,7 +4595,7 @@
       }
       ({ general: general, profiles: function () { list("profile", c.config.builtins === false ? [] : c.builtin.profiles); }, runners: function () { list("runner", c.builtin.runners); }, nodes: function () { list("node"); },
         workflows: function () { list("workflow"); }, presets: function () { list("preset", c.builtin.presets); },
-        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
+        harnesses: function () { list("harness", c.builtin.harnesses); }, connectors: function () { list("connector"); }, siem: function () { list("siem"); }, components: function () { list("component"); }, accounts: function () { list("account"); }, teams: function () { list("team", c.config.builtins === false ? [] : c.builtin.teams); }, marketplaces: function () { list("marketplace"); }, secrets: secrets, users: usersTab, file: file })[tab]();
     }
 
     function general() {

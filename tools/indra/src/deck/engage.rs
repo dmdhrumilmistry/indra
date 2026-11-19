@@ -272,6 +272,22 @@ impl Spec {
     }
 }
 
+/// Whether `text` (an alert) mentions `target` (as the audit log shows it):
+/// the host name, or an IPv4 address inside the address or range.
+pub fn mentions(target: &str, text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    if let Some((net, p)) = parse_net(target) {
+        let mut found = Vec::new();
+        targets_in_text(text, None, &mut found);
+        return found.iter().any(|t| match t {
+            Target::Net(a, q) => *q == if a.is_ipv4() { 32 } else { 128 } && in_net(*a, net, p),
+            _ => false,
+        });
+    }
+    let t = norm_host(target);
+    !t.is_empty() && low.contains(&t)
+}
+
 // ---- what a tool call names -----------------------------------------------------
 
 /// Top-level domains a bare host name is recognised by. File extensions
@@ -1011,6 +1027,19 @@ mod tests {
         std::fs::write(&p, text).unwrap();
         assert!(!read_audit(&dir, 100).1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn alerts_that_mention_a_step() {
+        assert!(mentions(
+            "app.example.com",
+            "GET https://APP.example.com/login from 10.9.9.9"
+        ));
+        assert!(!mentions("app.example.com", "www.example.com"));
+        assert!(mentions("10.20.0.0/24", "scan from 10.20.0.77 to 8.8.8.8"));
+        assert!(!mentions("10.20.0.0/24", "10.21.0.77"));
+        assert!(mentions("10.20.0.7", "deny tcp 10.20.0.7:443"));
+        assert!(!mentions("10.20.0.7", "10.20.0.70"));
     }
 
     #[test]

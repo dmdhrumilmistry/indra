@@ -147,8 +147,9 @@ their section; nothing is deleted, items are checked off with the change that di
 - [x] Engagements: written scope (hosts, *.domains, IPs, CIDRs, exclusions), window, one machine,
       pace and authorization; `indra guard` hook refuses out-of-scope or out-of-window tool calls,
       paces and logs the rest; SHA-256-chained audit log merged across console and machine, CSV/JSONL
-- [ ] Blue team: SIEM connectors (Wazuh, Elastic/OpenSearch, Splunk, log files) through MCP,
-      detection validation against an engagement's audit log, detection rules, log triage, hardening
+- [x] Blue team: read-only SIEM sources (Wazuh, Elastic, OpenSearch, Splunk, log files) through
+      `indra siem` and its MCP server; Check detections on an engagement; sh-detection-rules,
+      sh-log-triage and sh-hardening skills
 - [ ] Recording proxy and evidence-verified findings
 
 ## Not planned yet (the docs say so)

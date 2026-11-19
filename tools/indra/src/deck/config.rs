@@ -41,6 +41,9 @@ pub struct ConfigFile {
     pub account: Vec<crate::deck::accounts::AccountCfg>,
     /// How a launch picks among the accounts.
     pub routing: crate::deck::accounts::RoutingCfg,
+    /// SIEM and log sources for blue-team work (Wazuh, Elastic, OpenSearch,
+    /// Splunk, log files), read-only.
+    pub siem: Vec<crate::deck::siem::SiemCfg>,
     /// The hub `indra join` joins when given no hub and code (an
     /// organization's defaults.toml or managed.toml, deployed by MDM).
     #[serde(skip_serializing_if = "JoinCfg::is_empty")]
@@ -1290,6 +1293,8 @@ pub struct Settings {
     pub terminal: TerminalCfg,
     pub accounts: Vec<crate::deck::accounts::AccountCfg>,
     pub routing: crate::deck::accounts::RoutingCfg,
+    /// SIEM and log sources (read-only).
+    pub siem: Vec<crate::deck::siem::SiemCfg>,
     /// Workflow shell steps may run on this machine.
     pub shell_steps: bool,
     /// Workflow files in repositories that could not be used, and why.
@@ -2297,6 +2302,10 @@ pub fn build_settings(
         }
     }
     unique("connector", file.connector.iter().map(|c| c.name.as_str()))?;
+    unique("siem", file.siem.iter().map(|c| c.name.as_str()))?;
+    for c in &file.siem {
+        c.validate()?;
+    }
     for c in &file.connector {
         let at = |m: String| format!("connector '{}': {}", c.name, m);
         crate::deck::nodes::validate_name(&c.name).map_err(at)?;
@@ -2584,6 +2593,7 @@ pub fn build_settings(
         terminal: file.terminal.clone(),
         accounts: file.account.clone(),
         routing: file.routing.clone(),
+        siem: file.siem.clone(),
         shell_steps: file.local.shell_steps.unwrap_or(true),
         workflow_errors,
         repo_dirs,

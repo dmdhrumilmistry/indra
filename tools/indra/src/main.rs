@@ -89,6 +89,8 @@ enum Cmd {
     Completions(completions::CompletionsArgs),
     /// MCP server for AI agents to design workflows (`claude mcp add indra -- indra mcp`)
     Mcp(deck::cli::McpArgs),
+    /// SIEM and log sources (Wazuh, Elastic, OpenSearch, Splunk, files): list, test, search, mcp
+    Siem(deck::cli::SiemArgs),
     /// Accounts agents run with: what each used today and this month, and its limits
     Accounts(deck::cli::AccountsArgs),
     /// Console users and roles: add, list, passwd, role, rm
@@ -134,6 +136,7 @@ fn main() -> ExitCode {
             | Cmd::Node(_)
             | Cmd::Mcp(_)
             | Cmd::Guard { .. }
+            | Cmd::Siem(_)
             | Cmd::Dev { .. }
     ) {
         update::on_start();
@@ -156,6 +159,7 @@ fn main() -> ExitCode {
         Cmd::Completions(a) => completions::run(a),
         Cmd::Mcp(a) => deck::cli::run_mcp(a),
         Cmd::Accounts(a) => deck::cli::run_accounts(a),
+        Cmd::Siem(a) => deck::cli::run_siem(a),
         Cmd::User(a) => deck::users::run(a),
         Cmd::Publish(a) => publish::run(a),
         Cmd::Review(a) => review::run(a),

@@ -1153,6 +1153,73 @@ pub struct McpArgs {
     opts: DeckOpts,
 }
 
+/// `indra siem`: read-only SIEM and log sources for blue-team work.
+#[derive(Args)]
+#[command(
+    after_help = "Sources are [[siem]] tables in indra.toml, for example:\n\n  [[siem]]\n  name = \"wazuh\"\n  kind = \"wazuh\"                  # wazuh | elastic | opensearch | splunk | files\n  url = \"https://wazuh-indexer:9200\"\n  username = \"indra-ro\"\n  password = \"secret:wazuh-ro\"     # indra secret set wazuh-ro\n  ca_file = \"/etc/indra/wazuh-ca.pem\"\n\nGive agents the tools with `claude mcp add indra-siem -- indra siem mcp`."
+)]
+pub struct SiemArgs {
+    #[command(flatten)]
+    opts: DeckOpts,
+    #[command(subcommand)]
+    cmd: SiemCmd,
+}
+
+#[derive(Subcommand)]
+pub enum SiemCmd {
+    /// The configured sources
+    List,
+    /// Check that a source answers with its credentials
+    Test { name: String },
+    /// Search a source: terms, "quoted phrases", or Lucene syntax for Elastic, OpenSearch and Wazuh
+    Search {
+        name: String,
+        #[arg(default_value = "")]
+        query: String,
+        /// Start: Unix seconds or 15m, 24h, 7d ago
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// End (default now)
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u64,
+        /// Wazuh rule level or severity floor
+        #[arg(long)]
+        min_level: Option<u64>,
+        /// Print the events as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// An MCP server (stdio) with read-only SIEM tools for AI agents
+    Mcp,
+}
+
+pub fn run_siem(a: SiemArgs) -> Result<ExitCode, String> {
+    let s = load(a.opts, None, true)?;
+    match a.cmd {
+        SiemCmd::Mcp => crate::deck::siem::serve_mcp(s),
+        SiemCmd::List => {
+            crate::deck::siem::run_cli(s, "list", None, &serde_json::Value::Null, false)
+        }
+        SiemCmd::Test { name } => {
+            crate::deck::siem::run_cli(s, "test", Some(&name), &serde_json::Value::Null, false)
+        }
+        SiemCmd::Search {
+            name,
+            query,
+            since,
+            until,
+            limit,
+            min_level,
+            json,
+        } => {
+            let args = serde_json::json!({ "query": query, "since": since, "until": until, "limit": limit, "min_level": min_level });
+            crate::deck::siem::run_cli(s, "search", Some(&name), &args, json)
+        }
+    }
+}
+
 pub fn run_mcp(a: McpArgs) -> Result<ExitCode, String> {
     crate::deck::mcp::serve(load_options(a.opts, None, false)?)
 }

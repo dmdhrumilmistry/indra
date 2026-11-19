@@ -2957,11 +2957,89 @@ async fn engagement_audit(
     UrlPath(id): UrlPath<String>,
     Query(q): Query<AuditQ>,
 ) -> ApiResult<axum::response::Response> {
-    use crate::deck::engage;
     let e = app
         .engagements
         .get(&id)
         .ok_or_else(|| not_found("no such engagement"))?;
+    let (entries, intact, machine) = merged_audit(&app, &e).await;
+    let name = format!("engagement-{}-audit", id);
+    match q.format.as_deref() {
+        Some("jsonl") => {
+            let body: String = entries.iter().map(|x| x.to_string() + "\n").collect();
+            Ok(download(
+                &format!("{}.jsonl", name),
+                "application/x-ndjson",
+                body,
+            ))
+        }
+        Some("csv") => {
+            let cols = [
+                "ts",
+                "event",
+                "user",
+                "proc",
+                "session",
+                "tool",
+                "targets",
+                "decision",
+                "reason",
+                "waited_ms",
+                "ok",
+                "input",
+                "hash",
+            ];
+            Ok(download(
+                &format!("{}.csv", name),
+                "text/csv",
+                csv(&cols, &entries),
+            ))
+        }
+        _ => Ok(
+            Json(json!({ "entries": entries, "intact": intact, "machine": machine }))
+                .into_response(),
+        ),
+    }
+}
+
+/// CSV with every cell quoted, and cells a spreadsheet would run as a
+/// formula neutralised.
+fn csv(cols: &[&str], rows: &[Value]) -> String {
+    let cell = |v: &Value| -> String {
+        let s = match v {
+            Value::Null => String::new(),
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+            format!("'{}", s)
+        } else {
+            s
+        };
+        format!("\"{}\"", s.replace('"', "\"\""))
+    };
+    let mut body = cols.join(",") + "\n";
+    for x in rows {
+        body.push_str(
+            &cols
+                .iter()
+                .map(|c| cell(&x[*c]))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        body.push('\n');
+    }
+    body
+}
+
+/// An engagement's audit log: the console's entries and those of its
+/// machine, merged by time; whether every chain is intact; and whether the
+/// machine could be read.
+async fn merged_audit(
+    app: &App,
+    e: &crate::deck::engage::Engagement,
+) -> (Vec<Value>, bool, &'static str) {
+    use crate::deck::engage;
+    let id = e.spec.id.clone();
     let (mut entries, mut intact) =
         engage::read_audit(&engage::dir_of(&app.settings().data_dir, &id), 20_000);
     let mut machine = "read";
@@ -2987,64 +3065,166 @@ async fn engagement_audit(
     let mut seen = std::collections::HashSet::new();
     entries.retain(|x| seen.insert(x["hash"].as_str().unwrap_or("").to_string()));
     entries.sort_by_key(|x| x["ts"].as_u64().unwrap_or(0));
-    let name = format!("engagement-{}-audit", id);
-    match q.format.as_deref() {
-        Some("jsonl") => {
-            let body: String = entries.iter().map(|x| x.to_string() + "\n").collect();
-            Ok(download(
-                &format!("{}.jsonl", name),
-                "application/x-ndjson",
-                body,
-            ))
-        }
-        Some("csv") => {
-            let cell = |v: &Value| -> String {
-                let s = match v {
-                    Value::Null => String::new(),
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                // Spreadsheets run cells that start like a formula.
-                let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
-                    format!("'{}", s)
-                } else {
-                    s
-                };
-                format!("\"{}\"", s.replace('"', "\"\""))
-            };
-            let cols = [
-                "ts",
-                "event",
-                "user",
-                "proc",
-                "session",
-                "tool",
-                "targets",
-                "decision",
-                "reason",
-                "waited_ms",
-                "ok",
-                "input",
-                "hash",
-            ];
-            let mut body = cols.join(",") + "\n";
-            for x in &entries {
-                body.push_str(
-                    &cols
-                        .iter()
-                        .map(|c| cell(&x[*c]))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
-                body.push('\n');
-            }
-            Ok(download(&format!("{}.csv", name), "text/csv", body))
-        }
-        _ => Ok(
-            Json(json!({ "entries": entries, "intact": intact, "machine": machine }))
-                .into_response(),
-        ),
+    (entries, intact, machine)
+}
+
+#[derive(Deserialize, Default)]
+struct DetectReq {
+    /// SIEM sources to ask (default: all).
+    #[serde(default)]
+    sources: Vec<String>,
+    /// How long after a step an alert still counts (seconds, default 900).
+    #[serde(default)]
+    slack: Option<u64>,
+}
+
+/// `POST /api/engagements/{id}/detections`: which of the engagement's
+/// steps (the tool calls the guard allowed) the SIEM saw. Each source is
+/// asked for its events over the engagement's activity; a step counts as
+/// detected when an event from a minute before it to `slack` after it
+/// names one of its hosts.
+async fn engagement_detections(
+    State(app): State<Arc<App>>,
+    axum::Extension(who): axum::Extension<crate::deck::users::Who>,
+    UrlPath(id): UrlPath<String>,
+    body: Option<Json<DetectReq>>,
+) -> ApiResult<Json<Value>> {
+    use crate::deck::{engage, siem};
+    let r = body.map(|b| b.0).unwrap_or_default();
+    let e = app
+        .engagements
+        .get(&id)
+        .ok_or_else(|| not_found("no such engagement"))?;
+    let settings = app.settings();
+    let chosen: Vec<&siem::SiemCfg> = settings
+        .siem
+        .iter()
+        .filter(|c| r.sources.is_empty() || r.sources.contains(&c.name))
+        .collect();
+    if chosen.is_empty() {
+        return Err(bad("no SIEM source to ask: add one under Settings > SIEM"));
     }
+    let slack = r.slack.unwrap_or(900).clamp(60, 86_400);
+    let (entries, intact, machine) = merged_audit(&app, &e).await;
+    let steps: Vec<&Value> = entries
+        .iter()
+        .filter(|x| {
+            x["event"] == "tool"
+                && x["decision"] == "allow"
+                && x["targets"]
+                    .as_array()
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false)
+        })
+        .collect();
+    if steps.is_empty() {
+        return Err(bad("the engagement has no steps that reached a host yet"));
+    }
+    let first = steps
+        .iter()
+        .filter_map(|x| x["ts"].as_u64())
+        .min()
+        .unwrap_or(0)
+        / 1000;
+    let last = steps
+        .iter()
+        .filter_map(|x| x["ts"].as_u64())
+        .max()
+        .unwrap_or(0)
+        / 1000;
+    let q = siem::Query {
+        text: String::new(),
+        from: first.saturating_sub(60),
+        to: last + slack,
+        limit: 2000,
+        min_level: None,
+    };
+    let vault = crate::deck::secrets::Vault::open(settings.data_dir.join("secrets"));
+    let mut events: Vec<siem::Event> = Vec::new();
+    let mut sources = Vec::new();
+    for c in chosen {
+        let res = match siem::open(c, &vault) {
+            Ok(src) => siem::search(&src, &q).await,
+            Err(e) => Err(e),
+        };
+        match res {
+            Ok(evs) => {
+                sources.push(
+                    json!({ "name": c.name, "kind": c.kind, "events": evs.len(), "error": null }),
+                );
+                events.extend(evs);
+            }
+            Err(err) => {
+                sources.push(json!({ "name": c.name, "kind": c.kind, "events": 0, "error": err }))
+            }
+        }
+    }
+    let mut techniques = std::collections::BTreeSet::new();
+    let mut detected = 0;
+    let out_steps: Vec<Value> = steps
+        .iter()
+        .map(|x| {
+            let ts = x["ts"].as_u64().unwrap_or(0);
+            let targets: Vec<String> = x["targets"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let alerts: Vec<Value> = events
+                .iter()
+                .filter(|ev| ev.ts + 60_000 >= ts && ev.ts <= ts + slack * 1000)
+                .filter(|ev| targets.iter().any(|t| engage::mentions(t, &ev.raw)))
+                .take(20)
+                .map(|ev| {
+                    techniques.extend(ev.mitre.iter().cloned());
+                    json!({ "source": ev.source, "ts": ev.ts, "rule": ev.rule, "level": ev.level, "mitre": ev.mitre, "host": ev.host })
+                })
+                .collect();
+            if !alerts.is_empty() {
+                detected += 1;
+            }
+            json!({ "ts": ts, "tool": x["tool"], "targets": targets, "session": x["session"],
+                    "input": crate::mem::search::truncate(x["input"].as_str().unwrap_or(""), 400),
+                    "detected": !alerts.is_empty(), "alerts": alerts })
+        })
+        .collect();
+    let report = json!({
+        "engagement": id, "name": e.spec.name, "checked": engage::now(), "by": who.user, "slack": slack,
+        "audit_intact": intact, "machine": machine, "sources": sources,
+        "summary": { "steps": out_steps.len(), "detected": detected, "missed": out_steps.len() - detected },
+        "techniques": techniques, "steps": out_steps,
+    });
+    let dir = engage::dir_of(&settings.data_dir, &id);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join("detections.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+    hub_audit(
+        &app,
+        &id,
+        json!({ "event": "detections", "user": who.user, "steps": out_steps.len(), "detected": detected }),
+    );
+    Ok(Json(report))
+}
+
+/// `GET /api/siem`: the configured SIEM and log sources (no credentials).
+async fn siem_list(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(json!(app
+        .settings()
+        .siem
+        .iter()
+        .map(crate::deck::siem::SiemCfg::view)
+        .collect::<Vec<_>>()))
+}
+
+/// `POST /api/siem/{name}/test`: does it answer, with its credentials?
+async fn siem_test(
+    State(app): State<Arc<App>>,
+    UrlPath(name): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let src = crate::deck::siem::source(&app.settings(), &name).map_err(bad)?;
+    let msg = crate::deck::siem::check(&src).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "message": msg })))
 }
 
 fn download(name: &str, kind: &str, body: String) -> axum::response::Response {
@@ -4200,6 +4380,12 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/api/engagements/{id}/end", post(engagement_end))
         .route("/api/engagements/{id}/audit", get(engagement_audit))
+        .route(
+            "/api/engagements/{id}/detections",
+            post(engagement_detections),
+        )
+        .route("/api/siem", get(siem_list))
+        .route("/api/siem/{name}/test", post(siem_test))
         .route("/api/nodes/{name}", axum::routing::delete(node_remove))
         .route("/api/nodes/{name}/dirs", get(node_dirs))
         .route(
@@ -4313,6 +4499,7 @@ mod tests {
             terminal: Default::default(),
             accounts: vec![],
             routing: Default::default(),
+            siem: vec![],
             shell_steps: true,
             workflow_errors: vec![],
             repo_dirs: vec![],
@@ -6478,6 +6665,81 @@ while True:
             s == StatusCode::BAD_REQUEST && b.contains("not active"),
             "{}",
             b
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn detections_match_steps_to_siem_events() {
+        let (base, dir) = fixture("detect", false);
+        let logs = dir.join("siem");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut settings = (*base.settings()).clone();
+        settings.siem.push(crate::deck::siem::SiemCfg {
+            name: "logs".into(),
+            kind: "files".into(),
+            paths: vec![logs.join("*.log").display().to_string()],
+            ..Default::default()
+        });
+        let app = App::new(settings, TOKEN.into(), true);
+        let origin = ("origin", "http://127.0.0.1:7878");
+        let t = crate::deck::engage::now();
+        let (s, _, b) = call(&app, "POST", "/api/engagements", &[AUTH, origin], Some(json!({ "name": "purple", "machine": "local",
+            "scope": ["app.example.com", "10.20.0.0/24"], "starts": t - 10, "ends": t + 3600, "authorization": "Purple team exercise, ticket SEC-77" }))).await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Before any step: nothing to check.
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            &format!("/api/engagements/{}/detections", id),
+            &[AUTH, origin],
+            None,
+        )
+        .await;
+        assert!(
+            s == StatusCode::BAD_REQUEST && b.contains("no steps"),
+            "{}",
+            b
+        );
+        // Two steps; the SIEM saw the first.
+        let d = crate::deck::engage::dir_of(&app.settings().data_dir, &id);
+        for (tool, target) in [("Bash", "app.example.com"), ("Bash", "10.20.0.0/24")] {
+            crate::deck::engage::audit(&d, json!({ "event": "tool", "tool": tool, "targets": [target], "decision": "allow", "input": "x" })).unwrap();
+        }
+        crate::deck::engage::audit(&d, json!({ "event": "tool", "tool": "Bash", "targets": ["evil.example.net"], "decision": "deny" })).unwrap();
+        let now_ms = t * 1000 + 5_000;
+        std::fs::write(logs.join("waf.log"), format!(
+            "{{\"@timestamp\":{},\"rule\":{{\"description\":\"SQLi attempt\",\"level\":12,\"mitre\":{{\"id\":[\"T1190\"]}}}},\"message\":\"blocked GET app.example.com/login\"}}\n{{\"@timestamp\":{},\"message\":\"unrelated www.example.org\"}}\n",
+            now_ms, now_ms)).unwrap();
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            &format!("/api/engagements/{}/detections", id),
+            &[AUTH, origin],
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", b);
+        let r: Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(
+            r["summary"],
+            json!({ "steps": 2, "detected": 1, "missed": 1 }),
+            "{}",
+            b
+        );
+        assert_eq!(r["steps"][0]["alerts"][0]["rule"], "SQLi attempt");
+        assert_eq!(r["techniques"], json!(["T1190"]));
+        assert_eq!(r["steps"][1]["detected"], false);
+        assert!(d.join("detections.json").is_file());
+        let (s, _, b) = call(&app, "GET", "/api/siem", &[AUTH], None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&b).unwrap()[0]["name"],
+            "logs"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
