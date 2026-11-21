@@ -22,6 +22,12 @@ Login/logout `?next=`/`?return_to=`/`?redirect=`/`?url=` params, post-action red
 - **PHP**: `header("Location: " . $user)`. **Go**: `http.Redirect(w, r, userURL, ...)`.
 - Grep: `sendRedirect|res.redirect|HttpResponseRedirect|\bredirect\(|Location:\s|location.href|window.location`.
 
+## Related sinks
+- **Unvalidated forwards**: `getRequestDispatcher(user).forward()` / server-side forwards with a user-supplied
+  target can reach privileged pages, since the access check ran on the entry page only (`access-control`).
+- PHP `header("Location: ...")` without `exit`: code after the redirect still executes for clients that
+  ignore it.
+
 ## Detection recipe
 1. `graft grep "redirect\(|sendRedirect|HttpResponseRedirect|Location:|location.(href|assign)" --json`.
 2. Trace the redirect target to user input.
@@ -38,6 +44,9 @@ Login/logout `?next=`/`?return_to=`/`?redirect=`/`?url=` params, post-action red
 ## False-positive filters
 - Target is forced relative (leading single `/` **and** not `//`/`/\`) after normalization, or resolved
   against the app origin and re-checked.
+- Validation parses the URL with the same parser the redirect API/browser uses, compares scheme, canonical
+  host and effective port, rejects userinfo, and redirects to the exact validated string (not a
+  re-normalized one). Prefix/suffix string checks are not this.
 - Destination validated against a strict host allowlist (exact host match, not substring/`endsWith`).
 - Redirect target is server-chosen (not user input) or an opaque id mapped to a known URL.
 
@@ -51,6 +60,6 @@ Open redirect + OAuth `redirect_uri` -> steal authorization code -> account take
 phishing credibility. Frequently the first hop in takeover chains.
 
 ## Mitigation
-Avoid user-controlled redirect targets; if needed, allowlist exact destination hosts or force
+Avoid user-controlled redirect targets; prefer a server-side ID-to-URL map or a framework local-URL helper (e.g. ASP.NET Core `LocalRedirect`); if needed, allowlist exact destination hosts or force
 same-origin/relative paths (reject `//`, `/\`, absolute URLs, and non-http schemes) after canonicalization;
 for OAuth, exact-match `redirect_uri` against pre-registered values; show an interstitial for external links.
