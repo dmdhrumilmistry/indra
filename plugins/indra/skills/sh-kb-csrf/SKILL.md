@@ -28,6 +28,18 @@ State-changing route handlers (`POST`/`PUT`/`PATCH`/`DELETE`, or `GET` that muta
 4. Confirm the endpoint doesn't already require a non-ambient token or a custom header (which forces a
    preflight and blocks simple cross-site requests).
 
+## Gaps that defeat "protected" routes
+- **Login CSRF**: login forms without a pre-session token let an attacker sign the victim into the
+  attacker's account. Check login too, not just post-auth actions.
+- **SameSite is not a full defense**: Lax still sends cookies on cross-site top-level GET, so any
+  state-changing GET is exposed; Lax-by-default browsers allow cross-site top-level POST for about two
+  minutes after the cookie is set; sibling subdomains (takeover/XSS) are same-site; it does not stop
+  client-side CSRF where the app's own JS issues the request.
+- **Naive double-submit** (cookie compared only to a cookie/param) is forgeable by anyone who can plant a
+  cookie (subdomain, HTTP injection). Safe form: HMAC-signed token bound to the session, read from a
+  header or form field.
+- **Tokens in URLs** leak via history, logs, and Referer.
+
 ## Payloads / PoC
 - Auto-submitting form: an HTML page with `<form action="https://target/settings" method="POST">` and
   hidden inputs, plus `<script>document.forms[0].submit()</script>`; victim visiting it triggers the action.
@@ -41,7 +53,10 @@ State-changing route handlers (`POST`/`PUT`/`PATCH`/`DELETE`, or `GET` that muta
 - `SameSite=Lax` (default in modern browsers) or `Strict` on the session cookie - mitigates most CSRF;
   note residual risk for top-level GET navigations under Lax.
 - Auth is a header token the browser won't auto-attach cross-site (Bearer), not a cookie.
-- Endpoint requires a custom header (forces CORS preflight) and CORS is not permissive.
+- Endpoint requires a custom header (forces CORS preflight) and CORS is not permissive. Not a control if
+  CORS reflects any origin, regex-matches all subdomains, or allowlists `Origin: null`.
+- Server rejects non-safe methods when `Sec-Fetch-Site: cross-site` (falling back to `Origin`/`Referer`
+  when the header is absent). `same-site` is only safe if sibling subdomains are trusted.
 
 ## CWE / OWASP / severity
 CWE-352. OWASP A01:2021. Severity by action impact: account/email/password change or money transfer ->
