@@ -8,9 +8,9 @@ An **engagement** is a test of live systems that stays inside a written scope. I
 - **where its agents run**: one machine you choose;
 - **how fast**: calls per second per host.
 
-Every agent started in an engagement is Claude Code with `indra guard` as its hook. Each tool call it
-makes is checked against the scope and the window, paced per host, and written to an audit log
-before it runs.
+Every agent started in an engagement is Claude Code, Codex or Gemini CLI, with `indra guard` as its
+hook. Each tool call it makes is checked against the scope and the window, paced per host, and
+written to an audit log before it runs.
 
 ## Create one
 
@@ -35,8 +35,18 @@ profile, then opens the session.
 
 Each agent:
 
-- **runs on the engagement's machine**, as Claude Code. Its hooks are what enforce the scope, so other
-  runners are refused;
+- **runs on the engagement's machine**, as Claude Code, Codex or Gemini CLI (pick the **Agent** on Run
+  an agent in it). Their hooks are what enforce the scope, so other runners are refused. Each CLI
+  takes the hooks its own way:
+
+  | agent | how indra installs its hooks |
+  |---|---|
+  | Claude Code | `--settings` with PreToolUse, PostToolUse and Stop hooks |
+  | Codex | `-c hooks.PreToolUse=...` (and PostToolUse, Stop) on its command line, with `--dangerously-bypass-hook-trust`: Codex otherwise runs a hook only after a person reviews it. That flag also lets hooks you already enabled in your Codex config run without a new review. Codex's sandbox gets network access (`-s workspace-write`, `sandbox_workspace_write.network_access`) unless the runner sets a sandbox itself |
+  | Gemini CLI | a private copy of Gemini's system settings file (yours, if any, plus BeforeTool, AfterTool and AfterAgent hooks), named by `GEMINI_CLI_SYSTEM_SETTINGS_PATH` and removed when the agent ends |
+
+  Each one's own login is used as is (an API key, a subscription login, `codex login`, Login with
+  Google), and its model API is passed through the recording proxy untouched;
 - **runs `indra guard pre` before every tool call.** The call is refused, with the reason shown to the
   agent, when:
   - it names a host outside the scope or in an exclusion;
@@ -155,13 +165,17 @@ end of each turn:
   record what it found and finish;
 - at 100%, they are stopped, and no new agent starts in it.
 
-Each step is written to the audit log. A subscription login is not metered this way.
+Each step is written to the audit log. Spend is what each agent reports, else indra's estimate from
+its tokens, so the budget holds for Codex, Gemini CLI and subscription logins too (see
+[accounts and usage](../../tools/indra/README.md#accounts-and-usage)).
 
 ## Requirements
 
-- **Claude Code** on the engagement's machine.
-- **indra 0.13.0 or newer** on that machine (**0.18.0** with Record traffic). The console refuses to
-  start an engagement agent on an older one, which would ignore the engagement.
+- **Claude Code, Codex or Gemini CLI** on the engagement's machine, in a version with hooks (indra was
+  tested with Codex 0.172 and Gemini CLI 0.71).
+- **indra 0.13.0 or newer** on that machine (**0.18.0** with Record traffic, **0.19.0** for Codex and
+  Gemini CLI). The console refuses to start an engagement agent on an older one, which would ignore
+  the engagement.
 
 ## API
 

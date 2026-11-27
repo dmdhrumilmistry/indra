@@ -74,6 +74,25 @@ pub const MAX_KEEP: usize = 256 << 10;
 /// The most of a request body read before forwarding it.
 const MAX_REQUEST: usize = 64 << 20;
 
+/// Codex's own hosts: the OpenAI API and the ChatGPT login.
+pub const CODEX_HOSTS: &[&str] = &[
+    "api.openai.com",
+    "chatgpt.com",
+    "auth.openai.com",
+    "ab.chatgpt.com",
+];
+
+/// Gemini CLI's own hosts: the Gemini API, Code Assist (Login with Google),
+/// Google's sign-in, and Vertex AI.
+pub const GEMINI_HOSTS: &[&str] = &[
+    "generativelanguage.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+    "oauth2.googleapis.com",
+    "www.googleapis.com",
+    "accounts.google.com",
+    "aiplatform.googleapis.com",
+];
+
 /// Hosts an agent's own runner talks to: tunnelled, never decrypted or
 /// recorded, and outside any scope check.
 pub const RUNNER_HOSTS: &[&str] = &[
@@ -177,16 +196,43 @@ fn host_only(h: &str) -> String {
 
 /// The hosts never intercepted for an agent: its runner's, the host of its
 /// model base URL, and those of the MCP servers it was given.
-pub fn passthrough_for(env: &[(String, String)], urls: &[String]) -> Vec<String> {
-    let mut v: Vec<String> = RUNNER_HOSTS.iter().map(|s| s.to_string()).collect();
+pub fn passthrough_for(
+    agent: crate::deck::hooks::Agent,
+    env: &[(String, String)],
+    urls: &[String],
+) -> Vec<String> {
+    use crate::deck::hooks::Agent;
+    let hosts: &[&str] = match agent {
+        Agent::Codex => CODEX_HOSTS,
+        Agent::Gemini => GEMINI_HOSTS,
+        _ => RUNNER_HOSTS,
+    };
+    let mut v: Vec<String> = hosts.iter().map(|s| s.to_string()).collect();
+    if agent == Agent::Gemini {
+        // Vertex AI's regional endpoint.
+        if let Some((_, loc)) = env.iter().find(|(k, _)| k == "GOOGLE_CLOUD_LOCATION") {
+            if !loc.is_empty() && loc.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                v.push(format!(
+                    "{}-aiplatform.googleapis.com",
+                    loc.to_ascii_lowercase()
+                ));
+            }
+        }
+    }
     let host_of = |u: &str| -> Option<String> {
         let u: hyper::Uri = u.parse().ok()?;
         u.host().map(host_only)
     };
     for (k, val) in env {
-        if k == "ANTHROPIC_BASE_URL"
-            || k == "ANTHROPIC_BEDROCK_BASE_URL"
-            || k == "ANTHROPIC_VERTEX_BASE_URL"
+        if [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_BEDROCK_BASE_URL",
+            "ANTHROPIC_VERTEX_BASE_URL",
+            "OPENAI_BASE_URL",
+            "GOOGLE_GEMINI_BASE_URL",
+            "GOOGLE_VERTEX_BASE_URL",
+        ]
+        .contains(&k.as_str())
         {
             if let Some(h) = host_of(val) {
                 v.push(h);
@@ -1246,6 +1292,7 @@ mod tests {
     #[test]
     fn passthrough_hosts_come_from_the_runner_and_its_tools() {
         let p = passthrough_for(
+            crate::deck::hooks::Agent::Claude,
             &[(
                 "ANTHROPIC_BASE_URL".into(),
                 "https://gw.corp.example:8443/v1".into(),

@@ -170,7 +170,15 @@ The two kinds read a command differently, on purpose:
 - **deny** matches anywhere: in every command of a list or pipeline, inside substitutions, behind
   wrappers (`sudo git push`, `env X=1 git push`, `sh -c 'git push'`, `xargs git push`). Deny wins.
 
-Anything no rule decides is asked as before, and other tools are never decided by these rules. The
+Anything no rule decides is asked as before, and other tools are never decided by these rules.
+
+The same rules hold for every agent, each in its own way:
+
+| agent | deny rules | allow rules |
+|---|---|---|
+| Claude Code | a PreToolUse hook refuses the call, even in a mode that would not ask | answered on its control channel when it asks |
+| Codex | a PreToolUse hook refuses the call | a PermissionRequest hook allows what Codex would ask about |
+| Gemini CLI | a BeforeTool hook refuses the call; also a deny rule in a policy file | an allow rule in a policy file (`--policy`); the hook makes Gemini ask about anything its policy would allow by text that indra's stricter reading does not (`git status; rm x`) | The
 session says which rule decided each request (`allowed Bash: git status (decided by the rule `git
 status`)`), and a person's answer says who gave it; in an engagement, the audit log records
 `decided_by` too.

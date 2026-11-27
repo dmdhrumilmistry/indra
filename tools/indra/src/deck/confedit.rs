@@ -19,7 +19,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
 /// The top-level keys of `indra.toml`, in the order a new file gets them.
-pub const SECTIONS: [&str; 17] = [
+pub const SECTIONS: [&str; 19] = [
     "builtins",
     "server",
     "local",
@@ -37,6 +37,8 @@ pub const SECTIONS: [&str; 17] = [
     "account",
     "routing",
     "tool",
+    "approvals",
+    "price",
 ];
 
 /// The first lines of a config file the console creates.
@@ -102,6 +104,8 @@ fn fragment(section: &str, value: &Value) -> Result<Option<(String, Value)>> {
         "marketplace" => typed::<Vec<crate::deck::config::MarketplaceCfg>>(section, value),
         "account" => typed::<Vec<crate::deck::accounts::AccountCfg>>(section, value),
         "routing" => typed::<crate::deck::accounts::RoutingCfg>(section, value),
+        "approvals" => typed::<crate::deck::approve::Rules>(section, value),
+        "price" => typed::<Vec<crate::deck::pricing::PriceCfg>>(section, value),
         _ => return Err(format!("unknown section '{}'", section)),
     }?;
     Ok(Some(r))

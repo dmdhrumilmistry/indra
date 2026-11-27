@@ -471,7 +471,41 @@ const LOCAL_TOOLS: &[&str] = &[
     "BashOutput",
     "KillShell",
     "KillBash",
+    // Gemini CLI
+    "read_file",
+    "read_many_files",
+    "write_file",
+    "replace",
+    "glob",
+    "grep_search",
+    "search_file_content",
+    "list_directory",
+    "write_todos",
+    "save_memory",
+    "ask_user",
+    "activate_skill",
+    "get_internal_docs",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "google_web_search",
+    "update_topic",
+    "complete_task",
+    // Codex
+    "apply_patch",
+    "update_plan",
+    "view_image",
+    "write_stdin",
 ];
+
+/// A tool's name as the guard reads it: the shell and web tools of Gemini
+/// CLI and Codex under Claude Code's names.
+pub fn canonical_tool(tool: &str) -> &str {
+    match tool {
+        "run_shell_command" | "exec_command" | "shell" | "local_shell" => "Bash",
+        "web_fetch" => "WebFetch",
+        _ => tool,
+    }
+}
 
 /// The hosts a tool call names.
 pub fn targets(tool: &str, input: &Value, cwd: Option<&Path>) -> Vec<Target> {
@@ -479,9 +513,32 @@ pub fn targets(tool: &str, input: &Value, cwd: Option<&Path>) -> Vec<Target> {
     if LOCAL_TOOLS.contains(&tool) {
         return out;
     }
-    match tool {
-        "Bash" => targets_in_text(input["command"].as_str().unwrap_or(""), cwd, &mut out),
-        "WebFetch" => targets_in_text(input["url"].as_str().unwrap_or(""), None, &mut out),
+    // A command can come as one string or as argv (Codex's older shell).
+    let text = |v: &Value| -> String {
+        match v {
+            Value::String(s) => s.clone(),
+            Value::Array(a) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        }
+    };
+    match canonical_tool(tool) {
+        "Bash" => {
+            let c = if input.get("command").is_some() {
+                text(&input["command"])
+            } else {
+                text(&input["cmd"])
+            };
+            targets_in_text(&c, cwd, &mut out)
+        }
+        // Claude Code takes a url; Gemini CLI a prompt with the URLs in it.
+        "WebFetch" => {
+            let t = format!("{} {}", text(&input["url"]), text(&input["prompt"]));
+            targets_in_text(&t, None, &mut out)
+        }
         _ => {
             // Any other tool (MCP tools included): every string it is given.
             fn walk(v: &Value, cwd: Option<&Path>, out: &mut Vec<Target>) {
@@ -943,17 +1000,51 @@ pub fn guard_main(phase: &str) -> std::process::ExitCode {
     use std::io::Read;
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    if phase == "steer" {
+    let hook: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    let event = hook["hook_event_name"]
+        .as_str()
+        .unwrap_or("PreToolUse")
+        .to_string();
+    let rules: crate::deck::approve::Rules = std::env::var("INDRA_APPROVALS")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let say = |v: Value| println!("{}", v);
+    match phase {
         // Never refuses anything: it only hands over queued messages.
-        let hook: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-        crate::deck::steer::hook_main(&hook);
-        return std::process::ExitCode::SUCCESS;
+        "steer" => {
+            crate::deck::steer::hook_main(&hook);
+            return std::process::ExitCode::SUCCESS;
+        }
+        // Outside an engagement: the approval rules only.
+        "rules" => {
+            if let Some(v) = rule_answer(&rules, &hook, &event) {
+                say(v);
+            }
+            return std::process::ExitCode::SUCCESS;
+        }
+        // Codex asks before running something its sandbox does not allow.
+        "approve" => {
+            let tool = hook["tool_name"].as_str().unwrap_or("");
+            let decision = match rules.decide(canonical_tool(tool), &hook["tool_input"]) {
+                crate::deck::approve::Verdict::Allow(_) => Some(json!({ "behavior": "allow" })),
+                crate::deck::approve::Verdict::Deny(r) => Some(json!({ "behavior": "deny",
+                    "message": format!("Refused by the approval rule `{}` set in the indra console.", r) })),
+                crate::deck::approve::Verdict::Ask => None,
+            };
+            if let Some(d) = decision {
+                say(
+                    json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": d } }),
+                );
+            }
+            return std::process::ExitCode::SUCCESS;
+        }
+        _ => {}
     }
     let spec: Option<Spec> = std::env::var("INDRA_ENGAGEMENT")
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .filter(|s: &Spec| s.validate().is_ok());
-    let hook: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
     let Some(spec) = spec else {
         // Fail closed: without its engagement, nothing runs.
         eprintln!("indra guard: no valid engagement (INDRA_ENGAGEMENT); refusing");
@@ -965,34 +1056,53 @@ pub fn guard_main(phase: &str) -> std::process::ExitCode {
         crate::deck::steer::hook_main(&hook);
         return std::process::ExitCode::SUCCESS;
     }
+    // A deny rule refuses before anything else (and is logged as the rule's).
+    if let Some(v) = rule_answer(&rules, &hook, &event) {
+        let _ = audit(
+            &dir,
+            json!({ "event": "tool", "engagement": spec.id, "session": hook["session_id"],
+                    "tool": hook["tool_name"], "input": clip(&hook["tool_input"].to_string(), 2000),
+                    "targets": [], "decision": "deny", "decided_by": "rule", "reason": v.to_string() }),
+        );
+        say(v);
+        return std::process::ExitCode::SUCCESS;
+    }
     match decide(&spec, &dir, &hook) {
         // Silence: the usual permission rules still apply.
         Decision::Allow { .. } => std::process::ExitCode::SUCCESS,
         Decision::Deny(reason) => {
-            println!(
-                "{}",
-                json!({ "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                } })
-            );
+            say(crate::deck::hooks::deny(&event, &reason));
             std::process::ExitCode::SUCCESS
         }
     }
 }
 
-/// Claude Code's `--settings` for an agent in an engagement: indra guard as
-/// its PreToolUse and PostToolUse hook, for every tool, and as its Stop hook
-/// (a steer queued as the turn ends is handed over then).
-pub fn hook_settings(exe: &Path) -> String {
-    let cmd = |p: &str| format!("\"{}\" guard {}", exe.display(), p);
-    json!({ "hooks": {
-        "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd("pre"), "timeout": 120 }] }],
-        "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd("post"), "timeout": 30 }] }],
-        "Stop": [{ "hooks": [{ "type": "command", "command": cmd("steer"), "timeout": 30 }] }],
-    } })
-    .to_string()
+/// What the approval rules say before a tool runs, as the hook's answer:
+/// a deny rule refuses; for Gemini CLI, a request its policy would allow by
+/// text that indra's stricter reading does not is put to a person.
+fn rule_answer(rules: &crate::deck::approve::Rules, hook: &Value, event: &str) -> Option<Value> {
+    use crate::deck::approve::Verdict;
+    if rules.is_empty() {
+        return None;
+    }
+    let tool = canonical_tool(hook["tool_name"].as_str().unwrap_or(""));
+    let input = &hook["tool_input"];
+    match rules.decide(tool, input) {
+        Verdict::Deny(r) => Some(crate::deck::hooks::deny(
+            event,
+            &format!("Refused by the approval rule `{}` set in the indra console. Do not try to get around it; ask the operator if it is needed.", r),
+        )),
+        Verdict::Ask if tool == "Bash" => {
+            let cmd = input["command"].as_str().unwrap_or("").trim_start();
+            let by_text = rules.allow.iter().any(|r| cmd.starts_with(&r.join(" ")));
+            if by_text {
+                crate::deck::hooks::ask(event, "Not a single plain command that an approval rule allows: a person decides.")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 // ---- the hub's store ----------------------------------------------------------------
@@ -1371,6 +1481,96 @@ mod tests {
         record_result(&s, &dir, &other("Request failed with status code 503"));
         let w = pace(&dir, &["x.lab.example.com".into()], 50.0).unwrap();
         assert!((3_000..=4_100).contains(&w), "{}", w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gemini_and_codex_calls_are_read_and_answered_in_their_format() {
+        // Gemini CLI's shell and web tools; Codex's shell (one string or argv).
+        assert_eq!(
+            hosts(
+                "run_shell_command",
+                json!({ "command": "curl https://app.example.com/x" })
+            ),
+            ["app.example.com"]
+        );
+        assert_eq!(
+            hosts(
+                "web_fetch",
+                json!({ "prompt": "Summarise https://evil.example.net/a and https://app.example.com/b" })
+            ),
+            ["evil.example.net", "app.example.com"]
+        );
+        assert_eq!(
+            hosts(
+                "Bash",
+                json!({ "command": ["bash", "-lc", "nmap 10.0.0.7"] })
+            ),
+            ["10.0.0.7"]
+        );
+        assert_eq!(
+            hosts("exec_command", json!({ "cmd": "dig db.lab.example.com" })),
+            ["db.lab.example.com"]
+        );
+        assert!(hosts(
+            "read_file",
+            json!({ "file_path": "notes/app.example.com.txt" })
+        )
+        .is_empty());
+        assert!(hosts(
+            "apply_patch",
+            json!({ "command": "*** Update File: a.example.com" })
+        )
+        .is_empty());
+        // The guard's answer in each CLI's own shape.
+        let dir = std::env::temp_dir().join(format!("indra-gemguard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = spec();
+        let call = json!({ "hook_event_name": "BeforeTool", "tool_name": "run_shell_command",
+                           "tool_input": { "command": "curl https://evil.example.net/" }, "cwd": "/" });
+        let Decision::Deny(r) = decide(&s, &dir, &call) else {
+            panic!("refused")
+        };
+        assert_eq!(
+            crate::deck::hooks::deny("BeforeTool", &r)["decision"],
+            "deny"
+        );
+        // Rules: a deny rule refuses; Gemini asks a person about what its
+        // policy would allow by text but indra would not.
+        let rules = crate::deck::approve::Rules {
+            allow: vec![vec!["git".into(), "status".into()]],
+            deny: vec![vec!["git".into(), "push".into()]],
+        };
+        let ask = |event: &str, cmd: &str| {
+            rule_answer(
+                &rules,
+                &json!({ "tool_name": "run_shell_command", "tool_input": { "command": cmd } }),
+                event,
+            )
+        };
+        assert_eq!(
+            ask("BeforeTool", "git push origin").unwrap()["decision"],
+            "deny"
+        );
+        assert_eq!(
+            ask("BeforeTool", "git status; rm -rf x").unwrap()["decision"],
+            "ask"
+        );
+        assert!(
+            ask("BeforeTool", "git status").is_none(),
+            "Gemini's own policy allows it"
+        );
+        assert!(
+            ask("PreToolUse", "git status; rm -rf x").is_none(),
+            "Claude and Codex ask by themselves"
+        );
+        let codex = rule_answer(
+            &rules,
+            &json!({ "tool_name": "Bash", "tool_input": { "command": "sudo git push" } }),
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(codex["hookSpecificOutput"]["permissionDecision"], "deny");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

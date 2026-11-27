@@ -1163,9 +1163,19 @@ pub struct AgentCommand {
     pub control: Option<Vec<String>>,
     /// A private file (the MCP config) to delete when the agent exits.
     pub temp: Option<PathBuf>,
-    /// Its recording proxy (an engagement with recording on): it runs as
-    /// long as this is kept, so keep it until the agent exits.
-    pub proxy: Option<std::sync::Arc<crate::deck::proxy::Handle>>,
+    /// What lives as long as the agent (its recording proxy, its private
+    /// hook settings, a private Codex home): keep it until the agent exits.
+    pub keep: Keep,
+}
+
+/// Things kept alive for an agent and dropped when it ends.
+#[derive(Clone, Default)]
+pub struct Keep(pub Vec<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+
+impl std::fmt::Debug for Keep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} kept", self.0.len())
+    }
 }
 
 /// The command for a runner with options. A Claude Code runner whose
@@ -1181,6 +1191,7 @@ pub fn agent_command(
 ) -> Result<AgentCommand, String> {
     o.validate()?;
     let claude = r.format == "claude-stream-json";
+    let agent = crate::deck::hooks::Agent::of(r);
     let interactive = claude
         && r.args.iter().any(|a| a == "{prompt}")
         && r.args
@@ -1246,67 +1257,142 @@ pub fn agent_command(
         }
         if o.permission_mode.is_some()
             || o.effort.is_some()
-            || o.max_budget_usd.is_some()
             || o.mcp.as_deref() == Some("none")
-            || o.engagement.is_some()
             || !o.allowed_tools.is_empty()
             || !o.disallowed_tools.is_empty()
         {
             return Err(format!(
-                "runner '{}' is not Claude Code, so permission mode, effort, a spending limit, MCP servers, engagements and tool rules do not apply to it",
+                "runner '{}' is not Claude Code, so permission mode, effort, MCP server choices and tool rules do not apply to it",
+                r.name
+            ));
+        }
+        // An engagement's hooks: Claude Code, Codex and Gemini CLI take them.
+        if o.engagement.is_some() && agent == crate::deck::hooks::Agent::Other {
+            return Err(format!(
+                "runner '{}' is not Claude Code, Codex or Gemini CLI: it takes no hooks, so it cannot run in an engagement",
+                r.name
+            ));
+        }
+        if o.max_budget_usd.is_some() && agent == crate::deck::hooks::Agent::Other {
+            return Err(format!(
+                "runner '{}' reports no spend, so a spending limit cannot be kept (Claude Code, Codex and Gemini CLI can)",
                 r.name
             ));
         }
     }
     let mut env = provider_env(r, claude, o, &mut args)?;
-    if let (true, Some(e)) = (claude, &o.engagement) {
-        // indra guard checks, paces and logs every tool call; the agent
-        // cannot change its hooks or its engagement once started.
-        let exe = std::env::current_exe().map_err(|e| format!("where is indra? {}", e))?;
-        args.push("--settings".into());
-        args.push(crate::deck::engage::hook_settings(&exe));
-        env.insert(
-            "INDRA_ENGAGEMENT".into(),
-            serde_json::to_string(e).map_err(|e| e.to_string())?,
-        );
-    }
+    let mut keep: Vec<std::sync::Arc<dyn std::any::Any + Send + Sync>> = Vec::new();
+    use crate::deck::hooks::Agent;
+    // Logins each CLI takes from its environment.
+    login_env(agent, &program, &mut env, &mut keep)?;
     // Recording: its web traffic goes through its own recording proxy.
-    let mut proxy = None;
-    if let (true, Some(e)) = (claude, &o.engagement) {
-        if e.record {
-            let urls: Vec<String> = o
-                .mcp_servers
-                .values()
-                .filter(|s| !s.url.is_empty())
-                .map(|s| s.url.clone())
-                .collect();
-            let current: Vec<(String, String)> =
-                env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let pass = crate::deck::proxy::passthrough_for(&current, &urls);
-            let label = o
-                .steer
-                .clone()
-                .unwrap_or_else(|| crate::deck::link::random_token(6));
-            let h = crate::deck::proxy::start(
-                e.clone(),
-                crate::deck::engage::local_dir(&e.id),
-                &label,
-                pass.clone(),
-            )?;
-            for (k, v) in h.env(&pass) {
-                env.insert(k, v);
-            }
-            proxy = Some(std::sync::Arc::new(h));
+    if let Some(e) = o.engagement.as_ref().filter(|e| e.record) {
+        let urls: Vec<String> = o
+            .mcp_servers
+            .values()
+            .filter(|s| !s.url.is_empty())
+            .map(|s| s.url.clone())
+            .collect();
+        let current: Vec<(String, String)> =
+            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let pass = crate::deck::proxy::passthrough_for(agent, &current, &urls);
+        let label = o
+            .steer
+            .clone()
+            .unwrap_or_else(|| crate::deck::link::random_token(6));
+        let h = crate::deck::proxy::start(
+            e.clone(),
+            crate::deck::engage::local_dir(&e.id),
+            &label,
+            pass.clone(),
+        )?;
+        for (k, v) in h.env(&pass) {
+            env.insert(k, v);
         }
+        keep.push(std::sync::Arc::new(h));
     }
-    if let (true, Some(t)) = (claude && interactive, &o.steer) {
-        // Steering: queued messages reach it after its next tool call.
-        if o.engagement.is_none() {
-            let exe = std::env::current_exe().map_err(|e| format!("where is indra? {}", e))?;
-            args.push("--settings".into());
-            args.push(crate::deck::steer::hook_settings(&exe));
+    // indra's hooks: the engagement's guard, steering and approval rules.
+    // The agent cannot change its hooks or its engagement once started.
+    let w = crate::deck::hooks::Wanted {
+        engagement: o.engagement.is_some(),
+        steer: o.steer.is_some() && (interactive || matches!(agent, Agent::Codex | Agent::Gemini)),
+        rules: !o.approvals.is_empty(),
+        allow: agent == Agent::Codex && !o.approvals.allow.is_empty(),
+    };
+    if w.any() && agent != Agent::Other {
+        if let Some(e) = &o.engagement {
+            env.insert(
+                "INDRA_ENGAGEMENT".into(),
+                serde_json::to_string(e).map_err(|e| e.to_string())?,
+            );
         }
-        env.insert("INDRA_STEER".into(), t.clone());
+        if let (true, Some(t)) = (w.steer, &o.steer) {
+            env.insert("INDRA_STEER".into(), t.clone());
+        }
+        if w.rules {
+            env.insert(
+                "INDRA_APPROVALS".into(),
+                serde_json::to_string(&o.approvals).map_err(|e| e.to_string())?,
+            );
+        }
+        let exe = std::env::current_exe().map_err(|e| format!("where is indra? {}", e))?;
+        match agent {
+            Agent::Claude => {
+                if let Some(set) = crate::deck::hooks::claude_settings(&exe, w) {
+                    args.push("--settings".into());
+                    args.push(set);
+                }
+            }
+            Agent::Codex => {
+                let mut extra = crate::deck::hooks::codex_args(&exe, w);
+                // An engagement's agent reaches its targets through the
+                // network its sandbox would otherwise close.
+                let sandboxed = !args.iter().any(|a| {
+                    a == "-s"
+                        || a == "--sandbox"
+                        || a.starts_with("--sandbox=")
+                        || a == "--dangerously-bypass-approvals-and-sandbox"
+                });
+                if w.engagement && sandboxed {
+                    extra.extend(
+                        [
+                            "-s",
+                            "workspace-write",
+                            "-c",
+                            "sandbox_workspace_write.network_access=true",
+                        ]
+                        .map(String::from),
+                    );
+                }
+                // Options go after the subcommand (`codex exec ...`).
+                let at = args
+                    .iter()
+                    .position(|a| a == "exec")
+                    .map(|i| i + 1)
+                    .unwrap_or(args.len());
+                args.splice(at..at, extra);
+            }
+            Agent::Gemini => {
+                let mut hook_env: BTreeMap<String, String> = BTreeMap::new();
+                for k in ["INDRA_ENGAGEMENT", "INDRA_STEER", "INDRA_APPROVALS"] {
+                    if let Some(v) = env.get(k) {
+                        hook_env.insert(k.into(), v.clone());
+                    }
+                }
+                // Where indra keeps its data, so the hook finds the same folder.
+                for k in ["XDG_DATA_HOME", "LOCALAPPDATA", "HOME", "USERPROFILE"] {
+                    if let Some(v) = env.get(k).cloned().or_else(|| std::env::var(k).ok()) {
+                        hook_env.insert(k.into(), v);
+                    }
+                }
+                let (dir, e2, a2) =
+                    crate::deck::hooks::gemini_setup(&exe, w, &o.approvals, &hook_env)?;
+                env.extend(e2);
+                args.extend(a2);
+                keep.push(std::sync::Arc::new(dir));
+            }
+            Agent::Other => {}
+        }
     }
     // MCP & tools (other runners do not take MCP servers). Last, as
     // --mcp-config takes every value up to the next flag.
@@ -1335,8 +1421,109 @@ pub fn agent_command(
         env: env.into_iter().collect(),
         control,
         temp,
-        proxy,
+        keep: Keep(keep),
     })
+}
+
+/// Logins a CLI takes from its environment, set up for it:
+///
+/// - Codex: an API key in OPENAI_API_KEY is also its CODEX_API_KEY; an
+///   access token in CODEX_ACCESS_TOKEN (an OpenAI agent identity token) is
+///   logged in to a private Codex home that links the rest of the user's.
+/// - Gemini CLI: a Google OAuth access token in GOOGLE_CLOUD_ACCESS_TOKEN
+///   turns on Login with Google (GOOGLE_GENAI_USE_GCA).
+fn login_env(
+    agent: crate::deck::hooks::Agent,
+    program: &std::path::Path,
+    env: &mut BTreeMap<String, String>,
+    keep: &mut Vec<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+) -> Result<(), String> {
+    use crate::deck::hooks::Agent;
+    let has = |env: &BTreeMap<String, String>, k: &str| env.get(k).is_some_and(|v| !v.is_empty());
+    match agent {
+        Agent::Codex => {
+            if has(env, "OPENAI_API_KEY") && !has(env, "CODEX_API_KEY") {
+                let k = env["OPENAI_API_KEY"].clone();
+                env.insert("CODEX_API_KEY".into(), k);
+            }
+            if has(env, "CODEX_ACCESS_TOKEN") && !has(env, "CODEX_HOME") {
+                let home = codex_home_with_token(program, &env["CODEX_ACCESS_TOKEN"])?;
+                env.insert("CODEX_HOME".into(), home.0.display().to_string());
+                keep.push(std::sync::Arc::new(home));
+            }
+        }
+        Agent::Gemini
+            if has(env, "GOOGLE_CLOUD_ACCESS_TOKEN") && !has(env, "GOOGLE_GENAI_USE_GCA") =>
+        {
+            env.insert("GOOGLE_GENAI_USE_GCA".into(), "true".into());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// A private Codex home for one agent: everything in the user's own
+/// (config, rules, sessions) linked in, and its own login from `token`.
+fn codex_home_with_token(
+    program: &std::path::Path,
+    token: &str,
+) -> Result<crate::deck::hooks::TempDir, String> {
+    use std::io::Write;
+    let real = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::paths::home().map(|h| h.join(".codex")));
+    let dir = crate::deck::hooks::private_dir("codex-homes")?;
+    if let Some(real) = real.filter(|r| r.is_dir()) {
+        for e in std::fs::read_dir(&real)
+            .map_err(|e| format!("{}: {}", real.display(), e))?
+            .flatten()
+        {
+            let name = e.file_name();
+            if name == "auth.json" {
+                continue;
+            }
+            #[cfg(unix)]
+            let _ = std::os::unix::fs::symlink(e.path(), dir.0.join(&name));
+            #[cfg(not(unix))]
+            if e.path().is_file() {
+                let _ = std::fs::copy(e.path(), dir.0.join(&name));
+            }
+        }
+    }
+    let mut child = std::process::Command::new(program)
+        .args(["login", "--with-access-token"])
+        .env("CODEX_HOME", &dir.0)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {} login: {}", program.display(), e))?;
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(token.trim().as_bytes());
+        let _ = i.write_all(b"\n");
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("codex login: {}", e))?;
+    if !out.status.success() || !dir.0.join("auth.json").exists() {
+        let why = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .chain(String::from_utf8_lossy(&out.stdout).lines())
+            .filter(|l| {
+                !l.starts_with("WARNING")
+                    && !l.trim().is_empty()
+                    && !l.contains("Reading access token")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(format!(
+            "Codex did not accept the access token (an OpenAI agent identity token is expected): {}",
+            crate::mem::search::truncate(&why, 300)
+        ));
+    }
+    Ok(dir)
 }
 
 fn is(p: &Option<String>, name: &str) -> bool {
@@ -1412,14 +1599,15 @@ pub(crate) fn provider_env(
                         env.get(k)
                             .filter(|v| !v.is_empty())
                             .cloned()
-                            .ok_or_else(|| format!("fallback {}: its key {} is not in the agent's environment (set it in the profile, e.g. {} = \"secret:name\")", f.url, k, k))?,
+                            .ok_or_else(|| format!("fallback {}: its key {} is not in the agent's environment (set it in the profile, e.g. {} = \"secret:name\")", f.base(), k, k))?,
                     ),
                     None => None,
                 };
                 Ok(crate::deck::router::Upstream {
-                    base: if f.url == "ollama" { ollama.clone() } else { f.url.clone() },
+                    base: if f.url == "ollama" { ollama.clone() } else { f.base().to_string() },
                     model: f.model.clone(),
                     key,
+                    oauth: f.kind.as_deref() == Some("oauth_token"),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1543,7 +1731,11 @@ mod tests {
             "{:?}",
             ac.args
         );
-        assert!(agent_command(&codex, "go", t, None, &o)
+        // Codex and Gemini CLI report tokens: indra keeps the limit itself.
+        let ac = agent_command(&codex, "go", t, None, &o).unwrap();
+        assert!(!ac.args.iter().any(|a| a == "--max-budget-usd"));
+        let aider = runner("aider", "text", &["{prompt}"], &[]);
+        assert!(agent_command(&aider, "go", t, None, &o)
             .unwrap_err()
             .contains("spending limit"));
         assert_eq!(budget_arg(3.0), "3");
@@ -1714,7 +1906,129 @@ mod tests {
         }
         assert!(agent_command(&gemini, "go", t, None, &none)
             .unwrap_err()
-            .contains("MCP servers"));
+            .contains("MCP server"));
+    }
+
+    #[test]
+    fn codex_and_gemini_get_hooks_rules_and_logins() {
+        let t = std::path::Path::new("/t");
+        let spec = crate::deck::engage::Spec {
+            id: "abcd1234".into(),
+            name: "lab".into(),
+            scope: vec!["app.example.com".into()],
+            starts: crate::deck::engage::now() - 10,
+            ends: crate::deck::engage::now() + 3600,
+            rate: 2.0,
+            ..Default::default()
+        };
+        let rules = crate::deck::approve::Rules {
+            allow: vec![vec!["git".into(), "status".into()]],
+            deny: vec![vec!["git".into(), "push".into()]],
+        };
+        let o = AgentOpts {
+            engagement: Some(spec),
+            steer: Some(crate::deck::steer::new_token()),
+            approvals: rules.clone(),
+            max_budget_usd: Some(3.0),
+            ..Default::default()
+        };
+        // Codex: hooks as -c overrides right after `exec`, the trust bypass,
+        // and the network its sandbox would close.
+        let codex = runner(
+            "codex",
+            "codex-json",
+            &["exec", "--json", "{prompt}"],
+            &["-m", "{model}"],
+        );
+        let ac = agent_command(&codex, "go", t, None, &o).unwrap();
+        assert_eq!(ac.args[0], "exec");
+        assert!(
+            ac.args[1] == "-c" && ac.args[2].starts_with("hooks.PreToolUse="),
+            "{:?}",
+            ac.args
+        );
+        assert!(ac.args.iter().any(|a| a.contains("guard pre")));
+        assert!(ac
+            .args
+            .iter()
+            .any(|a| a.starts_with("hooks.PermissionRequest=") && a.contains("guard approve")));
+        assert!(ac
+            .args
+            .iter()
+            .any(|a| a == "--dangerously-bypass-hook-trust"));
+        assert!(ac.args.windows(2).any(|w| w == ["-s", "workspace-write"]));
+        assert_eq!(ac.args.last().unwrap(), "go", "the prompt stays last");
+        let env: BTreeMap<_, _> = ac.env.iter().cloned().collect();
+        assert!(env.contains_key("INDRA_ENGAGEMENT") && env.contains_key("INDRA_STEER"));
+        let r: crate::deck::approve::Rules = serde_json::from_str(&env["INDRA_APPROVALS"]).unwrap();
+        assert_eq!(r, rules);
+        // Its own sandbox choice is kept.
+        let own = runner(
+            "codex",
+            "codex-json",
+            &["exec", "-s", "read-only", "{prompt}"],
+            &[],
+        );
+        let ac = agent_command(&own, "go", t, None, &o).unwrap();
+        assert!(!ac.args.iter().any(|a| a == "workspace-write"));
+
+        // Gemini CLI: a private system settings file with the hooks, and a
+        // policy file for the rules.
+        let gemini = runner(
+            "gemini",
+            "gemini-stream-json",
+            &["-p", "{prompt}", "--output-format", "stream-json"],
+            &[],
+        );
+        let ac = agent_command(&gemini, "go", t, None, &o).unwrap();
+        let env: BTreeMap<_, _> = ac.env.iter().cloned().collect();
+        let file = PathBuf::from(&env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]);
+        let set: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(set["hooks"]["BeforeTool"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("guard pre"));
+        assert!(set["hooks"]["AfterAgent"][0]["hooks"][0]["env"]["INDRA_STEER"].is_string());
+        let pol = ac.args.iter().position(|a| a == "--policy").unwrap();
+        assert!(std::fs::read_to_string(&ac.args[pol + 1])
+            .unwrap()
+            .contains("commandPrefix = \"git status\""));
+        drop(ac);
+        assert!(
+            !file.exists(),
+            "removed when the agent's command is dropped"
+        );
+
+        // Logins from the environment.
+        let mut env = BTreeMap::new();
+        env.insert(
+            "GOOGLE_CLOUD_ACCESS_TOKEN".to_string(),
+            "ya29.x".to_string(),
+        );
+        let mut keep = Vec::new();
+        login_env(
+            crate::deck::hooks::Agent::Gemini,
+            Path::new("/x"),
+            &mut env,
+            &mut keep,
+        )
+        .unwrap();
+        assert_eq!(env["GOOGLE_GENAI_USE_GCA"], "true");
+        let mut env = BTreeMap::new();
+        env.insert("OPENAI_API_KEY".to_string(), "sk-x".to_string());
+        login_env(
+            crate::deck::hooks::Agent::Codex,
+            Path::new("/x"),
+            &mut env,
+            &mut keep,
+        )
+        .unwrap();
+        assert_eq!(env["CODEX_API_KEY"], "sk-x");
+        // Another runner still cannot be in an engagement.
+        let aider = runner("aider", "text", &["{prompt}"], &[]);
+        assert!(agent_command(&aider, "go", t, None, &o)
+            .unwrap_err()
+            .contains("engagement"));
     }
 
     #[test]

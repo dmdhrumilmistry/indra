@@ -93,6 +93,11 @@ fallback = [
 env = { GW_KEY = "secret:gateway" }
 ```
 
+A fallback can also name an `[[account]]` instead of a key: `{ account = "team-max" }` sends the
+request to Anthropic's API with that account's credential, an API key or a Claude subscription OAuth
+token (sent as a bearer token with Anthropic's OAuth beta flag), so a second subscription or a team
+key can carry a session when the first is rate limited.
+
 indra points the agent at its model router, which sends each request to Anthropic first and, only
 when that fails, to each fallback in turn, with the request's model rewritten to the fallback's. The
 agent's own login never goes to a fallback: each gets its own key (from `api_key_env`, which indra

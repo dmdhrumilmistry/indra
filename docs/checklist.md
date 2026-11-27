@@ -171,6 +171,19 @@ See [Ideas from ARTEX](artex-comparison.md) for the reasoning and the order.
 - [x] Untrusted output framing for indra's own MCP servers, data sources and recorded traffic
 - [x] Failover between model providers in the router
 
+## Every agent, every login
+
+- [x] Codex and Gemini CLI in engagements: guard, steering and approval rules as their hooks
+      (tested against both CLIs with a stand-in model server and the real `indra guard`)
+- [x] Codex and Gemini output read (`codex-json`, `gemini-stream-json`): tools, sessions, tokens
+- [x] Spend estimated from tokens (`[[price]]`), spending limits kept by indra for every agent and
+      login, engagement budgets and account limits counting the same spend
+- [x] OAuth accounts for Codex (agent identity token) and Gemini CLI (Google access token)
+- [x] Model fallbacks through accounts (API key or Claude subscription OAuth token)
+- [ ] Approve a Codex or Gemini request from the console (they have no control channel indra
+      drives yet: Codex's app server, Gemini's ACP mode)
+- [ ] Test the Codex PermissionRequest hook against a real request that needs approval
+
 ## Not planned yet (the docs say so)
 
 - [ ] OS keychain backend for secrets

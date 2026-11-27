@@ -1831,7 +1831,7 @@
           h("label", null, "Budget (US$)", h("small", { text: "What all its agents may spend together: told to wrap up at 90%, stopped at 100%." }), budget)),
         h("label", { class: "check" }, record, h("span", { text: "Record traffic: its agents' web requests go through indra's recording proxy, which enforces the scope on every connection and keeps each request and response as evidence." })),
         h("label", null, "Authorization", h("small", { text: "Required. Kept with the engagement and in its audit log." }), auth),
-        h("p", { class: "muted small", text: "Agents in it are Claude Code with indra guard as a hook: it refuses tool calls that name a host outside the scope or run outside the window, paces calls per host, and logs every call. With recording on, the proxy also checks every connection the programs make (redirects included). A program that ignores the proxy settings is not seen: for hard enforcement, also firewall the machine to the scope." }),
+        h("p", { class: "muted small", text: "Agents in it are Claude Code, Codex or Gemini CLI with indra guard as a hook: it refuses tool calls that name a host outside the scope or run outside the window, paces calls per host, and logs every call. With recording on, the proxy also checks every connection the programs make (redirects included). A program that ignores the proxy settings is not seen: for hard enforcement, also firewall the machine to the scope." }),
         h("div", { class: "row" }, go, h("button", { type: "button", onclick: function () { formBox.textContent = ""; } }, "Cancel")));
       formBox.appendChild(form); name.focus();
     }
@@ -1839,7 +1839,14 @@
       box.textContent = "";
       var prompt = h("textarea", { required: true, rows: "4", placeholder: "What should the agent do, within this engagement's scope?" });
       var folder = h("select", { "aria-label": "Folder" });
-      var profile = h("select", { "aria-label": "Profile" }, [h("option", { value: "", text: "default" })].concat((S.ov.profiles || []).filter(function (p) { return !p.runner || p.runner === "claude"; }).map(function (p) { return h("option", { value: p.name, text: p.name }); })));
+      var runner = h("select", { "aria-label": "Agent" }, [["claude", "Claude Code"], ["codex", "Codex"], ["gemini", "Gemini CLI"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      var profile = h("select", { "aria-label": "Profile" });
+      function profiles() {
+        profile.textContent = "";
+        profile.appendChild(h("option", { value: "", text: "default" }));
+        (S.ov.profiles || []).filter(function (p) { return !p.runner || p.runner === runner.value; }).forEach(function (p) { profile.appendChild(h("option", { value: p.name, text: p.name })); });
+      }
+      runner.addEventListener("change", profiles); profiles();
       loadNodes(false).then(function (ns) {
         var n = ns.find(function (x) { return x.name === e.machine; });
         (n ? n.targets : []).forEach(function (t, i) { folder.appendChild(h("option", { value: String(i), text: t })); });
@@ -1848,10 +1855,12 @@
       var go = h("button", { type: "submit", class: "primary" }, "Run in this engagement");
       box.appendChild(h("form", { class: "form", onsubmit: function (ev) {
         ev.preventDefault(); go.disabled = true;
-        api("/api/procs", { method: "POST", body: { h: S.h, node: e.machine, runner: "claude", prompt: prompt.value, target: Number(folder.value), profile: profile.value || null, engagement: e.id } })
+        api("/api/procs", { method: "POST", body: { h: S.h, node: e.machine, runner: runner.value, prompt: prompt.value, target: Number(folder.value), profile: profile.value || null, engagement: e.id } })
           .then(function (r) { location.hash = "#/sessions/" + r.id; })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
-      } }, h("label", null, "Task", prompt), h("div", { class: "fields" }, h("label", null, "Folder on " + e.machine, folder), h("label", null, "Profile", profile)), h("div", { class: "row" }, go)));
+      } }, h("label", null, "Task", prompt), h("div", { class: "fields" }, h("label", null, "Agent", runner), h("label", null, "Folder on " + e.machine, folder), h("label", null, "Profile", profile)),
+        h("p", { class: "muted small", text: "Codex runs with --dangerously-bypass-hook-trust so indra's hooks run without a review in Codex: hooks you already enabled in your Codex config run that way too." }),
+        h("div", { class: "row" }, go)));
       prompt.focus();
     }
     function auditView(e, box) {
@@ -2489,7 +2498,7 @@
           h("td", { text: p.node + (p.host && p.node !== "local" ? " (" + p.host + ")" : "") }), h("td", { text: p.runner + (p.model ? " - " + p.model : "") }),
           h("td", { class: "desc" }, h("div", { text: p.prompt.length > 90 ? p.prompt.slice(0, 88) + "..." : p.prompt }), p.last ? h("div", { class: "muted", text: p.last }) : null),
           h("td", { text: String(p.agents.length) }),
-          h("td", { text: p.cost_usd != null ? "$" + p.cost_usd.toFixed(4) : "-" }),
+          h("td", { text: p.cost_usd != null ? (p.cost_estimated ? "about " : "") + "$" + p.cost_usd.toFixed(4) : "-", title: p.cost_estimated ? "Estimated from token prices ([[price]])" : "" }),
           h("td", { class: "muted", text: ago(p.started) }));
       }))));
   }
@@ -3459,7 +3468,8 @@
           api("/api/procs/" + last.id + "/stop", { method: "POST" }).then(refresh).catch(function (e) { toast(e.message, true); });
         } }, "Stop") : null;
         // Steer: read after its next tool call, without waiting for the turn.
-        var steer = last.open && last.status === "running" && last.opts && last.opts.steer ? h("button", { type: "button", title: "The agent reads it after its next tool call, without waiting for its turn to end", onclick: function () {
+        // Codex and Gemini agents take no follow-up, but do take a steer.
+        var steer = last.status === "running" && last.opts && last.opts.steer ? h("button", { type: "button", title: "The agent reads it after its next tool call, without waiting for its turn to end", onclick: function () {
           var t = box.value.trim(); if (!t) { toast("Type the message first", true); return; }
           steer.disabled = true;
           api("/api/procs/" + last.id + "/steer", { method: "POST", body: { text: t } })
@@ -3945,7 +3955,7 @@
         ? termLink(p.status === "running" ? "Fork in terminal" : "Open in terminal", { what: "agent", proc: p.id })
         : null;
       if (shellBtn) shellBtn.title = p.status === "running" ? "Opens a branch of its session (--fork-session), so the agent is not disturbed" : "Continues its session interactively";
-      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", text: "$" + p.cost_usd.toFixed(4) }) : null,
+      top.appendChild(header("Process #" + p.id + " - " + p.runner + (p.node !== "local" ? " on " + p.node : ""), (p.host && p.node !== "local" ? p.host + ":" : "") + p.cwd, [statusPill(p.status), p.cost_usd != null ? h("span", { class: "pill", title: p.cost_estimated ? "Estimated from token prices ([[price]])" : "", text: (p.cost_estimated ? "about " : "") + "$" + p.cost_usd.toFixed(4) }) : null,
         p.account ? h("a", { class: "pill", href: "#/accounts", title: "The account it runs with", text: /^login:/.test(p.account) ? "this machine's login" : "account " + p.account }) : null, shellBtn, stop]));
       top.appendChild(h("div", { class: "cmd", text: p.prompt }));
       top.appendChild(lineage);
@@ -4963,7 +4973,8 @@
       { k: "description", label: "Description" },
       { k: "agent", label: "Agent", type: "select", options: [["", "Claude Code"], ["codex", "Codex"], ["gemini", "Gemini CLI"]].concat(cfgRunnerNames(c).filter(function (r) { return ["claude", "codex", "gemini"].indexOf(r) < 0; }).map(function (r) { return [r, r + " (runner)"]; })) },
       { k: "credential", label: "Credential", req: true, placeholder: "secret:anthropic-work", help: "A secret reference: add the key in the Secrets tab first. Claude subscription: run `claude setup-token` and store the token; API keys work for every agent. The value goes only to the agent, also on remote nodes, which then need no login of their own." },
-      { k: "kind", label: "Kind", type: "select", options: [["", "API key"], ["oauth_token", "Claude subscription token (claude setup-token)"]] },
+      { k: "kind", label: "Kind", type: "select", options: [["", "API key"], ["oauth_token", "OAuth token: Claude (claude setup-token), Codex (an agent identity token) or Gemini (a Google access token)"]],
+        help: "An OAuth token goes in CLAUDE_CODE_OAUTH_TOKEN, CODEX_ACCESS_TOKEN (indra logs it in to a private Codex home) or GOOGLE_CLOUD_ACCESS_TOKEN (Login with Google). A Google access token expires within the hour." },
       { k: "env", label: "Environment variable", placeholder: "by agent: ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, GEMINI_API_KEY", help: "Only for other agents, or to override." },
       { k: "daily_usd", label: "Daily limit (USD)", type: "number", placeholder: "none" },
       { k: "monthly_usd", label: "Monthly limit (USD)", type: "number", placeholder: "none" },
@@ -5041,7 +5052,8 @@
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
       { k: "approvals", label: "Bash commands indra decides", type: "approvals" },
       { k: "fallback", label: "When Anthropic fails (429, 5xx, overloaded), try", type: "rows", noun: "fallback", fields: [
-        { k: "url", label: "Where", req: true, placeholder: "ollama, or https://gateway.example.com", help: "ollama: this machine's Ollama (or the server above). A URL: any Anthropic-compatible endpoint." },
+        { k: "url", label: "Where", placeholder: "ollama, or https://gateway.example.com", help: "ollama: this machine's Ollama (or the server above). A URL: any Anthropic-compatible endpoint. Empty with an account: Anthropic's API." },
+        { k: "account", label: "Account", placeholder: "an [[account]] name", help: "A Claude account whose credential this fallback uses: its API key, or its subscription OAuth token (sent as a bearer token)." },
         { k: "model", label: "Model", placeholder: "qwen3-coder", help: "Requests are rewritten to this model. Required for Ollama." },
         { k: "api_key_env", label: "Its key, from this environment variable", placeholder: "GW_KEY", help: "Set it in Environment as GW_KEY=secret:<name>. The agent's own login never goes to a fallback." }] },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },

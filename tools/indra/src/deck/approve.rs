@@ -88,10 +88,15 @@ impl Rules {
 
     /// Decide a tool request.
     pub fn decide(&self, tool: &str, input: &Value) -> Verdict {
-        if self.is_empty() || tool != "Bash" {
+        if self.is_empty() || crate::deck::engage::canonical_tool(tool) != "Bash" {
             return Verdict::Ask;
         }
-        let Some(cmd) = input.get("command").and_then(Value::as_str) else {
+        // One string (Claude Code, Gemini CLI, Codex hooks) or Codex's `cmd`.
+        let Some(cmd) = input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(Value::as_str)
+        else {
             return Verdict::Ask;
         };
         let parsed = parse(cmd);
