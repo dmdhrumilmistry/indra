@@ -30,7 +30,19 @@ indra, which indra already has, and in what order to build the rest. The open it
 | LLM profiles | Profiles, the model router, Ollama | Failover to another provider |
 | Secrets at rest | The encrypted secrets store | None |
 
-## To build, in order
+## Built in 0.18.0
+
+Every item below is in indra 0.18.0 (see the [changelog](../CHANGELOG.md)), except a budget across a
+whole workflow: an engagement has one, and a workflow's agents keep their own spending limits. The
+guides: [engagements](guides/engagements.md) (recording proxy, traffic as evidence, coverage, budget,
+backoff), [pivoting](guides/pivoting.md#steer-without-stopping) (steering),
+[processes](guides/processes.md#approval-rules-by-command) (approval rules),
+[the review loop](guides/review-loop.md) (lessons, coverage, retests) and
+[local models](guides/local-models.md#when-anthropic-fails-fallbacks) (fallbacks). Steering ended up on
+the PostToolUse and Stop hooks rather than PreToolUse, so a message also reaches an agent whose turn
+ends before its next tool call.
+
+## The order they were planned in
 
 1. **Coverage.** For an engagement: in-scope hosts against the hosts the audit log shows were
    touched. For a review: entry points in `codebase-map.json` against the attempts ledger. Both come

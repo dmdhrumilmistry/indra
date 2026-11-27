@@ -544,10 +544,22 @@ pub async fn findings(
     Query(q): Query<RunQ>,
 ) -> ApiResult<Json<Value>> {
     let dir = run_dir(&app, q.h.as_deref(), &q.key)?;
+    let retests = crate::deck::retest::latest(&dir);
     let list: Vec<Value> = lines_of(&dir)?
         .iter()
         .enumerate()
-        .filter_map(|(i, l)| l.as_ref().ok().map(|f| brief(i, f)))
+        .filter_map(|(i, l)| {
+            l.as_ref().ok().map(|f| {
+                let mut b = brief(i, f);
+                if let Some(r) = b["fingerprint"].as_str().and_then(|fp| retests.get(fp)) {
+                    b["retest"] = r.clone();
+                }
+                if let Some(n) = f["evidence_traffic"].as_array().map(|a| a.len()) {
+                    b["evidence"] = json!(n);
+                }
+                b
+            })
+        })
         .collect();
     Ok(Json(json!({ "findings": list })))
 }
@@ -590,6 +602,20 @@ pub async fn triage(
         _ => return Err(bad("that finding changed or moved; reload the run")),
     };
     let from = crate::findings::field(f, "status");
+    // What this outcome teaches the next review of this codebase.
+    let lesson_err = app
+        .lessons
+        .record(
+            &crate::deck::lessons::target_of(&dir),
+            &dir.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            f,
+            "triage",
+            &r.status,
+            &reason,
+        )
+        .err();
     if let Some(o) = f.as_object_mut() {
         o.insert("status".into(), json!(r.status));
         o.insert(
@@ -597,7 +623,10 @@ pub async fn triage(
             json!({ "from": from, "to": r.status, "reason": reason, "at": crate::mem::time::now_iso(), "by": "console" }),
         );
     }
-    let out = brief(r.index, f);
+    let mut out = brief(r.index, f);
+    if let Some(e) = lesson_err {
+        out["lesson_error"] = json!(e);
+    }
     let text: String = lines
         .iter()
         .map(|l| match l {

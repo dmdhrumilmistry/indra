@@ -35,6 +35,7 @@ reads and writes these exact paths and shapes.
 | `chains.md` | sh-chainer | verifier, reporter | Escalation chains referencing finding ids. See format below. |
 | `verified.jsonl` | sh-verifier | reporter | Final findings (candidate objects re-emitted with updated `status`, `verification`, `cvss`, `poc`, `confidence`). |
 | `reports/` | sh-reporter | user | `README.md`, `findings.json`, `results.sarif`, `report.html`, `report.pdf` (+ `report.docx` when pandoc present). |
+| `retests.jsonl` | `indra review retest` (the sh-retest skill) | the console, the next review | One line per retest of a finding: `{ "finding", "fingerprint", "verdict": "reproducible|fixed|cannot-confirm", "why", "mode": "static|live", "exchange", "commit", "at" }`. Append-only; the latest line per fingerprint is the finding's current retest. `verified.jsonl` is never changed by a retest. |
 
 ### `codebase-map.json` schema (recon output)
 

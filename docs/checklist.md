@@ -154,20 +154,22 @@ their section; nothing is deleted, items are checked off with the change that di
       sh-hardening skills
 - [x] Attack surface graph on a run: entry points to components to findings and CVEs; what is reachable
       from the internet or after login, with paths; CVE reachability from recon; sh-attack-surface
-- [ ] Recording proxy and evidence-verified findings
+- [x] Recording proxy and evidence-verified findings (`indra traffic`, `evidence_traffic`, Check evidence)
 
 ## From the ARTEX comparison
 
 See [Ideas from ARTEX](artex-comparison.md) for the reasoning and the order.
 
-- [ ] Coverage: in-scope hosts against the audit log; entry points against the attempts ledger
-- [ ] Steering through `indra guard pre`: a queued instruction delivered before the next tool call
-- [ ] Lessons with evidence: cue, action and source finding; withdrawn when the triage is reversed
-- [ ] Pacing profiles and backoff on 429 and 503; a budget across an engagement or workflow
-- [ ] Approval rules by argv prefix, and who decided each approval
-- [ ] Retest a finding: Still reproducible, Fixed or Cannot confirm
-- [ ] Untrusted output framing for indra's own MCP server and data sources
-- [ ] Failover between model providers in the router
+- [x] Coverage: in-scope hosts against the audit log; entry points against the attempts ledger
+- [x] Steering: a queued message delivered after the next tool call (PostToolUse) or as the turn
+      ends (Stop), through `indra guard steer`
+- [x] Lessons with evidence: cue, action and source finding; withdrawn when the triage is reversed
+- [x] Pacing presets and backoff on 429 and 503; a budget across an engagement
+- [ ] A budget across a workflow (an engagement has one; a workflow's agents each have their own)
+- [x] Approval rules by argv prefix, and who decided each approval
+- [x] Retest a finding: reproducible, fixed or cannot confirm (static, or live by replaying traffic)
+- [x] Untrusted output framing for indra's own MCP servers, data sources and recorded traffic
+- [x] Failover between model providers in the router
 
 ## Not planned yet (the docs say so)
 

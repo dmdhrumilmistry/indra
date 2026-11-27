@@ -3,6 +3,41 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.18.0
+
+Ideas from [ARTEX](https://github.com/BaaRai/ARTEX) (see `docs/artex-comparison.md`), written fresh for
+indra.
+
+- **Recording proxy for engagements.** With **Record traffic** on (the default), each agent's web
+  requests go through its own proxy, which checks the scope on every connection (the name and every
+  address it resolves to, connecting only to an address it checked), paces each host, and records
+  each request and response by SHA-256. HTTPS is read with a certificate authority made for that one
+  agent, whose key never touches the disk; the agent's own model API is tunnelled untouched.
+- **Findings backed by traffic.** A finding cites the exchanges that prove it (`evidence_traffic`, with
+  a role and a quote). `indra traffic list|show|verify|replay`, the engagement's **Traffic** view, and
+  **Check evidence** on a run say whether each citation still holds.
+- **Retest a finding.** **Retest** on a finding (or the new `sh-retest` skill) re-checks it against the
+  code as it is now, or replays its recorded traffic inside an engagement, and records reproducible,
+  fixed or cannot confirm in the run's `retests.jsonl`. `indra review retest` records one by hand.
+- **Lessons with evidence.** Triage and retests turn into lessons for the codebase, each tied to the
+  findings it came from: reversing a triage withdraws that evidence. The next review hands its hunters
+  the lessons for their class (`indra lessons`). Knowledge > Lessons lists them; adopt or retire one.
+- **Coverage.** An engagement shows which scope entries its agents reached and which not yet; a review
+  run shows which entry points and classes its hunters probed.
+- **Steer now.** A message the agent reads after its next tool call, mid-turn, without stopping it
+  (Claude Code agents started from the console, here or on machines that dial in).
+- **Approval rules by command.** `[approvals]` (and a profile's `approvals`) allow or deny Bash requests
+  by their first words. An allow covers one plain command only; a deny is found anywhere, behind
+  `sudo`, `sh -c` or in a pipeline. Each decision says who made it: a rule or a person.
+- **Noise and budgets.** Pace presets (quiet, careful, balanced, aggressive); a host that answers 429
+  or 503 is backed off by its `Retry-After`. An engagement's **budget** caps what all its agents spend:
+  told to wrap up at 90%, stopped at 100%.
+- **Model fallbacks.** A profile's `fallback` list takes Claude Code's model calls when Anthropic fails
+  (429, 5xx, overloaded): a gateway with its own key, or a local model on Ollama. The agent's login
+  never goes to a fallback.
+- **Untrusted output, framed.** SIEM search results, workflow files read from repositories and recorded
+  responses reach agents between nonce-tagged markers, as data, not instructions.
+
 ## v0.17.0
 
 - **Own branch per agent.** **Work on its own branch** under Run an agent gives the agent a git

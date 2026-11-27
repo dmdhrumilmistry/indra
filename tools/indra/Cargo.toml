@@ -1,6 +1,6 @@
 [package]
 name = "indra"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Run, watch and orchestrate AI coding agents (Claude Code, Codex, Gemini, Ollama) across machines: a web console, workflows with conditions and loops, boards, an MCP server and graph memory, in one binary."
@@ -30,7 +30,7 @@ fancy-regex = "0.20.2"
 regex = "1"
 # The model router (src/deck/router.rs): a streaming HTTP client. All of
 # these are already in the tree through axum and tokio-tungstenite.
-hyper = { version = "1", features = ["client", "http1"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -40,6 +40,7 @@ webpki-roots = "0.26"
 # Console users' passwords (src/deck/users.rs); salts come from getrandom.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 clap_complete = "4.5"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 
 [features]
 default = ["webrtc"]

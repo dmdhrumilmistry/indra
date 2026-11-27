@@ -48,6 +48,10 @@ pub struct ConfigFile {
     /// organization's defaults.toml or managed.toml, deployed by MDM).
     #[serde(skip_serializing_if = "JoinCfg::is_empty")]
     pub join: JoinCfg,
+    /// Bash commands decided without asking, by their first words:
+    /// `allow = [["git", "status"]]`, `deny = [["git", "push"]]`.
+    #[serde(skip_serializing_if = "crate::deck::approve::Rules::is_empty")]
+    pub approvals: crate::deck::approve::Rules,
 }
 
 /// `[join]`: which hub this machine joins, for `indra join` without arguments.
@@ -1130,6 +1134,14 @@ pub struct ProfileCfg {
     /// letting routing choose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Bash commands its agents' requests are decided by, on top of
+    /// `[approvals]`: `approvals = { allow = [["cargo", "test"]] }`.
+    #[serde(default, skip_serializing_if = "crate::deck::approve::Rules::is_empty")]
+    pub approvals: crate::deck::approve::Rules,
+    /// Where Claude Code's model calls go when Anthropic fails, in order:
+    /// `fallback = [{ url = "ollama", model = "qwen3-coder" }]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<crate::deck::router::Fallback>,
 }
 
 impl ProfileCfg {
@@ -1141,6 +1153,8 @@ impl ProfileCfg {
             max_budget_usd: self.max_budget_usd,
             mcp: self.mcp.clone(),
             engagement: None,
+            steer: None,
+            approvals: self.approvals.clone(),
             mcp_servers: Default::default(),
             allowed_tools: self.allowed_tools.clone(),
             disallowed_tools: self.disallowed_tools.clone(),
@@ -1159,6 +1173,7 @@ impl ProfileCfg {
             provider: none_if_empty(&self.provider),
             subagent_provider: none_if_empty(&self.subagent_provider),
             ollama_url: none_if_empty(&self.ollama_url),
+            fallback: self.fallback.clone(),
         }
     }
 }
@@ -1309,6 +1324,8 @@ pub struct Settings {
     pub workflow_errors: Vec<String>,
     /// Where `.indra/workflows/` is looked for: harness roots and targets.
     pub repo_dirs: Vec<PathBuf>,
+    /// `[approvals]`: Bash commands every agent's requests are decided by.
+    pub approvals: crate::deck::approve::Rules,
 }
 
 /// Settings that the console can replace while it runs (after a config
@@ -2221,6 +2238,9 @@ pub fn build_settings(
         });
     }
 
+    file.approvals
+        .validate()
+        .map_err(|e| format!("[approvals]: {}", e))?;
     unique("profile", file.profile.iter().map(|p| p.name.as_str()))?;
     // The default profiles, under any configured with the same name.
     let mut profiles = file.profile.clone();
@@ -2606,6 +2626,7 @@ pub fn build_settings(
         shell_steps: file.local.shell_steps.unwrap_or(true),
         workflow_errors,
         repo_dirs,
+        approvals: file.approvals.clone(),
     })
 }
 

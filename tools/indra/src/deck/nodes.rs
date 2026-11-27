@@ -902,6 +902,14 @@ pub struct AgentOpts {
     /// against its scope and window, paces it and logs it (Claude Code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engagement: Option<crate::deck::engage::Spec>,
+    /// Its steering token: messages the console queues under it reach the
+    /// agent after its next tool call (Claude Code). Only the console sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<String>,
+    /// Bash requests decided without asking, by command prefix (from
+    /// `[approvals]` and the profile; never from a launch request).
+    #[serde(default, skip_serializing_if = "crate::deck::approve::Rules::is_empty")]
+    pub approvals: crate::deck::approve::Rules,
     /// MCP servers from MCP & tools (references until launch). Only the
     /// console sets them, from its configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -925,6 +933,10 @@ pub struct AgentOpts {
     /// The Ollama server (default http://localhost:11434).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ollama_url: Option<String>,
+    /// Where Claude Code's model calls go, in order, when its Anthropic
+    /// endpoint fails (through the model router; never with its own login).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<crate::deck::router::Fallback>,
 }
 
 /// A spending limit as Claude Code takes it: dollars and cents.
@@ -1043,6 +1055,18 @@ impl AgentOpts {
         if let Some(e) = &self.engagement {
             e.validate()?;
         }
+        if let Some(t) = &self.steer {
+            if !crate::deck::steer::valid_token(t) {
+                return Err("bad steering token".into());
+            }
+        }
+        self.approvals.validate()?;
+        if self.fallback.len() > 5 {
+            return Err("at most 5 fallbacks".into());
+        }
+        for f in &self.fallback {
+            f.validate()?;
+        }
         for (name, s) in &self.mcp_servers {
             s.validate(name)?;
         }
@@ -1093,6 +1117,9 @@ impl AgentOpts {
         if other.mcp.is_some() {
             o.mcp = other.mcp.clone();
         }
+        if !other.fallback.is_empty() {
+            o.fallback = other.fallback.clone();
+        }
         // Never `engagement`: only the console sets it, from its own store.
         if !other.allowed_tools.is_empty() {
             o.allowed_tools = other.allowed_tools.clone();
@@ -1136,6 +1163,9 @@ pub struct AgentCommand {
     pub control: Option<Vec<String>>,
     /// A private file (the MCP config) to delete when the agent exits.
     pub temp: Option<PathBuf>,
+    /// Its recording proxy (an engagement with recording on): it runs as
+    /// long as this is kept, so keep it until the agent exits.
+    pub proxy: Option<std::sync::Arc<crate::deck::proxy::Handle>>,
 }
 
 /// The command for a runner with options. A Claude Code runner whose
@@ -1240,6 +1270,44 @@ pub fn agent_command(
             serde_json::to_string(e).map_err(|e| e.to_string())?,
         );
     }
+    // Recording: its web traffic goes through its own recording proxy.
+    let mut proxy = None;
+    if let (true, Some(e)) = (claude, &o.engagement) {
+        if e.record {
+            let urls: Vec<String> = o
+                .mcp_servers
+                .values()
+                .filter(|s| !s.url.is_empty())
+                .map(|s| s.url.clone())
+                .collect();
+            let current: Vec<(String, String)> =
+                env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let pass = crate::deck::proxy::passthrough_for(&current, &urls);
+            let label = o
+                .steer
+                .clone()
+                .unwrap_or_else(|| crate::deck::link::random_token(6));
+            let h = crate::deck::proxy::start(
+                e.clone(),
+                crate::deck::engage::local_dir(&e.id),
+                &label,
+                pass.clone(),
+            )?;
+            for (k, v) in h.env(&pass) {
+                env.insert(k, v);
+            }
+            proxy = Some(std::sync::Arc::new(h));
+        }
+    }
+    if let (true, Some(t)) = (claude && interactive, &o.steer) {
+        // Steering: queued messages reach it after its next tool call.
+        if o.engagement.is_none() {
+            let exe = std::env::current_exe().map_err(|e| format!("where is indra? {}", e))?;
+            args.push("--settings".into());
+            args.push(crate::deck::steer::hook_settings(&exe));
+        }
+        env.insert("INDRA_STEER".into(), t.clone());
+    }
     // MCP & tools (other runners do not take MCP servers). Last, as
     // --mcp-config takes every value up to the next flag.
     let mut temp = None;
@@ -1267,6 +1335,7 @@ pub fn agent_command(
         env: env.into_iter().collect(),
         control,
         temp,
+        proxy,
     })
 }
 
@@ -1303,6 +1372,7 @@ pub(crate) fn provider_env(
             ));
         }
     }
+    let mut local = Vec::new();
     if is(&o.subagent_provider, "ollama") && !is(&o.provider, "ollama") {
         if !claude {
             return Err(format!(
@@ -1317,6 +1387,42 @@ pub(crate) fn provider_env(
         else {
             return Err("set the subagent model: the Ollama model the subagents run on".into());
         };
+        local.push(sub);
+    }
+    if !o.fallback.is_empty() {
+        if !claude {
+            return Err(format!(
+                "runner '{}' is not Claude Code: model fallbacks go through indra's model router, which only Claude Code uses",
+                r.name
+            ));
+        }
+        if is(&o.provider, "ollama") {
+            return Err(
+                "an agent that runs on Ollama has no Anthropic endpoint to fall back from".into(),
+            );
+        }
+    }
+    if !local.is_empty() || !o.fallback.is_empty() {
+        let fallbacks = o
+            .fallback
+            .iter()
+            .map(|f| -> Result<crate::deck::router::Upstream, String> {
+                let key = match &f.api_key_env {
+                    Some(k) => Some(
+                        env.get(k)
+                            .filter(|v| !v.is_empty())
+                            .cloned()
+                            .ok_or_else(|| format!("fallback {}: its key {} is not in the agent's environment (set it in the profile, e.g. {} = \"secret:name\")", f.url, k, k))?,
+                    ),
+                    None => None,
+                };
+                Ok(crate::deck::router::Upstream {
+                    base: if f.url == "ollama" { ollama.clone() } else { f.url.clone() },
+                    model: f.model.clone(),
+                    key,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         // Whatever the main agent used before (a gateway, say) stays its upstream.
         let anthropic = env
             .get("ANTHROPIC_BASE_URL")
@@ -1325,11 +1431,18 @@ pub(crate) fn provider_env(
             .unwrap_or_else(|| "https://api.anthropic.com".into());
         let base = crate::deck::router::register(crate::deck::router::Route {
             ollama,
-            local: vec![sub],
+            local,
             anthropic,
             all_local: false,
+            fallbacks,
         })?;
         env.insert("ANTHROPIC_BASE_URL".into(), base);
+        // A fallback key is the router's to send, not the agent's.
+        for f in &o.fallback {
+            if let Some(k) = &f.api_key_env {
+                env.remove(k);
+            }
+        }
     }
     Ok(env)
 }

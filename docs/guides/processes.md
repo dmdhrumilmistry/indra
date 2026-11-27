@@ -52,7 +52,8 @@ message in the stream.
 
 An agent run through a Claude Code runner asks the console before using a tool its permission
 mode does not allow: answer under **Waiting for you** on its page (Allow, Allow always, Deny). The
-same page changes its permission mode or model, interrupts the current turn, or sends a follow-up.
+same page changes its permission mode or model, interrupts the current turn, sends a follow-up, or
+[steers it mid-turn](pivoting.md#steer-without-stopping). Each answer records who gave it.
 See [agent control](../../tools/indra/README.md#agent-control) and
 [profiles](../../tools/indra/README.md#profiles). An agent waiting for an answer waits
 indefinitely; workflows that run unattended should use a profile whose permission mode and tool
@@ -146,6 +147,33 @@ format  = "claude-stream-json"
 
 On a remote node the node's own `indra` config decides which runners exist; the hub only names
 one.
+
+### Approval rules by command
+
+Some Bash requests can be decided without asking, by the command's first words. Rules go in
+`[approvals]` in indra.toml (every agent started from the console) or in a profile (its agents, on
+top of those), and in **Settings > Profiles > Bash commands indra decides**:
+
+```toml
+[approvals]
+allow = [["git", "status"], ["git", "diff"], ["cargo", "test"]]
+deny  = [["git", "push"], ["rm", "-rf"]]
+```
+
+The two kinds read a command differently, on purpose:
+
+- **allow** matches only a single plain command that starts with the rule's words: no pipe, list
+  (`;`, `&&`, `||`), background job, redirection, subshell, variable assignment, wrapper program
+  (`sudo`, `env`, `xargs`, `sh -c`, `find -exec`, ...), substitution (`$(...)`, backticks), `$VAR`, `~`
+  or glob. Flags count as words: `["git", "push"]` covers `git push --force`, while `git -C repo push`
+  matches nothing and is asked.
+- **deny** matches anywhere: in every command of a list or pipeline, inside substitutions, behind
+  wrappers (`sudo git push`, `env X=1 git push`, `sh -c 'git push'`, `xargs git push`). Deny wins.
+
+Anything no rule decides is asked as before, and other tools are never decided by these rules. The
+session says which rule decided each request (`allowed Bash: git status (decided by the rule `git
+status`)`), and a person's answer says who gave it; in an engagement, the audit log records
+`decided_by` too.
 
 ## When the console exits
 

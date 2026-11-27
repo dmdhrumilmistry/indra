@@ -38,6 +38,8 @@ enum ReviewCmd {
     Metrics(MetricsArgs),
     /// Post the review to the PR and set the commit status (needs `gh`, logged in)
     Post(PostArgs),
+    /// Record a retest of one finding: reproducible, fixed or cannot-confirm (the sh-retest skill)
+    Retest(crate::deck::retest::RetestArgs),
 }
 
 pub fn run(a: ReviewArgs) -> Result<ExitCode, String> {
@@ -45,6 +47,7 @@ pub fn run(a: ReviewArgs) -> Result<ExitCode, String> {
         ReviewCmd::Cache(c) => cache(c),
         ReviewCmd::Metrics(m) => metrics(m),
         ReviewCmd::Post(p) => post(p),
+        ReviewCmd::Retest(r) => crate::deck::retest::cli(r),
     }
 }
 

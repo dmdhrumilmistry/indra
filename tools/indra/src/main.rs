@@ -91,6 +91,20 @@ enum Cmd {
     Mcp(deck::cli::McpArgs),
     /// SIEM and log sources (Wazuh, Elastic, OpenSearch, Splunk, files): list, test, search, mcp
     Siem(deck::cli::SiemArgs),
+    /// What an engagement's recording proxy kept: list, show, verify findings' evidence, replay
+    Traffic(deck::traffic::TrafficArgs),
+    /// What earlier reviews of a codebase proved (from triage and retests), for its next run
+    Lessons {
+        /// The codebase (default: this folder)
+        #[arg(long)]
+        target: Option<String>,
+        /// Only this vulnerability class (e.g. sqli)
+        #[arg(long)]
+        class: Option<String>,
+        /// As JSON, with the evidence
+        #[arg(long)]
+        json: bool,
+    },
     /// Accounts agents run with: what each used today and this month, and its limits
     Accounts(deck::cli::AccountsArgs),
     /// Console users and roles: add, list, passwd, role, rm
@@ -98,8 +112,8 @@ enum Cmd {
     /// Claude Code's hook for agents in an engagement (scope, window, pace, audit); indra sets it up
     #[command(hide = true)]
     Guard {
-        /// pre (before a tool runs: allow or refuse) or post (record what came of it)
-        #[arg(value_parser = ["pre", "post"])]
+        /// pre (before a tool runs: allow or refuse), post (record what came of it) or steer (hand over queued messages)
+        #[arg(value_parser = ["pre", "post", "steer"])]
         phase: String,
     },
     /// Maintainer tools: build the website
@@ -136,6 +150,8 @@ fn main() -> ExitCode {
             | Cmd::Node(_)
             | Cmd::Mcp(_)
             | Cmd::Guard { .. }
+            | Cmd::Lessons { .. }
+            | Cmd::Traffic(_)
             | Cmd::Siem(_)
             | Cmd::Dev { .. }
     ) {
@@ -165,6 +181,12 @@ fn main() -> ExitCode {
         Cmd::Review(a) => review::run(a),
         Cmd::Skills(a) => skills::run(a),
         Cmd::Guard { phase } => return deck::engage::guard_main(&phase),
+        Cmd::Traffic(a) => return deck::traffic::run(a),
+        Cmd::Lessons {
+            target,
+            class,
+            json,
+        } => return deck::lessons::cli(target.as_deref(), class.as_deref(), json),
         Cmd::Dev {
             cmd: DevCmd::Site(a),
         } => site::run(a),

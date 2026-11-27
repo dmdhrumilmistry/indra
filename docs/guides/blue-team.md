@@ -102,7 +102,11 @@ point `ca_file` at that authority's certificate. `insecure_tls = true` skips the
 | Log files | Only the configured paths, read and never written |
 
 Requests go through `curl`, with the credentials on its standard input, never on a command line.
-Results are labelled as untrusted data for the agents that read them.
+Results are untrusted data for the agents that read them: `siem_search` returns them between two
+markers that carry a random nonce made for that one answer, with a note that what is inside is data
+from the source, never instructions. Text inside cannot close the frame early, since it cannot know
+the nonce. indra's workflow MCP server frames the workflow files it reads from repositories the same
+way, and `indra traffic show` and `replay` frame what a target sent back.
 
 ## Search from the terminal
 

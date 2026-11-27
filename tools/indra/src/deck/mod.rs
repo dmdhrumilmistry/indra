@@ -2,6 +2,7 @@
 //! runs AI agent harnesses (the security harness by default).
 
 pub mod accounts;
+pub mod approve;
 pub mod attach;
 pub mod autostart;
 pub mod board;
@@ -17,6 +18,7 @@ pub mod enroll;
 pub mod flow;
 pub mod integrations;
 pub mod knowledge;
+pub mod lessons;
 pub mod link;
 pub mod managed;
 pub mod market;
@@ -24,14 +26,19 @@ pub mod mcp;
 pub mod nodes;
 pub mod ollama;
 pub mod procs;
+pub mod proxy;
+pub mod retest;
 pub mod router;
 pub mod runs;
 pub mod secrets;
 pub mod siem;
+pub mod steer;
 pub mod surface;
 pub mod term;
 pub mod tools;
 pub mod trackers;
+pub mod traffic;
+pub mod untrusted;
 pub mod users;
 pub mod web;
 pub mod workflows;

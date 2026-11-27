@@ -66,6 +66,8 @@ pub struct App {
     pub enroll: crate::deck::enroll::Keys,
     /// Engagements: tests of live systems inside a written scope.
     pub engagements: crate::deck::engage::Store,
+    /// What earlier reviews proved, per codebase, from triage and retests.
+    pub lessons: crate::deck::lessons::Lessons,
 }
 
 /// What the console needs to edit the config file and apply the result.
@@ -108,6 +110,7 @@ impl App {
         let users = crate::deck::users::Users::open(&settings.data_dir);
         let enroll = crate::deck::enroll::Keys::open(&settings.data_dir);
         let engagements = crate::deck::engage::Store::open(&settings.data_dir);
+        let lessons = crate::deck::lessons::Lessons::open(&settings.data_dir);
         let data_dir = settings.data_dir.clone();
         let shared = config::Shared::new(settings);
         procs.set_accounts(Arc::new(crate::deck::accounts::Accounts::new(
@@ -131,6 +134,7 @@ impl App {
             users,
             enroll,
             engagements,
+            lessons,
         })
     }
 
@@ -917,6 +921,19 @@ async fn run_surface(State(app): State<Arc<App>>, Query(q): Query<RunQ>) -> ApiR
         .ok_or_else(|| not_found("this run has no codebase map (codebase-map.json) to draw"))
 }
 
+/// `GET /api/run/coverage?key=`: which entry points and classes the run's
+/// hunters probed (its attempts ledger and findings), and which they did not.
+async fn run_coverage(
+    State(app): State<Arc<App>>,
+    Query(q): Query<RunQ>,
+) -> ApiResult<Json<Value>> {
+    let h = &app.harness(q.h.as_deref())?;
+    let dir = find_run(&app, h, &q.key)?;
+    crate::deck::surface::coverage(&dir)
+        .map(Json)
+        .ok_or_else(|| not_found("this run has no codebase map (codebase-map.json)"))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct LaunchReq {
     h: Option<String>,
@@ -1007,6 +1024,7 @@ fn local_folders(app: &App) -> Option<Vec<String>> {
 
 /// WebRTC on or off, and its ICE servers, for nodes that dial in.
 fn apply_link_settings(procs: &Procs, s: &Settings) {
+    procs.set_approvals(s.approvals.clone());
     let l = procs.links();
     l.webrtc.store(
         s.webrtc && cfg!(feature = "webrtc"),
@@ -1090,6 +1108,112 @@ fn hub_audit(app: &App, id: &str, entry: Value) {
     }
 }
 
+/// What the agents of an engagement have spent so far (US dollars), as
+/// their runners reported it.
+fn engagement_spent(app: &App, id: &str) -> f64 {
+    app.procs
+        .list()
+        .iter()
+        .filter(|p| {
+            p.opts
+                .engagement
+                .as_ref()
+                .map(|e| e.id == id)
+                .unwrap_or(false)
+        })
+        .filter_map(|p| p.cost_usd)
+        .fold(0.0, |a, b| a + b)
+}
+
+/// Hand `text` to a running agent after its next tool call (or as its turn
+/// ends), on whichever machine it runs.
+async fn steer_proc(app: &App, p: &crate::deck::procs::Proc, text: &str) -> Result<(), String> {
+    if !p.is_running() {
+        return Err("the agent is not running".into());
+    }
+    let token = p
+        .opts()
+        .steer
+        .clone()
+        .ok_or("this agent cannot be steered: only Claude Code agents started from the console can (send a follow-up instead)")?;
+    let node = p.node_name().to_string();
+    if node == LOCAL {
+        crate::deck::steer::queue(&token, text)?;
+    } else {
+        let link = app
+            .procs
+            .links()
+            .get(&node)
+            .filter(|l| l.connected())
+            .ok_or_else(|| format!("{} is not connected over its link (steering does not go over SSH); send a follow-up instead", node))?;
+        link.request("steer", json!({ "token": token, "text": text }), 15)
+            .await?;
+    }
+    p.note_steer(text);
+    Ok(())
+}
+
+/// Engagements with a budget: near it (90%), their running agents are
+/// told to wrap up; at it, they are stopped. Each step once.
+async fn check_budgets(app: &App) {
+    use std::sync::Mutex;
+    static DONE: Mutex<Option<std::collections::HashSet<(String, u64, u8)>>> = Mutex::new(None);
+    let t = crate::deck::engage::now();
+    for e in app.engagements.list() {
+        let Some(b) = e.budget_usd else { continue };
+        if !e.spec.active(t) {
+            continue;
+        }
+        let spent = engagement_spent(app, &e.spec.id);
+        let level = if spent >= b {
+            2
+        } else if spent >= 0.9 * b {
+            1
+        } else {
+            continue;
+        };
+        for v in app.procs.list() {
+            if v.status != "running"
+                || v.opts
+                    .engagement
+                    .as_ref()
+                    .map(|x| x.id != e.spec.id)
+                    .unwrap_or(true)
+            {
+                continue;
+            }
+            let key = (e.spec.id.clone(), v.id, level);
+            {
+                let mut d = DONE.lock().unwrap_or_else(|x| x.into_inner());
+                if !d.get_or_insert_with(Default::default).insert(key) {
+                    continue;
+                }
+            }
+            let Some(p) = app.procs.get(v.id) else {
+                continue;
+            };
+            if level == 2 {
+                p.note_system(format!(
+                    "stopped: the engagement '{}' spent its budget (${:.2} of ${:.2})",
+                    e.spec.name, spent, b
+                ));
+                p.request_stop();
+            } else {
+                let _ = steer_proc(app, &p, &format!(
+                    "The engagement '{}' has spent ${:.2} of its ${:.2} budget. Wrap up now: record what you found, with its evidence, and finish. Start nothing new.",
+                    e.spec.name, spent, b
+                )).await;
+            }
+            hub_audit(
+                app,
+                &e.spec.id,
+                json!({ "event": if level == 2 { "budget-stop" } else { "budget-wrap-up" }, "proc": v.id,
+                        "spent_usd": spent, "budget_usd": b }),
+            );
+        }
+    }
+}
+
 /// The engagement a launch asks for, checked: it exists, it is active, the
 /// agent runs on its machine with a Claude Code runner, and that machine's
 /// indra can enforce it.
@@ -1147,6 +1271,12 @@ fn engagement_for(
                 node, v
             )));
         }
+        if e.spec.record && !version_at_least(v, (0, 18, 0)) {
+            return Err(bad(format!(
+                "{} runs indra {}, which has no recording proxy: update it there (`indra update`, then `indra node restart`)",
+                node, v
+            )));
+        }
     }
     Ok(e.spec)
 }
@@ -1195,10 +1325,25 @@ pub(crate) async fn proc_start(
             } else {
                 None
             };
-            Some(engagement_for(&app, id, node, runner)?)
+            let spec = engagement_for(&app, id, node, runner)?;
+            // Its budget: what is left of it caps this agent too.
+            if let Some(b) = app.engagements.get(id).and_then(|e| e.budget_usd) {
+                let spent = engagement_spent(&app, id);
+                if spent >= b {
+                    return Err(bad(format!(
+                        "the engagement '{}' has spent its budget (${:.2} of ${:.2})",
+                        spec.name, spent, b
+                    )));
+                }
+                let left = b - spent;
+                agent.max_budget_usd = Some(agent.max_budget_usd.map_or(left, |m| m.min(left)));
+            }
+            Some(spec)
         }
         None => None,
     };
+    // Its steering token: the console can reach it mid-turn (Claude Code).
+    agent.steer = Some(crate::deck::steer::new_token());
     // MCP & tools: its profile's, and the ones the launch picked. Only the
     // console's configuration sets MCP servers, never the request.
     agent.mcp_servers = crate::deck::integrations::servers_for(
@@ -2040,6 +2185,7 @@ pub fn start_scheduler(app: Arc<App>) {
                 continue;
             }
             refresh_repo_workflows(&app);
+            check_budgets(&app).await;
             let minute = runs::now() / 60;
             let when = crate::deck::cron::now_local();
             for w in app.settings().workflows.iter() {
@@ -2218,6 +2364,7 @@ async fn proc_permission(
         r.always,
         r.message.as_deref(),
         r.answers.as_ref(),
+        &who.user,
     )
     .map_err(bad)?;
     if let Some(e) = &p.opts().engagement {
@@ -2225,7 +2372,8 @@ async fn proc_permission(
             &app,
             &e.id,
             json!({ "event": "approval", "user": who.user, "proc": id, "request": r.request_id,
-                    "decision": if r.allow { "allow" } else { "deny" }, "always": r.always }),
+                    "decision": if r.allow { "allow" } else { "deny" }, "always": r.always,
+                    "decided_by": "human" }),
         );
     }
     Ok(Json(json!({ "ok": true })))
@@ -2282,6 +2430,28 @@ async fn proc_message(
     let p = running_proc(&app, id)?;
     let text = check_prompt(&r.text)?;
     p.say(text).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/procs/{id}/steer`: a message the agent reads after its next
+/// tool call, without waiting for its turn to end.
+async fn proc_steer(
+    State(app): State<Arc<App>>,
+    axum::Extension(who): axum::Extension<crate::deck::users::Who>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<MessageReq>,
+) -> ApiResult<Json<Value>> {
+    let p = running_proc(&app, id)?;
+    let text = check_prompt(&r.text)?;
+    steer_proc(&app, &p, text).await.map_err(bad)?;
+    if let Some(e) = &p.opts().engagement {
+        hub_audit(
+            &app,
+            &e.id,
+            json!({ "event": "steer", "user": who.user, "proc": id,
+                    "text": crate::mem::search::truncate(text, 2000) }),
+        );
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -3173,6 +3343,273 @@ async fn merged_audit(
     entries.retain(|x| seen.insert(x["hash"].as_str().unwrap_or("").to_string()));
     entries.sort_by_key(|x| x["ts"].as_u64().unwrap_or(0));
     (entries, intact, machine)
+}
+
+/// Ask the machine an engagement runs on about its recorded traffic.
+async fn traffic_request(
+    app: &App,
+    e: &crate::deck::engage::Engagement,
+    mut args: Value,
+) -> ApiResult<Value> {
+    args["id"] = json!(e.spec.id);
+    if e.machine == LOCAL {
+        return crate::deck::traffic::local_request(&args).map_err(bad);
+    }
+    let link = app
+        .procs
+        .links()
+        .get(&e.machine)
+        .filter(|l| l.connected())
+        .ok_or_else(|| {
+            bad(format!(
+                "{} is not connected: its recordings cannot be read now",
+                e.machine
+            ))
+        })?;
+    link.request("traffic", args, 30).await.map_err(bad)
+}
+
+#[derive(Deserialize)]
+struct TrafficQ {
+    host: Option<String>,
+    q: Option<String>,
+    limit: Option<u64>,
+}
+
+/// `GET /api/engagements/{id}/traffic`: what the recording proxy kept,
+/// newest first (`host`, `q` to filter).
+async fn engagement_traffic(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<TrafficQ>,
+) -> ApiResult<Json<Value>> {
+    let e = app
+        .engagements
+        .get(&id)
+        .ok_or_else(|| not_found("no such engagement"))?;
+    let v = traffic_request(
+        &app,
+        &e,
+        json!({ "op": "list", "host": q.host, "grep": q.q, "limit": q.limit.unwrap_or(200) }),
+    )
+    .await?;
+    Ok(Json(
+        json!({ "record": e.spec.record, "machine": e.machine, "exchanges": v }),
+    ))
+}
+
+/// `GET /api/engagements/{id}/traffic/{xid}`: one exchange, secret headers
+/// masked, the start of each body.
+async fn engagement_exchange(
+    State(app): State<Arc<App>>,
+    UrlPath((id, xid)): UrlPath<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let e = app
+        .engagements
+        .get(&id)
+        .ok_or_else(|| not_found("no such engagement"))?;
+    if !crate::deck::traffic::valid_id(&xid) {
+        return Err(bad("bad exchange id"));
+    }
+    Ok(Json(
+        traffic_request(&app, &e, json!({ "op": "show", "exchange": xid })).await?,
+    ))
+}
+
+/// `GET /api/run/evidence?key=`: the traffic evidence the run's findings
+/// cite, checked on the machines that recorded it.
+async fn run_evidence(
+    State(app): State<Arc<App>>,
+    Query(q): Query<RunQ>,
+) -> ApiResult<Json<Value>> {
+    let h = &app.harness(q.h.as_deref())?;
+    let dir = find_run(&app, h, &q.key)?;
+    let findings = crate::findings::load(&dir).map_err(bad)?;
+    let mut by_eng: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+    let mut out = Vec::new();
+    for f in findings {
+        let cites = f["evidence_traffic"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if cites.is_empty() {
+            continue;
+        }
+        let engs: std::collections::BTreeSet<String> = cites
+            .iter()
+            .filter_map(|c| c["engagement"].as_str().map(String::from))
+            .collect();
+        if engs.len() != 1 {
+            out.push(json!({ "id": f["id"], "title": f["title"], "verified": false,
+                             "why": "each citation must name the one engagement that recorded it" }));
+            continue;
+        }
+        by_eng
+            .entry(engs.into_iter().next().unwrap())
+            .or_default()
+            .push(f);
+    }
+    for (eid, fs) in by_eng {
+        match app.engagements.get(&eid) {
+            None => out.extend(fs.iter().map(|f| json!({ "id": f["id"], "title": f["title"], "verified": false, "why": format!("no engagement {}", eid) }))),
+            Some(e) => match traffic_request(&app, &e, json!({ "op": "verify", "findings": fs })).await {
+                Ok(v) => out.extend(v.as_array().cloned().unwrap_or_default()),
+                Err(ApiError(_, msg)) => out.extend(fs.iter().map(|f| json!({ "id": f["id"], "title": f["title"], "verified": false, "why": msg.clone() }))),
+            },
+        }
+    }
+    Ok(Json(json!({ "findings": out })))
+}
+
+#[derive(Deserialize)]
+struct RetestReq {
+    h: Option<String>,
+    key: String,
+    fingerprint: String,
+    /// Retest it live, inside this engagement (its machine must be this one).
+    #[serde(default)]
+    engagement: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// `POST /api/run/retest`: start an agent that retests one finding of a run
+/// (the sh-retest skill) and records its verdict in the run's retests.jsonl.
+async fn run_retest(
+    State(app): State<Arc<App>>,
+    who: axum::Extension<crate::deck::users::Who>,
+    Json(r): Json<RetestReq>,
+) -> ApiResult<Json<Value>> {
+    let h = app.harness(r.h.as_deref())?;
+    let dir = find_run(&app, &h, &r.key)?;
+    let findings = crate::findings::load(&dir).map_err(bad)?;
+    let f = findings
+        .iter()
+        .find(|f| crate::findings::fingerprint(f) == r.fingerprint)
+        .ok_or_else(|| bad("that finding is not in the run (reload it)"))?;
+    let target = crate::deck::lessons::target_of(&dir);
+    let targets = node_targets(&app, &h, LOCAL)?;
+    let idx = targets
+        .iter()
+        .position(|t| crate::deck::lessons::target_key(t) == target)
+        .ok_or_else(|| bad(format!("a retest runs in the run's codebase ({}), which is not a folder agents work in on this machine", target)))?;
+    let id = crate::findings::field(f, "id");
+    let live = match r.engagement.as_deref().filter(|e| !e.is_empty()) {
+        Some(eid) => {
+            let e = app
+                .engagements
+                .get(eid)
+                .ok_or_else(|| bad("no such engagement"))?;
+            if e.machine != LOCAL {
+                return Err(bad(
+                    "a live retest runs on this machine: the engagement runs elsewhere",
+                ));
+            }
+            if f["evidence_traffic"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
+            {
+                return Err(bad(
+                    "this finding cites no recorded traffic to replay; retest it statically",
+                ));
+            }
+            format!(
+                "This agent runs inside the authorized engagement '{}' (id {}). Retest it live: replay the traffic it cites with `indra traffic replay <exchange>` (scope, window and pace apply), compare the new responses with the cited quotes, and record with --mode live and the new exchange id.",
+                e.spec.name, e.spec.id
+            )
+        }
+        None => "Retest it statically, against the code as it is now (--mode static).".to_string(),
+    };
+    let prompt = format!(
+        "Use the sh-retest skill.\n\nRun: {}\nFinding: {} ({}), fingerprint {}\n{}\n\nRecord the verdict with `indra review retest`. Do not edit verified.jsonl or the reports.",
+        dir.display(),
+        if id.is_empty() { "(no id)".to_string() } else { id },
+        crate::mem::search::truncate(&crate::findings::field(f, "title"), 200),
+        r.fingerprint,
+        live
+    );
+    let req = LaunchReq {
+        h: r.h.clone(),
+        node: None,
+        runner: String::new(),
+        prompt,
+        target: idx,
+        profile: r.profile.clone().filter(|p| !p.is_empty()),
+        opts: Default::default(),
+        memory: Some(false),
+        reflect: Some(false),
+        engagement: r.engagement.clone().filter(|e| !e.is_empty()),
+        tools: vec![],
+        worktree: false,
+    };
+    proc_launch(State(app.clone()), who, Json(req)).await
+}
+
+#[derive(Deserialize)]
+struct LessonsQ {
+    target: Option<String>,
+    class: Option<String>,
+}
+
+/// `GET /api/lessons[?target=&class=]`: lessons with their evidence (all,
+/// or those a run on `target` would be given, with the block it would read).
+async fn lessons_list(State(app): State<Arc<App>>, Query(q): Query<LessonsQ>) -> Json<Value> {
+    use crate::deck::lessons;
+    match q.target.as_deref().filter(|t| !t.is_empty()) {
+        Some(t) => {
+            let sel = app.lessons.select(
+                &lessons::target_key(t),
+                q.class.as_deref().filter(|c| !c.is_empty()),
+            );
+            Json(
+                json!({ "lessons": sel.iter().map(lessons::view).collect::<Vec<_>>(), "block": lessons::render(&sel) }),
+            )
+        }
+        None => {
+            let mut all = app.lessons.list();
+            all.sort_by_key(|l| std::cmp::Reverse(l.updated));
+            Json(json!({ "lessons": all.iter().map(lessons::view).collect::<Vec<_>>() }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LessonStatus {
+    status: String,
+}
+
+/// `POST /api/lessons/{id}`: a person adopts, retires or reopens a lesson.
+async fn lesson_status(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<u64>,
+    Json(r): Json<LessonStatus>,
+) -> ApiResult<Json<Value>> {
+    if app.settings().read_only {
+        return Err(forbidden("indra is running read-only"));
+    }
+    let l = app.lessons.set_status(id, &r.status).map_err(bad)?;
+    Ok(Json(crate::deck::lessons::view(&l)))
+}
+
+/// `GET /api/engagements/{id}/coverage`: which scope entries its agents
+/// reached (from the audit log: tool calls the guard allowed, and requests
+/// the recording proxy passed), and which none did yet.
+async fn engagement_coverage(
+    State(app): State<Arc<App>>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let e = app
+        .engagements
+        .get(&id)
+        .ok_or_else(|| not_found("no such engagement"))?;
+    let (entries, intact, machine) = merged_audit(&app, &e).await;
+    let mut v = crate::deck::engage::coverage(&e.spec, &entries);
+    v["audit_intact"] = json!(intact);
+    v["machine"] = json!(machine);
+    v["spent_usd"] = json!(engagement_spent(&app, &id));
+    v["budget_usd"] = json!(e.budget_usd);
+    Ok(Json(v))
 }
 
 #[derive(Deserialize, Default)]
@@ -4486,6 +4923,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/run", get(run_get))
         .route("/api/run/file", get(run_file))
         .route("/api/run/surface", get(run_surface))
+        .route("/api/run/coverage", get(run_coverage))
         .route("/api/procs", get(procs_list).post(proc_launch))
         .route("/api/nodes", get(nodes_list))
         .route("/api/nodes/enrol", post(node_enrol))
@@ -4504,6 +4942,16 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/api/engagements/{id}/end", post(engagement_end))
         .route("/api/engagements/{id}/audit", get(engagement_audit))
+        .route("/api/engagements/{id}/coverage", get(engagement_coverage))
+        .route("/api/lessons", get(lessons_list))
+        .route("/api/engagements/{id}/traffic", get(engagement_traffic))
+        .route(
+            "/api/engagements/{id}/traffic/{xid}",
+            get(engagement_exchange),
+        )
+        .route("/api/run/evidence", get(run_evidence))
+        .route("/api/run/retest", post(run_retest))
+        .route("/api/lessons/{id}", post(lesson_status))
         .route(
             "/api/engagements/{id}/detections",
             post(engagement_detections),
@@ -4529,6 +4977,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/procs/{id}/permission", post(proc_permission))
         .route("/api/procs/{id}/control", post(proc_control))
         .route("/api/procs/{id}/message", post(proc_message))
+        .route("/api/procs/{id}/steer", post(proc_steer))
         .route("/api/procs/{id}/events", get(proc_events))
         .route("/api/procs/{id}/workspace", get(proc_workspace))
         .route("/api/procs/{id}/worktree", post(proc_worktree))
@@ -4629,6 +5078,7 @@ mod tests {
             shell_steps: true,
             workflow_errors: vec![],
             repo_dirs: vec![],
+            approvals: Default::default(),
         };
         let app = App::new(settings, TOKEN.into(), true);
         (app, dir)
@@ -5621,6 +6071,19 @@ while True:
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "unknown modes are refused");
 
+        // A steer waits on this machine for its hook (indra guard steer).
+        let (s, _, body) = post(
+            format!("/api/procs/{}/steer", id),
+            json!({ "text": "skip the vendor folder" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let token = app.procs.get(id).unwrap().opts().steer.clone().unwrap();
+        assert_eq!(
+            crate::deck::steer::take_in(&crate::paths::data_dir(), &token),
+            ["skip the vendor folder"]
+        );
+
         // A follow-up, then the answer: allow, and always for this session.
         let (s, _, body) = post(
             format!("/api/procs/{}/message", id),
@@ -5690,9 +6153,53 @@ while True:
             "\"--input-format\", \"stream-json\"",
             "ENV yes",
             "\"updatedPermissions\"",
+            "guard steer",
         ] {
             assert!(seen.contains(want), "missing {:?} in:\n{}", want, seen);
         }
+        assert!(
+            all.contains("steer: read after its next tool call"),
+            "{}",
+            all
+        );
+
+        // A rule decides a request without asking, and says which.
+        let mut settings = (*app.settings()).clone();
+        settings.profiles.push(config::ProfileCfg {
+            name: "ruled".into(),
+            runner: Some("fake".into()),
+            approvals: crate::deck::approve::Rules {
+                deny: vec![vec!["rm".into(), "-rf".into()]],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        app.settings.set(settings);
+        let (s, _, body) = post(
+            "/api/procs".into(),
+            json!({ "profile": "ruled", "prompt": "tidy", "target": 0 }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{}", body);
+        let rid = serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        until("the ruled agent to exit", || async {
+            let v = view(rid).await;
+            (v["status"] != "running").then_some(v)
+        })
+        .await;
+        let (events, _) = app.procs.get(rid).unwrap().subscribe(0);
+        let all: String = events
+            .iter()
+            .map(|e| format!("{}: {}\n", e.kind, e.text))
+            .collect();
+        assert!(
+            all.contains("permission: denied Bash: rm -rf build (decided by the rule `rm -rf`)"),
+            "{}",
+            all
+        );
+        assert!(all.contains("decision: deny"), "{}", all);
         assert!(
             !seen.contains("\"clean up\", "),
             "the prompt goes over stdin, not argv:\n{}",
@@ -7981,6 +8488,22 @@ while True:
         assert_eq!(c_line["status"], "false-positive");
         assert_eq!(c_line["triage"]["from"], "verified");
         assert_eq!(c_line["triage"]["reason"], "escaped by the ORM");
+        // The false positive became a lesson for this codebase, with its evidence.
+        let (_, _, b) = call(&app, "GET", "/api/lessons", &[AUTH], None).await;
+        let ls: Value = serde_json::from_str(&b).unwrap();
+        let l = &ls["lessons"][0];
+        assert_eq!(l["kind"], "negative", "{}", b);
+        assert_eq!(l["class"], "sqli");
+        assert!(
+            l["action"]
+                .as_str()
+                .unwrap()
+                .ends_with("(prior false positive: escaped by the ORM)"),
+            "{}",
+            b
+        );
+        assert_eq!(l["support"], 1);
+        assert_eq!(l["evidence"][0]["run"], "run-2");
         // Now C is closed in both runs, so it is neither new nor fixed.
         let (_, _, b) = call(
             &app,

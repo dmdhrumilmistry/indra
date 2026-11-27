@@ -76,6 +76,30 @@ console, or `indra node` on another machine). The router reads each request's mo
 subagent model goes to Ollama, everything else goes to Anthropic (or to the `ANTHROPIC_BASE_URL`
 the profile already set, such as a gateway). Responses stream through unchanged.
 
+## When Anthropic fails: fallbacks
+
+A profile can name where Claude Code's model calls go when its Anthropic endpoint fails (it cannot be
+reached, or answers 429, 5xx or 529 overloaded), tried in order:
+
+```toml
+[[profile]]
+name     = "resilient"
+runner   = "claude"
+model    = "opus"
+fallback = [
+  { url = "https://gateway.example.com", model = "claude-opus-4-1", api_key_env = "GW_KEY" },
+  { url = "ollama", model = "qwen3-coder" },
+]
+env = { GW_KEY = "secret:gateway" }
+```
+
+indra points the agent at its model router, which sends each request to Anthropic first and, only
+when that fails, to each fallback in turn, with the request's model rewritten to the fallback's. The
+agent's own login never goes to a fallback: each gets its own key (from `api_key_env`, which indra
+removes from the agent's environment and keeps for the router) or none (Ollama), and a key is only
+sent over https or to this machine. Settings > Profiles has the same, and `GET /api/ollama` shows how
+many requests fell back.
+
 ## What reaches Ollama
 
 Nothing that identifies you. The router drops `authorization` and `x-api-key` before a request

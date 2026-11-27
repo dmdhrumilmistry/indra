@@ -35,6 +35,11 @@ pub struct Spec {
     pub ends: u64,
     /// Tool calls per second, per host.
     pub rate: f64,
+    /// Send its agents' web traffic through indra's recording proxy: the
+    /// scope is then enforced on every connection, and each request and
+    /// response is kept as evidence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -47,6 +52,10 @@ pub struct Engagement {
     pub authorization: String,
     pub created_by: String,
     pub created: u64,
+    /// What all its agents together may spend on API calls (US dollars).
+    /// Near it they are told to wrap up; at it they are stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
 }
 
 pub fn now() -> u64 {
@@ -54,6 +63,11 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Unix milliseconds.
+pub fn now_ms_pub() -> u64 {
+    now_ms()
 }
 
 fn now_ms() -> u64 {
@@ -272,6 +286,55 @@ impl Spec {
     }
 }
 
+/// Whether a connection to `host`, which resolved to `addrs`, may be made
+/// now: inside the window, the name in scope (and none of its addresses
+/// excluded), or else every address it resolved to in scope. Loopback is
+/// this machine. The reason when not.
+pub fn allows_connection(spec: &Spec, host: &str, addrs: &[IpAddr], t: u64) -> Result<(), String> {
+    let target = match parse_net(host) {
+        Some((a, p)) => Target::Net(a, p),
+        None => Target::Host(norm_host(host)),
+    };
+    if target.loopback() || (!addrs.is_empty() && addrs.iter().all(|a| a.is_loopback())) {
+        return Ok(());
+    }
+    if !spec.active(t) {
+        return Err(format!(
+            "the engagement '{}' is not active now (its window is {} to {} UTC)",
+            spec.name,
+            when(spec.starts),
+            when(spec.ends)
+        ));
+    }
+    let net = |a: &IpAddr| Target::Net(*a, if a.is_ipv4() { 32 } else { 128 });
+    let excluded: Vec<Rule> = spec
+        .exclude
+        .iter()
+        .filter_map(|e| Rule::parse(e).ok())
+        .collect();
+    if let Some(a) = addrs
+        .iter()
+        .find(|a| excluded.iter().any(|r| r.overlaps(&net(a))))
+    {
+        return Err(format!(
+            "{} resolves to {}, which the engagement '{}' excludes",
+            host, a, spec.name
+        ));
+    }
+    if spec.allows(&target) {
+        return Ok(());
+    }
+    if !addrs.is_empty() && addrs.iter().all(|a| spec.allows(&net(a))) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is outside the scope of the engagement '{}' (in scope: {})",
+        host,
+        spec.name,
+        spec.scope.join(", ")
+    ))
+}
+
 /// Whether `text` (an alert) mentions `target` (as the audit log shows it):
 /// the host name, or an IPv4 address inside the address or range.
 pub fn mentions(target: &str, text: &str) -> bool {
@@ -459,7 +522,7 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 /// Run `f` holding the engagement directory's lock (across processes).
-fn locked<T>(dir: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
+pub(crate) fn locked<T>(dir: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -514,6 +577,14 @@ pub fn audit(dir: &Path, mut entry: Value) -> std::io::Result<()> {
 /// The audit log's entries (the newest `max`), and whether its chain is
 /// intact: each entry's hash matches its content and names the one before.
 pub fn read_audit(dir: &Path, max: usize) -> (Vec<Value>, bool) {
+    if !dir.join("audit.jsonl").exists() {
+        return (vec![], true);
+    }
+    // Under the writers' lock, so an entry half-written is never read.
+    locked(dir, || read_audit_unlocked(dir, max)).unwrap_or((vec![], false))
+}
+
+fn read_audit_unlocked(dir: &Path, max: usize) -> (Vec<Value>, bool) {
     let Ok(f) = std::fs::File::open(dir.join("audit.jsonl")) else {
         return (vec![], true);
     };
@@ -559,7 +630,7 @@ pub fn read_audit(dir: &Path, max: usize) -> (Vec<Value>, bool) {
 
 /// How long to wait before the next call to each of `hosts`, reserving
 /// the slots: calls to one host are spaced 1/rate seconds apart.
-fn pace(dir: &Path, hosts: &[String], rate: f64) -> std::io::Result<u64> {
+pub(crate) fn pace(dir: &Path, hosts: &[String], rate: f64) -> std::io::Result<u64> {
     locked(dir, || {
         let p = dir.join("pace.json");
         let mut state: std::collections::BTreeMap<String, u64> = std::fs::read_to_string(&p)
@@ -582,7 +653,7 @@ fn pace(dir: &Path, hosts: &[String], rate: f64) -> std::io::Result<u64> {
 }
 
 /// Waits longer than this are refused instead of slept through.
-const MAX_WAIT_MS: u64 = 30_000;
+pub(crate) const MAX_WAIT_MS: u64 = 30_000;
 
 // ---- the guard ------------------------------------------------------------------
 
@@ -664,7 +735,9 @@ pub fn decide(spec: &Spec, dir: &Path, hook: &Value) -> Decision {
     }
 }
 
-/// Record a PostToolUse call: what came of it.
+/// Record a PostToolUse call: what came of it. A host that answered 429
+/// or 503 (rate limited, overloaded) is backed off: its next slot moves
+/// out by its Retry-After, else by an interval that doubles each time.
 pub fn record_result(spec: &Spec, dir: &Path, hook: &Value) {
     let tool = hook["tool_name"].as_str().unwrap_or("");
     let r = &hook["tool_response"];
@@ -678,6 +751,184 @@ pub fn record_result(spec: &Spec, dir: &Path, hook: &Value) {
             "tool": tool, "ok": !failed, "output": clip(&r.to_string(), 600),
         }),
     );
+    // The output as the program printed it (JSON escaping would hide
+    // `"status": 429` inside a string).
+    fn strings(v: &Value, out: &mut String) {
+        match v {
+            Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            Value::Number(n) => {
+                out.push_str(&n.to_string());
+                out.push('\n');
+            }
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.iter().for_each(|(k, x)| {
+                if let Value::Number(n) = x {
+                    out.push_str(&format!("\"{}\": {}\n", k, n));
+                } else {
+                    strings(x, out)
+                }
+            }),
+            _ => {}
+        }
+    }
+    let mut text = String::new();
+    strings(r, &mut text);
+    if let Some(after) = throttled(&text) {
+        let cwd = hook["cwd"].as_str().map(Path::new);
+        let hosts: Vec<String> = targets(tool, &hook["tool_input"], cwd)
+            .iter()
+            .filter(|t| !t.loopback())
+            .map(Target::show)
+            .collect();
+        if !hosts.is_empty() {
+            if let Ok(wait) = back_off(dir, &hosts, after) {
+                let _ = audit(
+                    dir,
+                    json!({
+                        "event": "backoff", "engagement": spec.id, "session": hook["session_id"],
+                        "tool": tool, "targets": hosts, "waited_ms": wait,
+                        "reason": "the host answered 429 or 503: its next calls wait",
+                    }),
+                );
+            }
+        }
+    }
+}
+
+/// Whether a tool's output shows the host throttling it (HTTP 429 or 503),
+/// and the Retry-After it asked for, in seconds, when it gave one.
+pub fn throttled(text: &str) -> Option<Option<u64>> {
+    use std::sync::OnceLock;
+    static STATUS: OnceLock<regex::Regex> = OnceLock::new();
+    static AFTER: OnceLock<regex::Regex> = OnceLock::new();
+    let status = STATUS.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)(HTTP/[0-9.]+\s+(429|503)\b|\b429 Too Many Requests\b|\b503 Service Unavailable\b|"(status|status_code|statusCode)"\s*:\s*(429|503)\b|\bstatus(?: code)?[ =:]+(429|503)\b)"#,
+        )
+        .unwrap()
+    });
+    let after = AFTER.get_or_init(|| regex::Regex::new(r"(?i)retry-after:\s*(\d{1,6})\b").unwrap());
+    status
+        .is_match(text)
+        .then(|| after.captures(text).and_then(|c| c[1].parse::<u64>().ok()))
+}
+
+/// Push the next slot of each of `hosts` out: by `retry_after` seconds when
+/// the host gave one, else 2 s doubling with each throttle in a row (reset
+/// after ten quiet minutes), at most 5 minutes. Returns the wait, in ms.
+pub(crate) fn back_off(
+    dir: &Path,
+    hosts: &[String],
+    retry_after: Option<u64>,
+) -> std::io::Result<u64> {
+    locked(dir, || {
+        let p = dir.join("pace.json");
+        let b = dir.join("backoff.json");
+        let mut state: std::collections::BTreeMap<String, u64> = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let mut strikes: std::collections::BTreeMap<String, (u32, u64)> =
+            std::fs::read_to_string(&b)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default();
+        let t = now_ms();
+        let mut wait = 0;
+        for h in hosts {
+            let (n, last) = strikes.get(h).copied().unwrap_or((0, 0));
+            let n = if last + 600_000 < t { 1 } else { n + 1 };
+            strikes.insert(h.clone(), (n, t));
+            let w = match retry_after {
+                Some(s) => s.clamp(1, 300) * 1000,
+                None => (2_000u64 << (n - 1).min(8)).min(300_000),
+            };
+            let next = state.get(h).copied().unwrap_or(0).max(t + w);
+            state.insert(h.clone(), next);
+            wait = wait.max(next - t);
+        }
+        strikes.retain(|_, (_, last)| *last + 3_600_000 > t);
+        let _ = std::fs::write(&p, serde_json::to_string(&state).unwrap_or_default());
+        let _ = std::fs::write(&b, serde_json::to_string(&strikes).unwrap_or_default());
+        wait
+    })
+}
+
+// ---- coverage ------------------------------------------------------------------
+
+/// What the engagement's agents actually touched, against its scope: for
+/// each scope entry, the hosts under it that a tool call reached (allowed by
+/// the guard) or that the recording proxy saw, and the entries nothing
+/// reached yet. Refused hosts are listed apart.
+pub fn coverage(spec: &Spec, entries: &[Value]) -> Value {
+    use std::collections::BTreeMap;
+    let rules: Vec<Option<Rule>> = spec.scope.iter().map(|e| Rule::parse(e).ok()).collect();
+    // scope index -> host -> (calls, last ts)
+    let mut hit: Vec<BTreeMap<String, (u64, u64)>> = vec![BTreeMap::new(); spec.scope.len()];
+    let mut refused: BTreeMap<String, u64> = BTreeMap::new();
+    let mut calls = 0u64;
+    for x in entries {
+        let kind = x["event"].as_str().unwrap_or("");
+        if kind != "tool" && kind != "traffic" {
+            continue;
+        }
+        let ts = x["ts"].as_u64().unwrap_or(0);
+        let allowed = x["decision"] == "allow";
+        let names: Vec<String> = x["targets"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if allowed && !names.is_empty() {
+            calls += 1;
+        }
+        for n in names {
+            let t = match parse_net(&n) {
+                Some((a, p)) => Target::Net(a, p),
+                None => Target::Host(norm_host(&n)),
+            };
+            if t.loopback() {
+                continue;
+            }
+            if !allowed {
+                *refused.entry(t.show()).or_default() += 1;
+                continue;
+            }
+            for (i, r) in rules.iter().enumerate() {
+                if r.as_ref().map(|r| r.covers(&t)).unwrap_or(false) {
+                    let e = hit[i].entry(t.show()).or_default();
+                    e.0 += 1;
+                    e.1 = e.1.max(ts);
+                }
+            }
+        }
+    }
+    let scope: Vec<Value> = spec
+        .scope
+        .iter()
+        .zip(&hit)
+        .map(|(entry, hosts)| {
+            json!({
+                "entry": entry,
+                "tested": !hosts.is_empty(),
+                "hosts": hosts.iter().map(|(h, (n, last))| json!({ "host": h, "calls": n, "last": last })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let tested = hit.iter().filter(|h| !h.is_empty()).count();
+    let hosts: std::collections::BTreeSet<&String> = hit.iter().flat_map(|h| h.keys()).collect();
+    json!({
+        "summary": { "entries": spec.scope.len(), "tested": tested, "untested": spec.scope.len() - tested,
+                     "hosts": hosts.len(), "calls": calls, "refused": refused.values().sum::<u64>() },
+        "scope": scope,
+        "refused": refused.iter().map(|(h, n)| json!({ "host": h, "calls": n })).collect::<Vec<_>>(),
+    })
 }
 
 fn when(t: u64) -> String {
@@ -685,12 +936,19 @@ fn when(t: u64) -> String {
     format!("{:02}-{:02} {:02}:{:02}", w.month, w.day, w.hour, w.minute)
 }
 
-/// `indra guard pre|post`: Claude Code's hook for agents in an engagement.
+/// `indra guard pre|post|steer`: Claude Code's hook for agents in an
+/// engagement (pre, post), and for steering any agent (steer; post too).
 /// The engagement comes from INDRA_ENGAGEMENT; the call from stdin.
 pub fn guard_main(phase: &str) -> std::process::ExitCode {
     use std::io::Read;
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
+    if phase == "steer" {
+        // Never refuses anything: it only hands over queued messages.
+        let hook: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+        crate::deck::steer::hook_main(&hook);
+        return std::process::ExitCode::SUCCESS;
+    }
     let spec: Option<Spec> = std::env::var("INDRA_ENGAGEMENT")
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -704,6 +962,7 @@ pub fn guard_main(phase: &str) -> std::process::ExitCode {
     let dir = local_dir(&spec.id);
     if phase == "post" {
         record_result(&spec, &dir, &hook);
+        crate::deck::steer::hook_main(&hook);
         return std::process::ExitCode::SUCCESS;
     }
     match decide(&spec, &dir, &hook) {
@@ -724,12 +983,14 @@ pub fn guard_main(phase: &str) -> std::process::ExitCode {
 }
 
 /// Claude Code's `--settings` for an agent in an engagement: indra guard as
-/// its PreToolUse and PostToolUse hook, for every tool.
+/// its PreToolUse and PostToolUse hook, for every tool, and as its Stop hook
+/// (a steer queued as the turn ends is handed over then).
 pub fn hook_settings(exe: &Path) -> String {
     let cmd = |p: &str| format!("\"{}\" guard {}", exe.display(), p);
     json!({ "hooks": {
         "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd("pre"), "timeout": 120 }] }],
         "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd("post"), "timeout": 30 }] }],
+        "Stop": [{ "hooks": [{ "type": "command", "command": cmd("steer"), "timeout": 30 }] }],
     } })
     .to_string()
 }
@@ -763,6 +1024,10 @@ pub struct New {
     #[serde(default)]
     pub rate: Option<f64>,
     pub authorization: String,
+    #[serde(default)]
+    pub budget_usd: Option<f64>,
+    #[serde(default)]
+    pub record: bool,
 }
 
 impl Store {
@@ -830,13 +1095,20 @@ impl Store {
                 starts: n.starts,
                 ends: n.ends,
                 rate: n.rate.unwrap_or(2.0),
+                record: n.record,
             },
             machine: n.machine,
             authorization: auth.to_string(),
             created_by: by.to_string(),
             created: now(),
+            budget_usd: n.budget_usd,
         };
         e.spec.validate()?;
+        if let Some(b) = e.budget_usd {
+            if !b.is_finite() || b <= 0.0 || b > 100_000.0 {
+                return Err("the budget is a number of US dollars above 0 (at most 100000)".into());
+            }
+        }
         let mut all = self.load();
         all.push(e.clone());
         self.save(&all)?;
@@ -874,6 +1146,7 @@ pub fn view(e: &Engagement, t: u64) -> Value {
         "id": e.spec.id, "name": e.spec.name, "scope": e.spec.scope, "exclude": e.spec.exclude,
         "starts": e.spec.starts, "ends": e.spec.ends, "rate": e.spec.rate, "machine": e.machine,
         "authorization": e.authorization, "created_by": e.created_by, "created": e.created, "state": state,
+        "budget_usd": e.budget_usd, "record": e.spec.record,
     })
 }
 
@@ -895,6 +1168,7 @@ mod tests {
             starts: now() - 60,
             ends: now() + 3600,
             rate: 50.0,
+            record: false,
         }
     }
 
@@ -1056,6 +1330,78 @@ mod tests {
             0
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn throttling_is_seen_and_backed_off() {
+        assert_eq!(
+            throttled("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30"),
+            Some(Some(30))
+        );
+        assert_eq!(throttled("< HTTP/2 503 \n< server: x"), Some(None));
+        assert_eq!(throttled("\"status\": 429"), Some(None));
+        assert_eq!(throttled("HTTP/1.1 200 OK, 4290 bytes"), None);
+        assert_eq!(throttled("found 503 files"), None);
+        let dir = std::env::temp_dir().join(format!("indra-backoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = spec();
+        let hook = |out: &str| {
+            json!({ "session_id": "s1", "tool_name": "Bash",
+            "tool_input": { "command": "curl -i https://app.example.com/api" },
+            "tool_response": { "stdout": out, "stderr": "" } })
+        };
+        record_result(&s, &dir, &hook("HTTP/1.1 200 OK"));
+        assert_eq!(pace(&dir, &["app.example.com".into()], 50.0).unwrap(), 0);
+        record_result(
+            &s,
+            &dir,
+            &hook("HTTP/1.1 429 Too Many Requests\nRetry-After: 60"),
+        );
+        // Booked a minute out: the guard refuses rather than sleeping.
+        let call = json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "curl https://app.example.com/" }, "cwd": "/" });
+        assert!(matches!(decide(&s, &dir, &call), Decision::Deny(r) if r.contains("Rate limit")));
+        let (log, intact) = read_audit(&dir, 100);
+        assert!(intact);
+        let b = log.iter().find(|x| x["event"] == "backoff").unwrap();
+        assert_eq!(b["targets"], json!(["app.example.com"]));
+        assert!(b["waited_ms"].as_u64().unwrap() >= 59_000);
+        // Without a Retry-After: 2 s, then 4 s.
+        let other = |out: &str| json!({ "tool_name": "WebFetch", "tool_input": { "url": "https://x.lab.example.com/" }, "tool_response": out });
+        record_result(&s, &dir, &other("Request failed with status code 503"));
+        record_result(&s, &dir, &other("Request failed with status code 503"));
+        let w = pace(&dir, &["x.lab.example.com".into()], 50.0).unwrap();
+        assert!((3_000..=4_100).contains(&w), "{}", w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coverage_follows_the_scope() {
+        let s = spec();
+        let e = |ev: &str, dec: &str, t: &[&str]| json!({ "event": ev, "decision": dec, "targets": t, "ts": 5 });
+        let log = vec![
+            e("tool", "allow", &["app.example.com"]),
+            e("tool", "allow", &["app.example.com", "10.0.0.9"]),
+            e("tool", "allow", &["a.lab.example.com"]),
+            e("tool", "deny", &["evil.example.net"]),
+            e("traffic", "allow", &["b.lab.example.com"]),
+            e("tool", "allow", &["localhost"]),
+            json!({ "event": "result", "ok": true }),
+        ];
+        let c = coverage(&s, &log);
+        assert_eq!(c["summary"]["entries"], 4);
+        assert_eq!(c["summary"]["tested"], 3);
+        assert_eq!(c["summary"]["untested"], 1);
+        assert_eq!(c["summary"]["refused"], 1);
+        let sc = c["scope"].as_array().unwrap();
+        assert_eq!(sc[0]["hosts"][0]["calls"], 2);
+        assert_eq!(
+            sc[1]["hosts"].as_array().unwrap().len(),
+            2,
+            "*.lab: a and b"
+        );
+        assert_eq!(sc[3]["entry"], "https://api.example.org/v1");
+        assert_eq!(sc[3]["tested"], false);
+        assert_eq!(c["refused"][0]["host"], "evil.example.net");
     }
 
     #[test]

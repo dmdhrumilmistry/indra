@@ -19,6 +19,21 @@ reports one (`session_id` in its stream), so the built-in `claude` runner and an
 `format = "claude-stream-json"` can continue. For others, Continue is greyed out and Fresh is
 used.
 
+## Steer without stopping
+
+A follow-up waits for the agent's current turn to end; a pivot starts a new process. **Steer now**
+does neither: the agent reads your message right after its next tool call, in the middle of its turn,
+and carries on with it. If the turn ends before another tool call, it reads it then instead of
+stopping. Nothing is interrupted and nothing is lost.
+
+Type the message in the session's box and press **Steer now** (or **Steer now** under Control on the
+agent's page). It works for Claude Code agents started from the console, on this machine and on
+machines that dial in. Under the hood, the console queues the text on the agent's machine and
+`indra guard steer`, the agent's PostToolUse and Stop hook, hands it over as context. The session shows
+what you sent; in an engagement, the audit log records it too.
+
+API: `POST /api/procs/{id}/steer` with `{"text": "..."}`.
+
 ## How to pivot
 
 On a process page, use **Pivot this agent**: type the new instruction, choose Continue or

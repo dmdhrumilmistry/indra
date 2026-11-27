@@ -584,6 +584,9 @@ own `--max-budget-usd`, and the session says when the agent stopped at it. It me
 only: a subscription login is not counted this way. Other runners refuse the option rather than
 ignore it.
 
+An engagement can also have a **budget** for all its agents together: see
+[engagements](../../docs/guides/engagements.md#budget).
+
 ### Profiles
 
 A profile is a named way to run an agent: a runner with a model, permission mode, effort, tool
@@ -646,7 +649,19 @@ name    = "learner"
 runner  = "claude"
 memory  = true                       # start with the memory notes relevant to the prompt
 reflect = true                       # propose learnings for review before finishing
+
+[[profile]]
+name      = "steady"
+runner    = "claude"
+approvals = { allow = [["cargo", "test"]], deny = [["git", "push"]] }   # decided without asking
+fallback  = [{ url = "ollama", model = "qwen3-coder" }]                # when Anthropic fails
 ```
+
+`approvals` add to `[approvals]` in the same file, which every agent started here follows: an allow
+covers one plain command that starts with those words, a deny is found anywhere in a request (see
+[approval rules](../../docs/guides/processes.md#approval-rules-by-command)). `fallback` sends Claude
+Code's model calls on when Anthropic fails, never with the agent's own login (see
+[fallbacks](../../docs/guides/local-models.md#when-anthropic-fails-fallbacks)).
 
 For runners other than Claude Code, set `model_args` (e.g. `["--model", "{model}"]`) to let a
 profile choose the model (the built-in Codex and Gemini runners have it); permission modes and
@@ -1364,6 +1379,9 @@ skills need no interpreter on any platform:
 | `indra review cache --skills <dir> get\|put\|changed\|stat\|prune\|clear\|key\|kb-version` | The PR review cache. Keys hash every `sh-kb-*` knowledge base, the skill version and the model, and it fails closed: a stale "clean" never suppresses a finding. |
 | `indra review metrics start\|event\|finish\|report\|path\|purge` | Local-only run metrics (tokens, duration, model, cache reuse) in append-only JSONL; credentials are redacted before they are written. |
 | `indra review post --repo R --pr N --payload P --verdict V` | Post the review and set the commit status through `gh`, recovering a 422 by moving comments into the body, and never leaving the status at `pending`. |
+| `indra review retest --run <run_dir> --finding <id> --verdict reproducible\|fixed\|cannot-confirm --why <text>` | Record a retest of one finding in the run's `retests.jsonl` (never its findings) and turn it into a lesson. The `sh-retest` skill calls it. |
+| `indra lessons [--target <repo>] [--class <c>] [--json]` | What earlier reviews of a codebase proved, from triage and retests, as a block a hunter reads: prior outcomes, not instructions. |
+| `indra traffic list\|show\|verify\|replay [--engagement <id>]` | An engagement's recorded traffic: list and search it, show an exchange (secret headers masked), check the `evidence_traffic` citations of a findings file, or send a recorded request again under the same scope, pacing and recording. |
 | `indra skills sync [--check]`, `indra skills install --to agents\|claude\|opencode` | Keep the repository's `skills/` mirror current, or install the skills where an agent looks for them. |
 
 Maintainer commands: `indra dev site` builds the website (`site/` plus the docs pages listed in

@@ -1313,6 +1313,14 @@ async fn node_frame(
                         Err("bad engagement id".to_string())
                     }
                 }
+                // An engagement's recorded traffic here (the recording proxy).
+                "traffic" => crate::deck::traffic::local_request(&args),
+                // A steer for an agent here: queued for its guard hook.
+                "steer" => crate::deck::steer::queue(
+                    args.get("token").and_then(Value::as_str).unwrap_or(""),
+                    args.get("text").and_then(Value::as_str).unwrap_or(""),
+                )
+                .map(|_| json!({ "queued": true })),
                 // The console's file viewer: only inside a folder agents may
                 // work in here, so the hub cannot read anything else.
                 "ls" | "cat" => {

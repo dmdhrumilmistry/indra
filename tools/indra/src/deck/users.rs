@@ -364,8 +364,14 @@ pub fn needed(method: &str, path: &str) -> Role {
     if under("/api/nodes/keys") {
         return Role::Admin;
     }
-    // An engagement's audit log holds the commands its agents ran.
-    if under("/api/engagements") && (path.ends_with("/audit") || path.ends_with("/detections")) {
+    // An engagement's audit log holds the commands its agents ran; its
+    // recorded traffic, the requests and responses themselves.
+    if under("/api/engagements")
+        && (path.ends_with("/audit")
+            || path.ends_with("/detections")
+            || path.ends_with("/coverage")
+            || path.contains("/traffic"))
+    {
         return Role::Operator;
     }
     // Testing a tool starts its command on this machine.
@@ -423,6 +429,17 @@ mod tests {
             needed("GET", "/api/engagements/abcd1234/audit"),
             Role::Operator
         );
+        for p in [
+            "/api/engagements/abcd1234/traffic",
+            "/api/engagements/abcd1234/traffic/1700000000000-1",
+            "/api/engagements/abcd1234/coverage",
+        ] {
+            assert_eq!(needed("GET", p), Role::Operator, "{}", p);
+        }
+        assert_eq!(needed("POST", "/api/procs/3/steer"), Role::Operator);
+        assert_eq!(needed("POST", "/api/run/retest"), Role::Operator);
+        assert_eq!(needed("GET", "/api/lessons"), Role::Viewer);
+        assert_eq!(needed("POST", "/api/lessons/4"), Role::Operator);
         assert_eq!(needed("GET", "/api/config"), Role::Admin);
         assert_eq!(needed("GET", "/api/secrets"), Role::Admin);
         assert_eq!(needed("PUT", "/api/secrets/x"), Role::Admin);

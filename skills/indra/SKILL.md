@@ -24,6 +24,7 @@ Prefer routing over doing the work inline - the specialized skills/agents carry 
 | To **triage alerts**, investigate a host or alert, **hunt** for a technique or indicator, or review logs | Invoke the **`sh-log-triage`** skill (read-only; SIEM sources through `indra siem`). |
 | A **hardening** or remediation plan, "what do we fix first", secure configuration | Invoke the **`sh-hardening`** skill. |
 | The **attack surface**, exposure, "which vulnerabilities actually matter", "are these CVEs reachable" | Invoke the **`sh-attack-surface`** skill (it fills reachability into a review run; the console draws the graph). |
+| **Retest** a finding, "is SH-XXX-001 still there", confirm a fix | Invoke the **`sh-retest`** skill (one finding, one verdict: reproducible, fixed or cannot-confirm; it never edits the original findings). |
 | To map/understand a codebase only (no vuln hunt) | Invoke `sh-security-review` with `stage:recon`. |
 | To recall or record what reviews have learned ("what do we know about X", "remember this", "show the knowledge graph", "forget/skip memory") | Invoke the **`sh-memory`** skill. For "don't use memory" on a review, pass `memory:off` to `sh-security-review`. |
 | To put findings where the team works ("file these in Jira", "open GitHub issues", "put the report in Confluence/Notion") | Invoke the **`sh-publish`** skill. It asks before creating anything and never sends evidence or payloads. |

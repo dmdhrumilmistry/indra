@@ -913,6 +913,10 @@ pub fn serve_mcp(s: crate::deck::config::Settings) -> Result<std::process::ExitC
                 let name = msg["params"]["name"].as_str().unwrap_or("");
                 let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
                 let (text, is_error) = match rt.block_on(call(&s, name, &args)) {
+                    // Events were written by whoever produced them: framed as data.
+                    Ok(t) if name == "siem_search" => {
+                        (crate::deck::untrusted::frame(name, &t), false)
+                    }
                     Ok(t) => (t, false),
                     Err(e) => (e, true),
                 };
