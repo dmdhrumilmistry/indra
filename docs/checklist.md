@@ -156,6 +156,19 @@ their section; nothing is deleted, items are checked off with the change that di
       from the internet or after login, with paths; CVE reachability from recon; sh-attack-surface
 - [ ] Recording proxy and evidence-verified findings
 
+## From the ARTEX comparison
+
+See [Ideas from ARTEX](artex-comparison.md) for the reasoning and the order.
+
+- [ ] Coverage: in-scope hosts against the audit log; entry points against the attempts ledger
+- [ ] Steering through `indra guard pre`: a queued instruction delivered before the next tool call
+- [ ] Lessons with evidence: cue, action and source finding; withdrawn when the triage is reversed
+- [ ] Pacing profiles and backoff on 429 and 503; a budget across an engagement or workflow
+- [ ] Approval rules by argv prefix, and who decided each approval
+- [ ] Retest a finding: Still reproducible, Fixed or Cannot confirm
+- [ ] Untrusted output framing for indra's own MCP server and data sources
+- [ ] Failover between model providers in the router
+
 ## Not planned yet (the docs say so)
 
 - [ ] OS keychain backend for secrets
