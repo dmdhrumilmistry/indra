@@ -3,6 +3,30 @@
 What each release of the indra CLI adds, in short. Each release page on GitHub starts with its
 section from this file.
 
+## v0.19.0
+
+- **Codex and Gemini CLI in engagements.** Run an agent in an engagement as Claude Code, Codex or
+  Gemini CLI. indra installs its guard as each one's hooks: `--settings` for Claude Code, `-c
+  hooks...` for Codex (with `--dangerously-bypass-hook-trust`), a private system settings file for
+  Gemini CLI. Scope, window, pacing, the audit log and the recording proxy hold for all three, and
+  each one's own model API passes through the proxy untouched.
+- **Steer and approve Codex and Gemini.** **Steer now** reaches Codex and Gemini agents mid-turn too
+  (their only way in while they run). Approval rules hold for every agent: deny rules refuse in a
+  pre-tool hook (Claude Code included, even in a mode that would not ask), allow rules answer
+  Codex's PermissionRequest and go into a Gemini policy file.
+- **Codex and Gemini output, read.** The built-in `codex` and `gemini` runners use their JSON output
+  (`codex exec --json`, `gemini --output-format stream-json`): the console shows their text, each
+  command or tool call, refusals, sessions, tokens and spend.
+- **Spend for every agent and login.** Codex and Gemini CLI report tokens, and a subscription login
+  reports no cost: indra estimates the spend from a price table (correct it with `[[price]]`). Spending
+  limits now apply to every agent and are kept by indra itself, so they hold for OAuth logins too;
+  engagement budgets and account limits count the same spend.
+- **OAuth tokens for every agent.** Accounts take `kind = "oauth_token"` for Codex (an OpenAI agent
+  identity token, logged in to a private Codex home) and Gemini CLI (a Google access token: Login
+  with Google), as well as Claude Code (`claude setup-token`).
+- **Fallbacks through accounts.** A model fallback can name an `[[account]]`: its API key, or its
+  Claude subscription OAuth token, sent as a bearer token with Anthropic's OAuth beta flag.
+
 ## v0.18.0
 
 Ideas from [ARTEX](https://github.com/BaaRai/ARTEX) (see `docs/artex-comparison.md`), written fresh for

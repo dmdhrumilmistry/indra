@@ -13,7 +13,8 @@
 //! name       = "work"
 //! agent      = "claude"                  # claude (default) | codex | gemini | a runner name
 //! credential = "secret:anthropic-work"   # an API key, or a Claude subscription token
-//! kind       = "oauth_token"             # api_key (default) | oauth_token (`claude setup-token`)
+//! kind       = "oauth_token"             # api_key (default) | oauth_token: `claude setup-token`,
+//!                                        # a Codex agent identity token, or a Google access token
 //! daily_usd  = 20                        # optional limits
 //!
 //! [routing]
@@ -46,7 +47,9 @@ pub struct AccountCfg {
     pub agent: String,
     /// The credential, as a secret reference (`secret:<name>`).
     pub credential: String,
-    /// "api_key" (default) or "oauth_token" (a Claude subscription token).
+    /// "api_key" (default) or "oauth_token": a Claude subscription token
+    /// (`claude setup-token`), a Codex agent identity token, or a Google
+    /// OAuth access token for Gemini CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// The environment variable it goes in (default by agent and kind).
@@ -101,6 +104,11 @@ pub fn agent_of(runner: &str, command: &str, format: &str) -> String {
     if format == "claude-stream-json" || c == "claude" || runner == "claude" {
         return "claude".into();
     }
+    match format {
+        "codex-json" => return "codex".into(),
+        "gemini-stream-json" => return "gemini".into(),
+        _ => {}
+    }
     for k in ["codex", "gemini"] {
         if c == k || runner == k {
             return k.into();
@@ -127,7 +135,12 @@ impl AccountCfg {
             match (self.agent(), self.kind.as_deref().unwrap_or("api_key")) {
                 ("claude", "oauth_token") => "CLAUDE_CODE_OAUTH_TOKEN",
                 ("claude", _) => "ANTHROPIC_API_KEY",
+                // An OpenAI agent identity token, logged in to a private
+                // Codex home for the agent (indra does that at launch).
+                ("codex", "oauth_token") => "CODEX_ACCESS_TOKEN",
                 ("codex", _) => "OPENAI_API_KEY",
+                // A Google OAuth access token: Login with Google.
+                ("gemini", "oauth_token") => "GOOGLE_CLOUD_ACCESS_TOKEN",
                 ("gemini", _) => "GEMINI_API_KEY",
                 _ => return None,
             }
@@ -155,9 +168,12 @@ impl AccountCfg {
             if !KINDS.contains(&k.as_str()) {
                 return Err(at(format!("kind must be {}", KINDS.join(" or "))));
             }
-            if k == "oauth_token" && self.agent() != "claude" {
+            if k == "oauth_token"
+                && !["claude", "codex", "gemini"].contains(&self.agent())
+                && self.env.is_none()
+            {
                 return Err(at(
-                    "oauth_token is for Claude Code (claude setup-token)".into()
+                    "an oauth_token goes in a variable indra knows for claude (claude setup-token), codex (an agent identity token) and gemini (a Google access token); for another agent, say which with env = \"...\"".into(),
                 ));
             }
         }
@@ -457,6 +473,16 @@ impl Accounts {
         }
     }
 
+    /// A configured account by name (enabled): for a model fallback.
+    pub fn named(&self, name: &str) -> Option<AccountCfg> {
+        self.settings
+            .get()
+            .accounts
+            .iter()
+            .find(|a| a.name == name && !a.disabled)
+            .cloned()
+    }
+
     /// The account a profile pins, if it does.
     pub fn pin_of(&self, profile: &str) -> Option<String> {
         self.settings
@@ -733,12 +759,30 @@ mod tests {
             .is_err());
         assert!(acct("login", |_| {}).validate().is_err());
         assert!(acct("a", |a| a.daily_usd = Some(-1.0)).validate().is_err());
-        assert!(acct("a", |a| {
+        // OAuth logins for Codex (an agent identity token) and Gemini CLI
+        // (a Google access token) too; another agent must say where.
+        let codex = acct("a", |a| {
             a.agent = "codex".into();
+            a.kind = Some("oauth_token".into());
+        });
+        assert!(codex.validate().is_ok());
+        assert_eq!(codex.env_var().as_deref(), Some("CODEX_ACCESS_TOKEN"));
+        let gemini = acct("a", |a| {
+            a.agent = "gemini".into();
+            a.kind = Some("oauth_token".into());
+        });
+        assert_eq!(
+            gemini.env_var().as_deref(),
+            Some("GOOGLE_CLOUD_ACCESS_TOKEN")
+        );
+        assert!(acct("a", |a| {
+            a.agent = "aider".into();
             a.kind = Some("oauth_token".into());
         })
         .validate()
         .is_err());
+        assert_eq!(agent_of("x", "x", "codex-json"), "codex");
+        assert_eq!(agent_of("x", "x", "gemini-stream-json"), "gemini");
         assert!(validate_routing(&RoutingCfg {
             strategy: Some("random".into()),
             ..Default::default()

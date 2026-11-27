@@ -106,6 +106,8 @@ pub fn hook_answer(event: &str, msgs: &[String]) -> Option<Value> {
     Some(match event {
         // Blocking the stop feeds the reason to the agent, which goes on.
         "Stop" | "SubagentStop" => json!({ "decision": "block", "reason": text }),
+        // Gemini CLI: denying the turn's end sends the reason as a new prompt.
+        "AfterAgent" => json!({ "decision": "deny", "reason": text }),
         _ => json!({ "hookSpecificOutput": {
             "hookEventName": event,
             "additionalContext": text,
@@ -124,17 +126,6 @@ pub fn hook_main(hook: &Value) {
     if let Some(a) = hook_answer(event, &msgs) {
         println!("{}", a);
     }
-}
-
-/// Claude Code's `--settings` for an agent that can be steered (outside an
-/// engagement, which has its own hooks).
-pub fn hook_settings(exe: &Path) -> String {
-    let cmd = format!("\"{}\" guard steer", exe.display());
-    json!({ "hooks": {
-        "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": cmd.clone(), "timeout": 30 }] }],
-        "Stop": [{ "hooks": [{ "type": "command", "command": cmd, "timeout": 30 }] }],
-    } })
-    .to_string()
 }
 
 #[cfg(test)]
@@ -175,11 +166,6 @@ mod tests {
             hook_answer("Stop", &[]).is_none(),
             "nothing queued: let it stop"
         );
-        let s: Value = serde_json::from_str(&hook_settings(Path::new("/x/indra"))).unwrap();
-        assert!(s["hooks"]["Stop"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .ends_with("guard steer"));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

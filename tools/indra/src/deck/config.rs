@@ -52,6 +52,9 @@ pub struct ConfigFile {
     /// `allow = [["git", "status"]]`, `deny = [["git", "push"]]`.
     #[serde(skip_serializing_if = "crate::deck::approve::Rules::is_empty")]
     pub approvals: crate::deck::approve::Rules,
+    /// Token prices (US$ per million) for agents that report tokens, not
+    /// dollars: `[[price]] model = "gpt-5" input = 1.25 output = 10`.
+    pub price: Vec<crate::deck::pricing::PriceCfg>,
 }
 
 /// `[join]`: which hub this machine joins, for `indra join` without arguments.
@@ -1326,6 +1329,8 @@ pub struct Settings {
     pub repo_dirs: Vec<PathBuf>,
     /// `[approvals]`: Bash commands every agent's requests are decided by.
     pub approvals: crate::deck::approve::Rules,
+    /// `[[price]]`: token prices, on top of the built-in estimates.
+    pub prices: Vec<crate::deck::pricing::PriceCfg>,
 }
 
 /// Settings that the console can replace while it runs (after a config
@@ -1812,17 +1817,36 @@ pub fn default_runners() -> Vec<RunnerCfg> {
     vec![
         claude,
         {
-            let mut c = r("codex", "codex", &["exec", "{prompt}"], "text");
+            let mut c = r(
+                "codex",
+                "codex",
+                &["exec", "--json", "{prompt}"],
+                "codex-json",
+            );
             c.model_args = vec!["-m".into(), "{model}".into()];
             c
         },
         {
-            let mut g = r("gemini", "gemini", &["-p", "{prompt}"], "text");
+            let mut g = r(
+                "gemini",
+                "gemini",
+                &["-p", "{prompt}", "--output-format", "stream-json"],
+                "gemini-stream-json",
+            );
             g.model_args = vec!["-m".into(), "{model}".into()];
             g
         },
     ]
 }
+
+/// Runner output formats indra reads: plain text, or each CLI's own JSON
+/// stream (tool calls, sessions, spend).
+pub const FORMATS: [&str; 4] = [
+    "text",
+    "claude-stream-json",
+    "codex-json",
+    "gemini-stream-json",
+];
 
 /// Profiles that exist without any configuration, so teams, workflows and
 /// Launch work out of the box. A configured profile with the same name wins.
@@ -2195,9 +2219,9 @@ pub fn build_settings(
     let mut runners = Vec::new();
     for r in runner_cfgs {
         let format = r.format.clone().unwrap_or_else(|| "text".into());
-        if format != "text" && format != "claude-stream-json" {
+        if !FORMATS.contains(&format.as_str()) {
             return Err(format!(
-                "runner '{}': format must be 'text' or 'claude-stream-json'",
+                "runner '{}': format must be one of text, claude-stream-json, codex-json, gemini-stream-json",
                 r.name
             ));
         }
@@ -2241,6 +2265,9 @@ pub fn build_settings(
     file.approvals
         .validate()
         .map_err(|e| format!("[approvals]: {}", e))?;
+    for p in &file.price {
+        p.validate()?;
+    }
     unique("profile", file.profile.iter().map(|p| p.name.as_str()))?;
     // The default profiles, under any configured with the same name.
     let mut profiles = file.profile.clone();
@@ -2627,6 +2654,7 @@ pub fn build_settings(
         workflow_errors,
         repo_dirs,
         approvals: file.approvals.clone(),
+        prices: file.price.clone(),
     })
 }
 

@@ -91,6 +91,10 @@ pub struct ProcView {
     pub tools: BTreeMap<String, usize>,
     pub agents: Vec<SubAgent>,
     pub cost_usd: Option<f64>,
+    /// The cost is indra's estimate from token prices (`[[price]]`), not
+    /// what the runner reported.
+    #[serde(default)]
+    pub cost_estimated: bool,
     pub log: String,
     pub last: Option<String>,
     /// Model, permission mode and the rest it was started with.
@@ -235,6 +239,14 @@ struct State {
 /// What a running agent is doing between events, as its stream shows it.
 #[derive(Default)]
 struct Activity {
+    /// Spend estimated from token counts (US$), for runners and logins
+    /// that report no cost, and the messages already counted.
+    est_usd: f64,
+    est_seen: std::collections::HashSet<String>,
+    /// The cost shown is an estimate from token prices.
+    estimated: bool,
+    /// Text a Gemini agent streamed in parts, until its next step.
+    pending_text: String,
     /// tool | writing | thinking ("" before its first step: thinking).
     kind: &'static str,
     tool: Option<String>,
@@ -622,6 +634,7 @@ impl Proc {
             tools: st.tools.clone(),
             agents: st.agents.clone(),
             cost_usd: st.cost_usd,
+            cost_estimated: st.act.estimated,
             log: self.log.display().to_string(),
             last: st
                 .events
@@ -876,11 +889,352 @@ impl Proc {
 
     /// One line of the agent's own stdout, in its format.
     fn agent_line(&self, line: &str) {
-        let claude = self.state.lock().unwrap().format == "claude-stream-json";
-        if claude {
-            self.claude_line(line);
-        } else if !line.trim().is_empty() {
-            self.push("text", line.to_string(), None);
+        let format = self.state.lock().unwrap().format.clone();
+        match format.as_str() {
+            "claude-stream-json" => self.claude_line(line),
+            "codex-json" => self.codex_line(line),
+            "gemini-stream-json" => self.gemini_line(line),
+            _ if !line.trim().is_empty() => self.push("text", line.to_string(), None),
+            _ => {}
+        }
+    }
+
+    /// Add `usd` (estimated from tokens) to what the agent spent.
+    fn add_estimate(&self, usd: f64) {
+        let mut st = self.state.lock().unwrap();
+        st.act.est_usd += usd;
+        st.act.estimated = true;
+        st.cost_usd = Some(st.act.est_usd);
+    }
+
+    /// Stop the agent once it has spent its limit, as indra counts it: for
+    /// runners without a limit of their own (Codex, Gemini CLI), and for
+    /// Claude Code under a subscription login.
+    fn check_limit(&self) {
+        let Some(limit) = self.opts.max_budget_usd else {
+            return;
+        };
+        let (spent, running) = {
+            let st = self.state.lock().unwrap();
+            (st.cost_usd.unwrap_or(0.0), st.status == "running")
+        };
+        if running && spent >= limit {
+            self.push(
+                "error",
+                format!(
+                    "stopped: it reached its spending limit of ${} (${:.2} as indra counts it)",
+                    crate::deck::nodes::budget_arg(limit),
+                    spent
+                ),
+                None,
+            );
+            self.request_stop();
+        }
+    }
+
+    /// The model a Codex agent runs on: as launched, else Codex's default
+    /// (priced as gpt-5).
+    fn model_or(&self, dflt: &str) -> String {
+        self.state
+            .lock()
+            .unwrap()
+            .model
+            .clone()
+            .or_else(|| self.opts.model.clone())
+            .unwrap_or_else(|| dflt.to_string())
+    }
+
+    /// One line of `codex exec --json`.
+    fn codex_line(&self, line: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            if !line.trim().is_empty() {
+                self.push("text", line.to_string(), None);
+            }
+            return;
+        };
+        let s = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        match s(&v, "type").as_str() {
+            "thread.started" => {
+                let id = s(&v, "thread_id");
+                if crate::deck::nodes::validate_session(&id).is_ok() {
+                    self.state.lock().unwrap().session = Some(id.clone());
+                }
+                self.push("system", format!("session started ({})", id), None);
+            }
+            "turn.started" => self.state.lock().unwrap().act.kind = "thinking",
+            "item.started" | "item.completed" => {
+                let done = s(&v, "type") == "item.completed";
+                let it = v.get("item").cloned().unwrap_or(Value::Null);
+                match s(&it, "type").as_str() {
+                    "agent_message" if done => {
+                        let t = s(&it, "text");
+                        {
+                            let mut st = self.state.lock().unwrap();
+                            st.act.kind = "writing";
+                            st.act.tool = None;
+                            st.last_result = t.clone();
+                        }
+                        if !t.trim().is_empty() {
+                            self.push("text", t, None);
+                        }
+                    }
+                    "command_execution" if !done => {
+                        let c = serde_json::json!({ "name": "Bash", "input": { "command": s(&it, "command") } });
+                        self.tool_use(&c, None, None);
+                    }
+                    "command_execution" => {
+                        self.state.lock().unwrap().act.kind = "thinking";
+                        let code = it.get("exit_code").and_then(Value::as_i64);
+                        if code.is_some_and(|c| c != 0) {
+                            self.push(
+                                "error",
+                                format!(
+                                    "command exited {}: {}",
+                                    code.unwrap_or(-1),
+                                    clip(&s(&it, "aggregated_output"), 600)
+                                ),
+                                None,
+                            );
+                        }
+                    }
+                    "file_change" if done => {
+                        let mut st = self.state.lock().unwrap();
+                        for ch in it
+                            .get("changes")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default()
+                        {
+                            let f = s(&ch, "path");
+                            if !f.is_empty() && !st.files.contains(&f) && st.files.len() < 500 {
+                                st.files.push(f);
+                            }
+                        }
+                        drop(st);
+                        self.push("tool", "edited files".into(), None);
+                    }
+                    "mcp_tool_call" if !done => {
+                        let c = serde_json::json!({ "name": format!("mcp__{}__{}", s(&it, "server"), s(&it, "tool")),
+                                        "input": it.get("arguments").cloned().unwrap_or(Value::Null) });
+                        self.tool_use(&c, None, None);
+                    }
+                    "web_search" if !done => {
+                        let c = serde_json::json!({ "name": "WebSearch", "input": { "query": s(&it, "query") } });
+                        self.tool_use(&c, None, None);
+                    }
+                    "todo_list" => {
+                        self.state.lock().unwrap().todos =
+                            it.get("items").cloned().unwrap_or(Value::Null);
+                    }
+                    "error" if done => {
+                        let m = s(&it, "message");
+                        // Codex says so when indra's hooks run without review.
+                        let kind = if m.contains("bypass-hook-trust") {
+                            "system"
+                        } else {
+                            "error"
+                        };
+                        self.push(kind, m, None);
+                    }
+                    _ => {}
+                }
+            }
+            "turn.completed" => {
+                let u = v.get("usage").cloned().unwrap_or(Value::Null);
+                let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let cached = n("cached_input_tokens");
+                let usage = crate::deck::pricing::Usage {
+                    input: n("input_tokens").saturating_sub(cached),
+                    cached,
+                    cache_write: n("cache_write_input_tokens"),
+                    output: n("output_tokens"),
+                };
+                {
+                    let mut st = self.state.lock().unwrap();
+                    let t = st.tokens.get_or_insert_with(Tokens::default);
+                    t.input += usage.input;
+                    t.output += usage.output;
+                    t.cache_read += usage.cached;
+                    t.cache_write += usage.cache_write;
+                    st.act.kind = "thinking";
+                }
+                let model = self.model_or("gpt-5");
+                let cost =
+                    crate::deck::pricing::cost(&model, usage, &crate::deck::pricing::table());
+                match cost {
+                    Some(c) => self.add_estimate(c),
+                    None => self.push(
+                        "system",
+                        format!(
+                            "spend not counted: no price for model {} (add a [[price]] for it)",
+                            model
+                        ),
+                        None,
+                    ),
+                }
+                let r = self.state.lock().unwrap().last_result.clone();
+                let mut text = format!(
+                    "turn done: {} tokens in, {} out",
+                    usage.input + usage.cached,
+                    usage.output
+                );
+                if let Some(c) = cost {
+                    text.push_str(&format!(
+                        ", about ${:.4}",
+                        self.state.lock().unwrap().cost_usd.unwrap_or(c)
+                    ));
+                }
+                if !r.is_empty() {
+                    text.push_str("\n\n");
+                    text.push_str(&r);
+                }
+                self.push("result", text, None);
+                self.check_limit();
+            }
+            "turn.failed" | "error" => {
+                let m = v
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| s(&v, "message"));
+                self.state.lock().unwrap().last_failed = true;
+                self.push("error", m, None);
+            }
+            _ => {}
+        }
+    }
+
+    /// Text a Gemini agent streamed, as one message.
+    fn flush_text(&self) {
+        let t = std::mem::take(&mut self.state.lock().unwrap().act.pending_text);
+        if !t.trim().is_empty() {
+            self.state.lock().unwrap().last_result = t.clone();
+            self.push("text", t, None);
+        }
+    }
+
+    /// One line of `gemini --output-format stream-json`.
+    fn gemini_line(&self, line: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            if !line.trim().is_empty() {
+                self.push("text", line.to_string(), None);
+            }
+            return;
+        };
+        let s = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        match s(&v, "type").as_str() {
+            "init" => {
+                let model = s(&v, "model");
+                {
+                    let mut st = self.state.lock().unwrap();
+                    let sid = s(&v, "session_id");
+                    if crate::deck::nodes::validate_session(&sid).is_ok() {
+                        st.session = Some(sid);
+                    }
+                    if !model.is_empty() {
+                        st.model = Some(model.clone());
+                    }
+                }
+                self.push("system", format!("session started, model {}", model), None);
+            }
+            "message" if s(&v, "role") == "assistant" => {
+                let mut st = self.state.lock().unwrap();
+                st.act.kind = "writing";
+                st.act.tool = None;
+                st.act.pending_text.push_str(&s(&v, "content"));
+            }
+            "tool_use" => {
+                self.flush_text();
+                let c = serde_json::json!({ "name": s(&v, "tool_name"), "input": v.get("parameters").cloned().unwrap_or(Value::Null) });
+                self.tool_use(&c, None, None);
+            }
+            "tool_result" => {
+                self.state.lock().unwrap().act.kind = "thinking";
+                if s(&v, "status") == "error" {
+                    let m = v
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_else(|| s(&v, "output"));
+                    self.push("error", clip(&m, 600), None);
+                }
+            }
+            "error" => {
+                self.flush_text();
+                let kind = if s(&v, "severity") == "warning" {
+                    "system"
+                } else {
+                    "error"
+                };
+                self.push(kind, s(&v, "message"), None);
+            }
+            "result" => {
+                self.flush_text();
+                let stats = v.get("stats").cloned().unwrap_or(Value::Null);
+                let mut total = 0.0;
+                let mut known = true;
+                let mut all = crate::deck::pricing::Usage::default();
+                let models = stats
+                    .get("models")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                for (m, x) in &models {
+                    let n = |k: &str| x.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    let cached = n("cached");
+                    let u = crate::deck::pricing::Usage {
+                        input: n("input_tokens").saturating_sub(cached),
+                        cached,
+                        cache_write: 0,
+                        output: n("output_tokens"),
+                    };
+                    all.input += u.input;
+                    all.cached += u.cached;
+                    all.output += u.output;
+                    match crate::deck::pricing::cost(m, u, &crate::deck::pricing::table()) {
+                        Some(c) => total += c,
+                        None => known = false,
+                    }
+                }
+                {
+                    let mut st = self.state.lock().unwrap();
+                    let t = st.tokens.get_or_insert_with(Tokens::default);
+                    t.input += all.input;
+                    t.output += all.output;
+                    t.cache_read += all.cached;
+                    st.last_failed = s(&v, "status") != "success";
+                }
+                if !models.is_empty() {
+                    self.add_estimate(total);
+                }
+                if !known {
+                    self.push(
+                        "system",
+                        "spend not fully counted: a model has no price (add a [[price]] for it)"
+                            .into(),
+                        None,
+                    );
+                }
+                let r = self.state.lock().unwrap().last_result.clone();
+                let mut text = format!(
+                    "{}: {} tokens in, {} out, {} tool calls, about ${:.4}",
+                    s(&v, "status"),
+                    all.input + all.cached,
+                    all.output,
+                    stats.get("tool_calls").and_then(Value::as_u64).unwrap_or(0),
+                    total
+                );
+                if let Some(e) = v.pointer("/error/message").and_then(Value::as_str) {
+                    text.push_str(&format!(" ({})", e));
+                }
+                if !r.is_empty() {
+                    text.push_str("\n\n");
+                    text.push_str(&r);
+                }
+                self.push("result", text, None);
+                self.check_limit();
+            }
+            _ => {}
         }
     }
 
@@ -1089,6 +1443,50 @@ impl Proc {
                 }
             }
             "assistant" => {
+                // Every model call, a subagent's included, estimated from its
+                // tokens (each call once, though it streams in parts): the
+                // spend while a turn runs, and the spend at all under a
+                // subscription login.
+                if let (Some(u), Some(id)) = (
+                    v.pointer("/message/usage"),
+                    v.pointer("/message/id").and_then(Value::as_str),
+                ) {
+                    let first = self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .act
+                        .est_seen
+                        .insert(id.to_string());
+                    if first {
+                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        let usage = crate::deck::pricing::Usage {
+                            input: n("input_tokens"),
+                            cached: n("cache_read_input_tokens"),
+                            cache_write: n("cache_creation_input_tokens"),
+                            output: n("output_tokens"),
+                        };
+                        let model = v
+                            .pointer("/message/model")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                            .unwrap_or_else(|| self.model_or("sonnet"));
+                        if let Some(c) = crate::deck::pricing::cost(
+                            &model,
+                            usage,
+                            &crate::deck::pricing::table(),
+                        ) {
+                            let mut st = self.state.lock().unwrap();
+                            st.act.est_usd += c;
+                            // Claude's own figure wins once a turn reports one.
+                            if st.cost_usd.is_none() || st.act.estimated {
+                                st.act.estimated = true;
+                                st.cost_usd = Some(st.act.est_usd);
+                            }
+                        }
+                        self.check_limit();
+                    }
+                }
                 if parent.is_none() {
                     if let Some(u) = v.pointer("/message/usage") {
                         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
@@ -1163,10 +1561,26 @@ impl Proc {
                 }
             }
             "result" => {
-                let cost = v.get("total_cost_usd").and_then(Value::as_f64);
+                let reported = v.get("total_cost_usd").and_then(Value::as_f64);
                 let turns = v.get("num_turns").and_then(Value::as_u64).unwrap_or(0);
                 let secs = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0) / 1000;
-                self.state.lock().unwrap().cost_usd = cost;
+                // What Claude Code reports, else (a login it does not price)
+                // indra's estimate from the tokens.
+                let cost = {
+                    let mut st = self.state.lock().unwrap();
+                    match reported.filter(|c| *c > 0.0) {
+                        Some(c) => {
+                            st.cost_usd = Some(c);
+                            st.act.estimated = false;
+                        }
+                        None if st.act.est_usd > 0.0 => {
+                            st.cost_usd = Some(st.act.est_usd);
+                            st.act.estimated = true;
+                        }
+                        None => st.cost_usd = reported,
+                    }
+                    st.cost_usd
+                };
                 let mut text = format!("{}: {} turns, {}s", s(&v, "subtype"), turns, secs);
                 if let Some(c) = cost {
                     text.push_str(&format!(", ${:.4}", c));
@@ -1203,6 +1617,7 @@ impl Proc {
                     text.push_str(&r);
                 }
                 self.push("result", text, agent.clone());
+                self.check_limit();
                 if s(&v, "subtype") == "error_max_budget_usd" {
                     let limit = self
                         .opts
@@ -1724,6 +2139,29 @@ impl Procs {
             }
             _ => None,
         };
+        // Model fallbacks that name an account: its credential, as a secret
+        // reference resolved like the agent's own, under a private name.
+        for (i, f) in opts.agent.fallback.iter_mut().enumerate() {
+            let Some(name) = f.account.clone() else {
+                continue;
+            };
+            let a = self
+                .accounts
+                .get()
+                .and_then(|acc| acc.named(&name))
+                .ok_or_else(|| format!("fallback: no enabled account named '{}'", name))?;
+            if a.agent() != "claude" {
+                return Err(format!(
+                    "fallback: account '{}' is for {}; the model router speaks Anthropic's API, so it takes Claude accounts",
+                    name,
+                    a.agent()
+                ));
+            }
+            let var = format!("INDRA_FALLBACK_KEY_{}", i);
+            opts.agent.env.insert(var.clone(), a.credential.clone());
+            f.api_key_env = Some(var);
+            f.kind = Some(a.kind.clone().unwrap_or_else(|| "api_key".into()));
+        }
         let id = self.start_plain(l, opts, pick.as_ref().map(|p| p.key.clone()))?;
         if let (Some(p), Some(acc)) = (pick, self.accounts.get()) {
             acc.started(id, &p.key, now());
@@ -1752,8 +2190,8 @@ impl Procs {
             job: Option<String>,
             /// A private file to delete when the agent exits (its MCP config).
             temp: Option<PathBuf>,
-            /// Its recording proxy, kept until the agent exits.
-            proxy: Option<Arc<crate::deck::proxy::Handle>>,
+            /// Kept until the agent exits (its proxy, private hook settings).
+            keep: crate::deck::nodes::Keep,
             /// Remote over the agent link: the node and the job.
             link: Option<(String, crate::deck::nodes::Job)>,
             node: String,
@@ -1809,7 +2247,7 @@ impl Procs {
                     control: ac.control,
                     job: None,
                     temp: ac.temp,
-                    proxy: ac.proxy,
+                    keep: ac.keep,
                     link: None,
                     node: crate::deck::nodes::LOCAL.into(),
                     runner: runner.name.clone(),
@@ -1856,7 +2294,7 @@ impl Procs {
                     env: Vec::new(),
                     control: None,
                     temp: None,
-                    proxy: None,
+                    keep: Default::default(),
                     job: (!linked)
                         .then(|| serde_json::to_string(&job))
                         .transpose()
@@ -2113,10 +2551,10 @@ impl Procs {
         drop(ctl_tx);
 
         let temp = plan.temp.clone();
-        let proxy = plan.proxy.clone();
+        let keep = plan.keep.clone();
         let p3 = proc.clone();
         tokio::spawn(async move {
-            let _proxy = proxy;
+            let _keep = keep;
             let mut stopped = false;
             let status = tokio::select! {
                 s = child.wait() => s,
@@ -2402,10 +2840,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_claude_stream_json() {
+    /// A process for feeding stream lines to, in `format`.
+    fn test_proc(format: &str, opts: AgentOpts) -> Proc {
         let (tx, _) = broadcast::channel(16);
-        let p = Proc {
+        Proc {
             id: 1,
             node: "local".into(),
             parent: None,
@@ -2427,7 +2865,7 @@ mod tests {
                 tools: BTreeMap::new(),
                 agents: Vec::new(),
                 cost_usd: None,
-                format: "claude-stream-json".into(),
+                format: format.into(),
                 host: None,
                 session: None,
                 interactive: false,
@@ -2453,7 +2891,7 @@ mod tests {
             }),
             tx,
             stop: Mutex::new(None),
-            opts: AgentOpts::default(),
+            opts,
             profile: None,
             redact: Vec::new(),
             ctl: Mutex::new(None),
@@ -2461,7 +2899,124 @@ mod tests {
             reflect: false,
             account: None,
             archived: false,
-        };
+        }
+    }
+
+    #[test]
+    fn parses_codex_and_gemini_and_counts_their_spend() {
+        // Codex `exec --json`, as Codex 0.17x prints it.
+        let p = test_proc(
+            "codex-json",
+            AgentOpts {
+                model: Some("gpt-5".into()),
+                ..Default::default()
+            },
+        );
+        for l in [
+            r#"{"type":"thread.started","thread_id":"01a21e49-9f7d-7c22-bf6c-69784030c885"}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}}"#,
+            r#"{"type":"turn.started"}"#,
+            r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'curl -s https://app.example.com'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'curl -s https://app.example.com'","aggregated_output":"refused","exit_code":7,"status":"failed"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The login form is not reachable."}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":100000,"reasoning_output_tokens":15}}"#,
+        ] {
+            p.agent_line(l);
+        }
+        let v = p.view();
+        assert_eq!(
+            v.session.as_deref(),
+            Some("01a21e49-9f7d-7c22-bf6c-69784030c885")
+        );
+        assert!(
+            (v.cost_usd.unwrap() - 2.25).abs() < 1e-9,
+            "{:?}",
+            v.cost_usd
+        );
+        assert!(v.cost_estimated);
+        assert_eq!(v.tools.get("Bash"), Some(&1));
+        let (ev, _) = p.subscribe(0);
+        let kinds: Vec<&str> = ev.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["system", "system", "tool", "error", "text", "result"],
+            "{:?}",
+            ev
+        );
+        assert!(ev[5].text.contains("about $2.25") && ev[5].text.contains("not reachable"));
+
+        // Gemini CLI `--output-format stream-json`; a limit of $0.01 stops it.
+        let p = test_proc(
+            "gemini-stream-json",
+            AgentOpts {
+                max_budget_usd: Some(0.01),
+                ..Default::default()
+            },
+        );
+        for l in [
+            r#"{"type":"init","timestamp":"2026-11-27T18:35:35.491Z","session_id":"a08abb62-93d9-4ce6-b1d1-03ad4fb421b5","model":"gemini-2.5-flash"}"#,
+            r#"{"type":"message","timestamp":"t","role":"user","content":"test"}"#,
+            r#"{"type":"message","timestamp":"t","role":"assistant","content":"Let me ","delta":true}"#,
+            r#"{"type":"message","timestamp":"t","role":"assistant","content":"check.","delta":true}"#,
+            r#"{"type":"tool_use","timestamp":"t","tool_name":"run_shell_command","tool_id":"r1","parameters":{"command":"curl -s https://evil.example.net/x"}}"#,
+            r#"{"type":"tool_result","timestamp":"t","tool_id":"r1","status":"error","output":"Tool execution blocked: evil.example.net is outside the scope","error":{"type":"policy_violation","message":"Tool execution blocked: evil.example.net is outside the scope"}}"#,
+            r#"{"type":"message","timestamp":"t","role":"assistant","content":"Done.","delta":true}"#,
+            r#"{"type":"result","timestamp":"t","status":"success","stats":{"total_tokens":1100000,"input_tokens":1000000,"output_tokens":100000,"cached":0,"input":1000000,"duration_ms":130,"tool_calls":1,"models":{"gemini-2.5-flash":{"total_tokens":1100000,"input_tokens":1000000,"output_tokens":100000,"cached":0,"input":1000000}}}}"#,
+        ] {
+            p.agent_line(l);
+        }
+        let v = p.view();
+        assert_eq!(v.model.as_deref(), Some("gemini-2.5-flash"));
+        assert!(
+            (v.cost_usd.unwrap() - 0.55).abs() < 1e-9,
+            "{:?}",
+            v.cost_usd
+        );
+        let (ev, _) = p.subscribe(0);
+        let texts: Vec<String> = ev
+            .iter()
+            .map(|e| format!("{}: {}", e.kind, e.text))
+            .collect();
+        assert!(
+            texts.contains(&"text: Let me check.".to_string()),
+            "{:?}",
+            texts
+        );
+        assert!(texts
+            .iter()
+            .any(|t| t.starts_with("tool: run_shell_command")));
+        assert!(texts
+            .iter()
+            .any(|t| t.starts_with("error: Tool execution blocked")));
+        assert!(texts
+            .iter()
+            .any(|t| t.starts_with("result: success") && t.ends_with("Done.")));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("reached its spending limit of $0.01")),
+            "{:?}",
+            texts
+        );
+
+        // Claude Code under a subscription login (no cost reported): the
+        // tokens of each model call, counted once.
+        let p = test_proc("claude-stream-json", AgentOpts::default());
+        for l in [
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000000,"output_tokens":0},"content":[{"type":"text","text":"a"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000000,"output_tokens":0},"content":[{"type":"text","text":"b"}]}}"#,
+            r#"{"type":"result","subtype":"success","num_turns":1,"duration_ms":5,"result":"ok"}"#,
+        ] {
+            p.claude_line(l);
+        }
+        let v = p.view();
+        assert!((v.cost_usd.unwrap() - 3.0).abs() < 1e-9, "{:?}", v.cost_usd);
+        assert!(v.cost_estimated);
+    }
+
+    #[test]
+    fn parses_claude_stream_json() {
+        let p = test_proc("claude-stream-json", AgentOpts::default());
         for l in [
             r#"{"type":"system","subtype":"init","model":"m1","tools":[],"session_id":"4f9c2c1e-8b1d-4c55-9b3e-0d6c5c7e2a10"}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Planning"},{"type":"tool_use","id":"t1","name":"Task","input":{"subagent_type":"sh-hunter","description":"hunt sqli"}}]}}"#,

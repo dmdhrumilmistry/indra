@@ -53,7 +53,13 @@ pub struct Upstream {
     pub base: String,
     pub model: Option<String>,
     pub key: Option<String>,
+    /// The key is an OAuth token (a Claude subscription, `claude
+    /// setup-token`): sent as a bearer token with Anthropic's OAuth beta.
+    pub oauth: bool,
 }
+
+/// Anthropic's beta flag for requests made with an OAuth token.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// A fallback as a profile names it: `{ url = "ollama", model =
 /// "qwen3-coder" }` (this machine's Ollama) or `{ url =
@@ -62,16 +68,49 @@ pub struct Upstream {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fallback {
+    /// "ollama", an Anthropic-compatible URL, or empty with an account
+    /// (Anthropic's API).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// An `[[account]]` (a Claude one) whose credential this fallback uses:
+    /// an API key, or a subscription OAuth token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// api_key (default) or oauth_token: how the key is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 impl Fallback {
+    /// Where it goes: Anthropic's API when only an account is named.
+    pub fn base(&self) -> &str {
+        if self.url.is_empty() {
+            "https://api.anthropic.com"
+        } else {
+            &self.url
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        if self.url != "ollama" {
+        if self.url.is_empty() && self.account.is_none() {
+            return Err("fallback: say where it goes (url = \"ollama\" or an https URL), or name an account".into());
+        }
+        if let Some(a) = &self.account {
+            crate::deck::nodes::validate_name(a).map_err(|e| format!("fallback account: {}", e))?;
+            if self.url == "ollama" {
+                return Err("fallback: Ollama takes no account".into());
+            }
+        }
+        if let Some(k) = &self.kind {
+            if !crate::deck::accounts::KINDS.contains(&k.as_str()) {
+                return Err("fallback: kind is api_key or oauth_token".into());
+            }
+        }
+        if !self.url.is_empty() && self.url != "ollama" {
             check_url(&self.url).map_err(|e| format!("fallback: {}", e))?;
             if self.url.starts_with("http://")
                 && !(self.url.starts_with("http://127.0.0.1")
@@ -81,7 +120,7 @@ impl Fallback {
             {
                 return Err("fallback: a key is only sent over https (or to this machine)".into());
             }
-        } else if self.model.is_none() {
+        } else if self.url == "ollama" && self.model.is_none() {
             return Err(
                 "fallback: name the Ollama model it runs on (model = \"qwen3-coder\")".into(),
             );
@@ -319,8 +358,27 @@ async fn proxy(
             let mut headers = parts.headers.clone();
             headers.remove("authorization");
             headers.remove("x-api-key");
-            if let Some(k) = f.key.as_deref().and_then(|k| HeaderValue::from_str(k).ok()) {
-                headers.insert("x-api-key", k);
+            match (f.key.as_deref(), f.oauth) {
+                (Some(k), true) => {
+                    if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", k)) {
+                        headers.insert("authorization", v);
+                    }
+                    // Anthropic's API takes an OAuth token with its beta flag.
+                    let beta = match headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
+                        Some(b) if b.split(',').any(|x| x.trim() == OAUTH_BETA) => b.to_string(),
+                        Some(b) if !b.trim().is_empty() => format!("{},{}", b, OAUTH_BETA),
+                        _ => OAUTH_BETA.to_string(),
+                    };
+                    if let Ok(v) = HeaderValue::from_str(&beta) {
+                        headers.insert("anthropic-beta", v);
+                    }
+                }
+                (Some(k), false) => {
+                    if let Ok(v) = HeaderValue::from_str(k) {
+                        headers.insert("x-api-key", v);
+                    }
+                }
+                (None, _) => {}
             }
             let b = match &f.model {
                 Some(m) => with_model(&body, m),
@@ -735,11 +793,13 @@ mod tests {
                     base: "http://127.0.0.1:9".into(),
                     model: None,
                     key: None,
+                    oauth: false,
                 },
                 Upstream {
                     base: gw.clone(),
                     model: Some("glm-4.6".into()),
                     key: Some("gw-key".into()),
+                    oauth: false,
                 },
             ],
             ..Default::default()
@@ -767,6 +827,7 @@ mod tests {
                 base: gw.clone(),
                 model: None,
                 key: None,
+                oauth: false,
             }],
             ..Default::default()
         })
@@ -775,6 +836,33 @@ mod tests {
         assert!(body.contains("anthropic"));
         assert_eq!(a_seen.lock().unwrap().len(), 1);
         assert_eq!(g_seen.lock().unwrap().len(), 1);
+        // An account's OAuth token (a Claude subscription): a bearer token
+        // with Anthropic's OAuth beta, beside the agent's own betas.
+        let base = register(Route {
+            anthropic: busy.clone(),
+            fallbacks: vec![Upstream {
+                base: gw.clone(),
+                model: None,
+                key: Some("sk-ant-oat-x".into()),
+                oauth: true,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let (st, _) = post(&base, "v1/messages", json!({ "model": "claude-x" })).await;
+        assert_eq!(st, 200);
+        let g = g_seen.lock().unwrap().clone();
+        let last = g.last().unwrap();
+        assert_eq!(last["auth"], "Bearer sk-ant-oat-x");
+        assert_eq!(last["key"], "", "no API key header with an OAuth token");
+        assert_eq!(last["beta"], "x-1,oauth-2025-04-20");
+        let by_account = Fallback {
+            account: Some("team-max".into()),
+            ..Default::default()
+        };
+        assert!(by_account.validate().is_ok());
+        assert_eq!(by_account.base(), "https://api.anthropic.com");
+        assert!(Fallback::default().validate().is_err(), "nowhere to go");
         // Profiles' fallbacks are checked.
         assert!(Fallback {
             url: "ollama".into(),

@@ -27,9 +27,13 @@ and carries on with it. If the turn ends before another tool call, it reads it t
 stopping. Nothing is interrupted and nothing is lost.
 
 Type the message in the session's box and press **Steer now** (or **Steer now** under Control on the
-agent's page). It works for Claude Code agents started from the console, on this machine and on
-machines that dial in. Under the hood, the console queues the text on the agent's machine and
-`indra guard steer`, the agent's PostToolUse and Stop hook, hands it over as context. The session shows
+agent's page). It works for Claude Code, Codex and Gemini CLI agents started from the console, on
+this machine and on machines that dial in, and it is the only way to reach a Codex or Gemini agent
+while it runs (they take no follow-up). Under the hood, the console queues the text on the agent's
+machine and `indra guard steer` hands it over: as context after a tool call (PostToolUse, or
+Gemini's AfterTool), or as the prompt that keeps it going when its turn would end (Stop, or
+Gemini's AfterAgent). For Codex this needs `--dangerously-bypass-hook-trust` (see
+[engagements](engagements.md#run-agents-in-it)). The session shows
 what you sent; in an engagement, the audit log records it too.
 
 API: `POST /api/procs/{id}/steer` with `{"text": "..."}`.

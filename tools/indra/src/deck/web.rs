@@ -1025,6 +1025,7 @@ fn local_folders(app: &App) -> Option<Vec<String>> {
 /// WebRTC on or off, and its ICE servers, for nodes that dial in.
 fn apply_link_settings(procs: &Procs, s: &Settings) {
     procs.set_approvals(s.approvals.clone());
+    crate::deck::pricing::set_table(s.prices.clone());
     let l = procs.links();
     l.webrtc.store(
         s.webrtc && cfg!(feature = "webrtc"),
@@ -1222,6 +1223,7 @@ fn engagement_for(
     id: &str,
     node: &str,
     runner: Option<&config::Runner>,
+    runner_name: &str,
 ) -> ApiResult<crate::deck::engage::Spec> {
     let e = app
         .engagements
@@ -1240,12 +1242,18 @@ fn engagement_for(
             e.spec.name, e.machine
         )));
     }
-    if let Some(r) = runner {
-        if r.format != "claude-stream-json" {
-            return Err(bad(
-                "agents in an engagement must be Claude Code: its hooks are what enforce the scope",
-            ));
-        }
+    let agent = match runner {
+        Some(r) => crate::deck::hooks::Agent::of(r),
+        None => crate::deck::hooks::Agent::named(&crate::deck::accounts::agent_of(
+            runner_name,
+            runner_name,
+            "",
+        )),
+    };
+    if agent == crate::deck::hooks::Agent::Other {
+        return Err(bad(
+            "agents in an engagement must be Claude Code, Codex or Gemini CLI: their hooks are what enforce the scope",
+        ));
     }
     if node != LOCAL {
         // An older indra there would ignore the engagement: refuse.
@@ -1268,6 +1276,12 @@ fn engagement_for(
         if !version_at_least(v, (0, 13, 0)) {
             return Err(bad(format!(
                 "{} runs indra {}, which cannot enforce an engagement: update it there (`indra update`, then `indra node restart`)",
+                node, v
+            )));
+        }
+        if agent != crate::deck::hooks::Agent::Claude && !version_at_least(v, (0, 19, 0)) {
+            return Err(bad(format!(
+                "{} runs indra {}, which can put only Claude Code in an engagement: update it there (`indra update`, then `indra node restart`)",
                 node, v
             )));
         }
@@ -1325,7 +1339,7 @@ pub(crate) async fn proc_start(
             } else {
                 None
             };
-            let spec = engagement_for(&app, id, node, runner)?;
+            let spec = engagement_for(&app, id, node, runner, &runner_name)?;
             // Its budget: what is left of it caps this agent too.
             if let Some(b) = app.engagements.get(id).and_then(|e| e.budget_usd) {
                 let spent = engagement_spent(&app, id);
@@ -5079,6 +5093,7 @@ mod tests {
             workflow_errors: vec![],
             repo_dirs: vec![],
             approvals: Default::default(),
+            prices: vec![],
         };
         let app = App::new(settings, TOKEN.into(), true);
         (app, dir)

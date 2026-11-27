@@ -405,15 +405,15 @@ A runner is how indra starts an agent. Built-in runners are shown when installed
 | Runner | Command | Live view |
 |---|---|---|
 | `claude` | `claude -p {prompt} --output-format stream-json --verbose` | text, every tool call, subagent spawns and results, permission refusals, cost |
-| `codex` | `codex exec {prompt}` | output lines |
-| `gemini` | `gemini -p {prompt}` | output lines |
+| `codex` | `codex exec --json {prompt}` (`format = "codex-json"`) | text, each command and its exit code, files changed, tokens and estimated cost per turn |
+| `gemini` | `gemini -p {prompt} --output-format stream-json` (`format = "gemini-stream-json"`) | text, every tool call and refusal, tokens and estimated cost |
 
 ```toml
 [[runner]]
 name    = "claude-edits"
 command = "claude"
 args    = ["-p", "{prompt}", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"]
-format  = "claude-stream-json"          # or "text"
+format  = "claude-stream-json"          # or codex-json, gemini-stream-json, text
 
 [[preset]]                              # saved prompts on the Launch page
 name    = "Nightly quick review"
@@ -578,11 +578,14 @@ kept in the branch's own git config (`branch.<name>.indraBase`). API: `"worktree
 
 ### Spending limit
 
-A Claude Code agent stops once its API calls cost a set amount: **Spending limit** under Run an
-agent > More options, or `max_budget_usd = 2.5` in a profile. indra passes it as Claude Code's
-own `--max-budget-usd`, and the session says when the agent stopped at it. It meters API billing
-only: a subscription login is not counted this way. Other runners refuse the option rather than
-ignore it.
+An agent stops once it has spent a set amount: **Spending limit** under Run an agent > More
+options, or `max_budget_usd = 2.5` in a profile. Claude Code gets it as its own
+`--max-budget-usd`; indra also counts every agent's spend itself (what Claude Code reports, else
+an estimate from the tokens Codex, Gemini CLI or a subscription login report, see
+[accounts and usage](#accounts-and-usage)) and stops the agent when it reaches the limit, so the
+limit holds for API keys and OAuth logins alike. Claude Code's spend is counted after each model
+call, Codex's after each turn, Gemini CLI's when it finishes. A runner that reports no spend
+refuses the option rather than ignore it.
 
 An engagement can also have a **budget** for all its agents together: see
 [engagements](../../docs/guides/engagements.md#budget).
@@ -727,24 +730,54 @@ name       = "codex"
 agent      = "codex"                   # claude (default) | codex | gemini | any runner (with env = "VAR")
 credential = "secret:openai"
 
+[[account]]
+name       = "codex-identity"
+agent      = "codex"
+kind       = "oauth_token"             # an OpenAI agent identity token (CODEX_ACCESS_TOKEN)
+credential = "secret:codex-identity"
+
+[[account]]
+name       = "gemini-google"
+agent      = "gemini"
+kind       = "oauth_token"             # a Google OAuth access token: Login with Google
+credential = "secret:google-token"
+
 [routing]                              # all optional; these are the defaults
 strategy          = "most_remaining"   # | round_robin | in_order (by priority)
 fallback_to_login = true               # all used up: the machine's own login (false: refuse)
 cooldown_minutes  = 60                 # rest after a usage limit, unless the agent names its reset
 ```
 
-- **Credentials on every node.** The credential goes in the agent's environment
-  (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `env`),
-  resolved on the hub and sent with the job, so a remote node needs no login of its own. It is
-  redacted from everything the agent prints. A profile's own environment wins.
+- **Credentials on every node.** The credential goes in the agent's environment, resolved on the
+  hub and sent with the job, so a remote node needs no login of its own. It is redacted from
+  everything the agent prints. A profile's own environment wins.
+
+  | agent | `api_key` | `oauth_token` |
+  |---|---|---|
+  | claude | `ANTHROPIC_API_KEY` | `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) |
+  | codex | `OPENAI_API_KEY` (and `CODEX_API_KEY`) | `CODEX_ACCESS_TOKEN`: an OpenAI agent identity token, logged in with `codex login --with-access-token` to a private Codex home that links the rest of yours (config, rules, sessions) and is removed when the agent ends |
+  | gemini | `GEMINI_API_KEY` | `GOOGLE_CLOUD_ACCESS_TOKEN` with `GOOGLE_GENAI_USE_GCA=true` (Login with Google); a Google access token lasts about an hour |
+
+  A ChatGPT login copied from `~/.codex/auth.json` is not supported: its refresh token rotates, so
+  two copies log each other out.
 - **Routing.** Each launch (Launch, workflows, the board, plans) picks an account for its agent and
   node: the one a profile pins (`account = "work"` on the profile, or `"login"` for the machine's
   own), else by `strategy`: `most_remaining` takes the account with the most left of its tightest
   limit, then the one used least today. An account can be kept to some `nodes`, or turned off with
   `disabled`. A local model (a profile on Ollama) uses no account.
-- **Usage.** Runs and cost (as agents report it: Claude Code reports each run's cost;
-  subscriptions report none, so limit those by `daily_runs`) are counted per account and per
-  machine login, by day and month, on the **Accounts** page and with `indra accounts`.
+- **Usage.** Runs and cost are counted per account and per machine login, by day and month, on the
+  **Accounts** page and with `indra accounts`. Cost is what the agent reports (Claude Code with an
+  API key), else indra's estimate from the tokens it reports and a price table: Codex, Gemini CLI,
+  and Claude Code under a subscription login. Estimates show as "about $..."; correct or extend the
+  built-in list prices with `[[price]]`:
+
+  ```toml
+  [[price]]
+  model  = "gpt-5"      # a prefix: gpt-5, gpt-5-codex, gpt-5.1-codex ...
+  input  = 1.25         # US$ per million tokens
+  cached = 0.125        # cached input (default input / 10)
+  output = 10
+  ```
 - **Usage limits.** When an agent fails saying it hit a limit ("usage limit reached", "rate limit",
   429, "insufficient quota"...), its account rests until the reset time the agent gives, or
   `cooldown_minutes`, and routing moves on; **Let it run again** on the Accounts page ends the rest.
