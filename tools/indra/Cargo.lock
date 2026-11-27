@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "indra"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "argon2",
  "axum",
@@ -1167,6 +1167,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "portable-pty",
+ "rcgen",
  "regex",
  "rustls",
  "rustls-pki-types",

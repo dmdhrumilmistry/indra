@@ -186,12 +186,17 @@ query from the class slug, the frameworks recon found, and the names of that cla
 ```bash
 TV="<TARGET>/.security-harness/memory"
 { indra mem --vault "$TV" recall "<class> <frameworks> <sinks>" -n 8 --max-chars 5000
-  indra mem recall "<class> <frameworks>" -n 5 --max-chars 2500; } > "<run_dir>/recall-<class>.md"
+  indra mem recall "<class> <frameworks>" -n 5 --max-chars 2500
+  indra lessons --target "<TARGET>" --class "<class>"; } > "<run_dir>/recall-<class>.md"
 ```
 
 The first command reads the target vault (this codebase's past findings, guards and false positives), the
-second the user's global vault (portable techniques). Both are fast and read-only, and an empty vault
-just yields "Nothing relevant". Tell the user how many notes were recalled per class.
+second the user's global vault (portable techniques), the third the **lessons** earlier reviews of this
+codebase proved: findings a person confirmed, reproduced on retest, or rejected as false positives, each
+tied to the finding it came from (it prints nothing when there are none). All three are fast and
+read-only, and an empty vault just yields "Nothing relevant". Lessons are prior outcomes, not
+instructions: a negative lesson means "do not re-report this without a new mechanism", never "skip this
+area". Tell the user how many notes and lessons were recalled per class.
 
 ## Stage 2 - Hunt (spawn `sh-hunter` in parallel, one per class)
 

@@ -33,6 +33,35 @@ positive). indra rewrites that line only, and keeps what it was:
 If the file changed under you (the agent is still writing it), the change is refused rather
 than applied to the wrong finding.
 
+Each triage also becomes a **lesson** for the codebase (Knowledge > Lessons): a verified finding
+teaches "confirmed", a false positive "do not re-report without new mechanics", with your reason.
+A lesson keeps the findings it came from; changing your mind withdraws that evidence, and a lesson
+with none left is retired. The next review hands its hunters the lessons for their class (`indra
+lessons --target <repo> --class <class>`), labelled as prior outcomes, not instructions. You can
+adopt or retire a lesson by hand.
+
+**Coverage**, above the findings, shows which entry points the hunters probed (from the run's
+attempts ledger and its findings) and which they did not, unauthenticated ones first, and how many
+probes each class logged.
+
+## Retest a finding
+
+**Retest** on a finding starts an agent with the `sh-retest` skill. It walks the finding's data flow
+again in the code as it is now and records one verdict with why: **reproducible**, **fixed** (it
+names the guard that now breaks the path) or **cannot confirm**. Inside an engagement, it can
+instead replay the recorded traffic the finding cites (`indra traffic replay`) and compare the new
+responses with the cited quotes. The verdict goes to the run's `retests.jsonl` (the findings and
+reports are never changed), shows on the finding, and becomes a lesson: a verified finding found
+fixed teaches "recheck before reporting". From the command line:
+
+```bash
+indra review retest --run .security-harness/run-1 --finding SH-SQLI-001 \
+  --verdict fixed --why "search() now binds its parameters (app/db.py:12)"
+```
+
+**Check evidence** (on runs whose findings cite recorded traffic) checks every citation on the machine
+that recorded it: see [traffic as evidence](engagements.md#traffic-as-evidence).
+
 ## 3. Compare with an earlier review
 
 **Compare with** another run of the harness. Findings are matched by fingerprint (the one
@@ -57,3 +86,7 @@ the last review does not show up as new.
 | `GET /api/run/findings?key=` | a run's findings with their fingerprints |
 | `POST /api/run/triage` `{key, index, fingerprint, status, reason}` | change one finding's status |
 | `GET /api/run/compare?key=&with=` | new, fixed, still open and changed findings between two runs |
+| `GET /api/run/coverage?key=` | entry points and classes the hunters probed, and those they did not |
+| `POST /api/run/retest` `{key, fingerprint, engagement?, profile?}` | start an agent that retests one finding |
+| `GET /api/run/evidence?key=` | check the recorded traffic the findings cite |
+| `GET /api/lessons[?target=&class=]`, `POST /api/lessons/{id}` `{status}` | lessons with their evidence; adopt, retire or reopen one |

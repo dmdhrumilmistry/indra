@@ -376,9 +376,214 @@ pub fn build(dir: &Path) -> Option<Value> {
     }))
 }
 
+// ---- coverage ------------------------------------------------------------------
+
+/// One block of the attempts ledger (`attempts.md`): a hunter's class, the
+/// area it probed, and what it covered and found.
+#[derive(Debug, Default, Clone)]
+struct Attempt {
+    class: String,
+    area: String,
+    scope: String,
+    result: String,
+}
+
+fn attempts(text: &str) -> Vec<Attempt> {
+    let mut out: Vec<Attempt> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("## [") {
+            if let Some((class, area)) = rest.split_once(']') {
+                // "<area> - <timestamp>": keep the area.
+                let area = area.trim();
+                let area = area.rsplit_once(" - ").map(|(a, _)| a).unwrap_or(area);
+                out.push(Attempt {
+                    class: class.trim().to_ascii_lowercase(),
+                    area: area.trim().to_string(),
+                    ..Default::default()
+                });
+            }
+            continue;
+        }
+        let Some(a) = out.last_mut() else { continue };
+        if let Some(v) = l.strip_prefix("- scope:") {
+            a.scope.push_str(v.trim());
+            a.scope.push(' ');
+        } else if let Some(v) = l.strip_prefix("- result:") {
+            a.result = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("- technique:") {
+            // A technique can name the file it searched.
+            a.scope.push_str(v.trim());
+            a.scope.push(' ');
+        }
+    }
+    out
+}
+
+/// What a run's hunters covered: each entry point in its codebase map,
+/// whether any hunter probed it (the attempts ledger names its file or
+/// route, or a finding traces through it), with which classes; and each
+/// class in the run's scope, with how many probes it logged and how they
+/// came out. None when the run has no codebase map.
+pub fn coverage(dir: &Path) -> Option<Value> {
+    let map = read_json(&dir.join("codebase-map.json"))?;
+    let ledger = attempts(&std::fs::read_to_string(dir.join("attempts.md")).unwrap_or_default());
+    let findings = read_findings(dir);
+    let norm = |p: &str| p.trim().trim_start_matches("./").replace('\\', "/");
+    let mut eps = Vec::new();
+    let mut hunted = 0;
+    for e in map["entry_points"].as_array().cloned().unwrap_or_default() {
+        let file = norm(&s(&e, "file"));
+        let route = s(&e, "path");
+        let label = format!("{} {}", s(&e, "method"), route).trim().to_string();
+        let names = |text: &str| -> bool {
+            let t = text.replace('\\', "/");
+            (!file.is_empty() && t.contains(&file)) || (route.len() > 1 && t.contains(&route))
+        };
+        let mut classes: Vec<String> = ledger
+            .iter()
+            .filter(|a| names(&a.area) || names(&a.scope))
+            .map(|a| a.class.clone())
+            .collect();
+        let mut ids = Vec::new();
+        for f in &findings {
+            let mut text = format!("{} {}", s(f, "file"), s(f, "entry_point"));
+            for step in f["data_flow"].as_array().cloned().unwrap_or_default() {
+                text.push(' ');
+                text.push_str(&match &step {
+                    Value::String(x) => x.clone(),
+                    other => s(other, "file"),
+                });
+            }
+            if names(&text) {
+                classes.push(s(f, "class").to_ascii_lowercase());
+                ids.push(s(f, "id"));
+            }
+        }
+        classes.retain(|c| !c.is_empty());
+        classes.sort();
+        classes.dedup();
+        let done = !classes.is_empty();
+        if done {
+            hunted += 1;
+        }
+        eps.push(json!({
+            "label": if label.is_empty() { format!("{} {}", s(&e, "kind"), s(&e, "handler")).trim().to_string() } else { label },
+            "file": file, "line": e["line"], "auth_required": e["auth_required"].as_bool().unwrap_or(false),
+            "hunted": done, "classes": classes, "findings": ids,
+        }));
+    }
+    // Unprobed entry points first, those without a login before the rest.
+    eps.sort_by_key(|e| {
+        (
+            e["hunted"].as_bool().unwrap_or(false),
+            e["auth_required"].as_bool().unwrap_or(false),
+        )
+    });
+    let scope = read_json(&dir.join("scope.json")).unwrap_or(Value::Null);
+    let mut classes: BTreeMap<String, (u32, u32, u32, u32)> = BTreeMap::new();
+    for c in scope["classes"].as_array().cloned().unwrap_or_default() {
+        if let Some(c) = c.as_str() {
+            classes.entry(c.to_ascii_lowercase()).or_default();
+        }
+    }
+    for a in &ledger {
+        let r = a.result.to_ascii_lowercase();
+        let e = classes.entry(a.class.clone()).or_default();
+        e.0 += 1;
+        if r.starts_with("found") {
+            e.1 += 1;
+        } else if r.starts_with("clean") {
+            e.2 += 1;
+        } else {
+            e.3 += 1;
+        }
+    }
+    let class_list: Vec<Value> = classes
+        .iter()
+        .map(|(c, (n, found, clean, other))| {
+            json!({ "class": c, "attempts": n, "found": found, "clean": clean, "inconclusive": other })
+        })
+        .collect();
+    let unhunted_classes = classes.values().filter(|x| x.0 == 0).count();
+    Some(json!({
+        "summary": {
+            "entry_points": eps.len(), "hunted": hunted, "unhunted": eps.len() - hunted,
+            "unhunted_without_login": eps.iter().filter(|e| e["hunted"] == false && e["auth_required"] == false).count(),
+            "classes": classes.len(), "classes_unhunted": unhunted_classes, "attempts": ledger.len(),
+        },
+        "entry_points": eps,
+        "classes": class_list,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_matches_entry_points_with_the_attempts_ledger() {
+        let dir = std::env::temp_dir().join(format!("indra-cov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codebase-map.json"), json!({
+            "entry_points": [
+                { "kind": "http-route", "method": "POST", "path": "/api/login", "file": "app/auth/views.py", "line": 20, "auth_required": false },
+                { "kind": "http-route", "method": "GET", "path": "/api/invoices/{id}", "file": "app/billing/views.py", "line": 31, "auth_required": true },
+                { "kind": "http-route", "method": "POST", "path": "/api/upload", "file": "app/files/views.py", "line": 9, "auth_required": false },
+                { "kind": "cli", "handler": "manage.export", "file": "manage.py", "auth_required": true }
+            ]
+        }).to_string()).unwrap();
+        std::fs::write(
+            dir.join("scope.json"),
+            json!({ "classes": ["sqli", "access-control", "file-upload"] }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("attempts.md"),
+            "## [sqli] app/auth/views.py - 2026-11-27T10:00\n- technique: graft grep 'cursor.execute'\n- scope: app/auth/views.py, app/auth/db.py\n- result: found: SH-SQLI-001\n\n\
+             ## [sqli] app/search - 2026-11-27T10:05\n- technique: grep raw sql\n- scope: app/search/*.py\n- result: clean\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("verified.jsonl"),
+            json!({ "id": "SH-AC-002", "class": "access-control", "status": "verified", "file": "app/billing/service.py", "entry_point": "GET /api/invoices/{id}" }).to_string() + "\n",
+        )
+        .unwrap();
+        let c = coverage(&dir).unwrap();
+        assert_eq!(c["summary"]["entry_points"], 4);
+        assert_eq!(c["summary"]["hunted"], 2);
+        assert_eq!(c["summary"]["unhunted_without_login"], 1);
+        let eps = c["entry_points"].as_array().unwrap();
+        // Unprobed and unauthenticated first.
+        assert_eq!(eps[0]["label"], "POST /api/upload");
+        assert_eq!(eps[0]["hunted"], false);
+        let login = eps
+            .iter()
+            .find(|e| e["label"] == "POST /api/login")
+            .unwrap();
+        assert_eq!(login["classes"], json!(["sqli"]));
+        let inv = eps
+            .iter()
+            .find(|e| e["file"] == "app/billing/views.py")
+            .unwrap();
+        assert_eq!(inv["findings"], json!(["SH-AC-002"]));
+        let classes = c["classes"].as_array().unwrap();
+        let sqli = classes.iter().find(|x| x["class"] == "sqli").unwrap();
+        assert_eq!(
+            (
+                sqli["attempts"].as_u64(),
+                sqli["found"].as_u64(),
+                sqli["clean"].as_u64()
+            ),
+            (Some(2), Some(1), Some(1))
+        );
+        assert_eq!(
+            c["summary"]["classes_unhunted"], 2,
+            "access-control and file-upload logged no probe"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn exposure_follows_the_graph_and_explicit_verdicts() {

@@ -703,6 +703,7 @@ impl Proc {
         always: bool,
         message: Option<&str>,
         answers: Option<&Value>,
+        by: &str,
     ) -> Result<(), String> {
         self.check_open()?;
         let a = {
@@ -748,13 +749,18 @@ impl Proc {
                     .join("; ")
             ),
             _ => format!(
-                "{} {}{}",
+                "{} {}{}{}",
                 if allow { "allowed" } else { "denied" },
                 a.tool,
                 if allow && always {
                     " (always, for this session)"
                 } else {
                     ""
+                },
+                if by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (decided by {})", by)
                 }
             ),
         };
@@ -928,6 +934,15 @@ impl Proc {
     /// A note from indra in its event stream.
     pub fn note_system(&self, text: String) {
         self.push("system", text, None);
+    }
+
+    /// A steer the console queued: shown as the person's own words.
+    pub fn note_steer(&self, text: &str) {
+        self.push(
+            "user",
+            format!("{}\n\n(steer: read after its next tool call)", text),
+            None,
+        );
     }
 
     /// What the agent concluded: its final result, else its last messages.
@@ -1231,6 +1246,34 @@ impl Proc {
                     let tool = s(&req, "tool_name");
                     let input = req.get("input").cloned().unwrap_or(Value::Null);
                     let summary = tool_summary(&tool, &input);
+                    // Approval rules decide some Bash requests without asking.
+                    let verdict = self.opts.approvals.decide(&tool, &input);
+                    let decided = match &verdict {
+                        crate::deck::approve::Verdict::Allow(rule) => Some((
+                            serde_json::json!({ "behavior": "allow", "updatedInput": input }),
+                            format!(
+                                "allowed {}{} (decided by the rule `{}`)",
+                                tool, summary, rule
+                            ),
+                        )),
+                        crate::deck::approve::Verdict::Deny(rule) => Some((
+                            serde_json::json!({ "behavior": "deny", "message": format!(
+                                "Refused by the approval rule `{}` set in the indra console. Do not try to get around it; ask the operator if it is needed.", rule) }),
+                            format!(
+                                "denied {}{} (decided by the rule `{}`)",
+                                tool, summary, rule
+                            ),
+                        )),
+                        crate::deck::approve::Verdict::Ask => None,
+                    };
+                    if let Some((response, said)) = decided {
+                        let line = serde_json::json!({ "type": "control_response", "response": {
+                            "subtype": "success", "request_id": id, "response": response } });
+                        if self.send(Ctl::Line(line.to_string())).is_ok() {
+                            self.push("permission", said, agent);
+                            return;
+                        }
+                    }
                     self.state.lock().unwrap().pending.push(Approval {
                         request_id: id,
                         tool: tool.clone(),
@@ -1390,6 +1433,8 @@ pub struct Procs {
     links: Arc<crate::deck::link::Links>,
     /// Accounts and routing (set by the console and `indra run`).
     accounts: std::sync::OnceLock<Arc<crate::deck::accounts::Accounts>>,
+    /// `[approvals]`: rules every agent started from here is decided by.
+    approvals: Mutex<crate::deck::approve::Rules>,
 }
 
 /// Extra launch options: a pivot's session and parent, and the agent options.
@@ -1465,6 +1510,7 @@ impl Procs {
             vault: Arc::new(crate::deck::secrets::Vault::open(secrets)),
             links: Arc::new(crate::deck::link::Links::default()),
             accounts: std::sync::OnceLock::new(),
+            approvals: Mutex::default(),
         })
     }
 
@@ -1625,6 +1671,11 @@ impl Procs {
     }
 
     /// Route launches through these accounts.
+    /// The `[approvals]` rules for agents started from now on.
+    pub fn set_approvals(&self, r: crate::deck::approve::Rules) {
+        *self.approvals.lock().unwrap() = r;
+    }
+
     pub fn set_accounts(&self, a: Arc<crate::deck::accounts::Accounts>) {
         let _ = self.accounts.set(a);
     }
@@ -1701,6 +1752,8 @@ impl Procs {
             job: Option<String>,
             /// A private file to delete when the agent exits (its MCP config).
             temp: Option<PathBuf>,
+            /// Its recording proxy, kept until the agent exits.
+            proxy: Option<Arc<crate::deck::proxy::Handle>>,
             /// Remote over the agent link: the node and the job.
             link: Option<(String, crate::deck::nodes::Job)>,
             node: String,
@@ -1726,8 +1779,9 @@ impl Procs {
         let (servers, more) =
             crate::deck::integrations::resolve(&opts.agent.mcp_servers, &self.vault, &node_name)?;
         redact.extend(more);
-        let shown = opts.agent.clone();
         let mut opts = opts;
+        opts.agent.approvals = self.approvals.lock().unwrap().merged(&opts.agent.approvals);
+        let shown = opts.agent.clone();
         opts.agent.env = env;
         opts.agent.mcp_servers = servers;
         let plan = match l {
@@ -1755,6 +1809,7 @@ impl Procs {
                     control: ac.control,
                     job: None,
                     temp: ac.temp,
+                    proxy: ac.proxy,
                     link: None,
                     node: crate::deck::nodes::LOCAL.into(),
                     runner: runner.name.clone(),
@@ -1801,6 +1856,7 @@ impl Procs {
                     env: Vec::new(),
                     control: None,
                     temp: None,
+                    proxy: None,
                     job: (!linked)
                         .then(|| serde_json::to_string(&job))
                         .transpose()
@@ -2057,8 +2113,10 @@ impl Procs {
         drop(ctl_tx);
 
         let temp = plan.temp.clone();
+        let proxy = plan.proxy.clone();
         let p3 = proc.clone();
         tokio::spawn(async move {
+            let _proxy = proxy;
             let mut stopped = false;
             let status = tokio::select! {
                 s = child.wait() => s,

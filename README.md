@@ -64,8 +64,10 @@ built on them.
   <img src="assets/screenshots/live-agents.png" alt="The indra console following a live review: subagents, their tool calls, and a refused permission" width="100%">
 </p>
 
-> **Scope:** indra performs **static** analysis (source review, data-flow tracing, PoC and payload
-> construction) on code you own or are authorized to test. It does not attack live third-party systems.
+> **Scope:** the review harness performs **static** analysis (source review, data-flow tracing, PoC and
+> payload construction) on code you own or are authorized to test. Live testing happens only inside an
+> [engagement](docs/guides/engagements.md): a written scope, a window and an authorization, enforced on
+> every tool call and, through the recording proxy, on every connection.
 
 ## What's inside
 
@@ -81,6 +83,7 @@ indra/                           # this repository: a plugin marketplace + the i
 │   │   ├── sh-log-triage        # blue team: alert triage and threat hunting, read-only
 │   │   ├── sh-hardening         # blue team: an ordered, verifiable fix plan
 │   │   ├── sh-attack-surface    # what an attacker can reach; which CVEs and findings actually impact
+│   │   ├── sh-retest            # is a finding still there: reproducible, fixed or cannot confirm
 │   │   ├── sh-memory            # long-term graph memory across runs
 │   │   ├── sh-publish           # findings to Jira, Confluence, GitHub issues, Notion
 │   │   └── sh-kb-*  (15)        # per-vulnerability-class knowledge bases

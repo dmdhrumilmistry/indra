@@ -634,7 +634,7 @@
 
   // ---- knowledge ------------------------------------------------------------------
   // Memory vaults managed in place, the learnings inbox, the graph, and health.
-  var KTABS = [["notes", "Notes"], ["learnings", "Learnings"], ["graph", "Graph"], ["health", "Health"]];
+  var KTABS = [["notes", "Notes"], ["learnings", "Learnings"], ["lessons", "Lessons"], ["graph", "Graph"], ["health", "Health"]];
   function csv(s) { return String(s || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
   function pageKnowledge(m, arg) {
     var parts = String(arg || "").split("/");
@@ -653,7 +653,7 @@
       var v = vaults.find(function (x) { return x.index === cur; });
       if (vaults.length) {
         top.appendChild(h("div", { class: "vaults", role: "list", "aria-label": "Memory vaults" }, vaults.map(function (x) {
-          var pick = function () { go(tab === "learnings" ? "notes" : tab, x.index); };
+          var pick = function () { go(tab === "learnings" || tab === "lessons" ? "notes" : tab, x.index); };
           return h("div", { class: "vault" + (x.index === cur ? " sel" : ""), role: "listitem", tabindex: "0", title: x.path,
             onclick: pick, onkeydown: function (e) { if (e.key === "Enter") pick(); } },
             h("span", { class: "vlabel", text: x.global ? "Global memory (every agent)" : vaults.length > 1 ? "Vault " + (x.index + 1) : "Vault" }),
@@ -676,6 +676,7 @@
           t[1], t[0] === "learnings" && k.learnings ? h("b", { class: "badge warn", text: String(k.learnings) }) : null);
       })));
       if (tab === "learnings") return learnings(vaults, cur);
+      if (tab === "lessons") return lessons();
       if (!v || !v.exists) { body.appendChild(empty(vaults.length ? "Create this vault first." : "No vault to show.")); return; }
       if (tab === "graph") return graph(cur);
       if (tab === "health") return health(cur);
@@ -816,6 +817,43 @@
           h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Create"), h("button", { type: "button", onclick: function () { go("notes", i, noteId); route(); } }, "Cancel"))));
         f.title.focus();
       }
+    }
+
+    // What earlier reviews proved, per codebase, each tied to its findings.
+    function lessons() {
+      body.appendChild(h("p", { class: "muted", text: "Lessons are written by rules, never by a model: from a finding you triaged (verified, false positive) or a retest (reproducible, fixed). Each keeps the findings it came from; reversing a triage withdraws that evidence, and a lesson with none left is retired. The next review of the same codebase hands its hunters the lessons for their class, as prior outcomes, not instructions (indra lessons --target <repo>)." }));
+      var list = h("div");
+      body.appendChild(list);
+      var KIND = { positive: "ok", negative: "bad", caution: "warn" };
+      function load() {
+        api("/api/lessons").then(function (r) {
+          list.textContent = "";
+          if (!r.lessons.length) { list.appendChild(empty("No lessons yet. Triage a review's findings, or retest one, and they appear here.")); return; }
+          var groups = {};
+          r.lessons.forEach(function (l) { (groups[l.target] = groups[l.target] || []).push(l); });
+          Object.keys(groups).sort().forEach(function (t) {
+            var tb = h("tbody");
+            groups[t].forEach(function (l) {
+              var ev = l.evidence.map(function (e) { return (e.id || e.finding.slice(0, 8)) + " in " + e.run + " (" + e.source + ": " + e.outcome + (e.withdrawn ? ", withdrawn" : "") + ")"; }).join("; ");
+              var act = S.ov.read_only ? null : h("select", { "aria-label": "Status" }, ["candidate", "adopted", "retired"].map(function (x) { return h("option", { value: x, text: x }); }));
+              if (act) {
+                act.value = l.status;
+                act.addEventListener("change", function () {
+                  api("/api/lessons/" + l.id, { method: "POST", body: { status: act.value } }).then(function () { toast("Lesson " + act.value); load(); }).catch(function (e) { toast(e.message, true); });
+                });
+              }
+              tb.appendChild(h("tr", null,
+                h("td", null, h("span", { class: "pill " + (KIND[l.kind] || ""), text: l.kind })),
+                h("td", null, h("b", { text: l.action }), h("div", { class: "muted small", text: "when " + l.cue }), h("div", { class: "muted small", text: ev })),
+                h("td", { class: "small", text: l.support + " live" }),
+                h("td", null, act || h("span", { text: l.status }))));
+            });
+            list.appendChild(h("div", { class: "card" }, h("p", null, h("b", { text: "Codebase " }), h("code", { text: t })),
+              h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Kind", "Lesson", "Evidence", "Status"].map(function (x) { return h("th", { text: x }); }))), tb))));
+          });
+        }).catch(function (e) { list.textContent = ""; list.appendChild(empty(e.message)); });
+      }
+      load();
     }
 
     function learnings(vaults, cur) {
@@ -1104,6 +1142,35 @@
     return box;
   }
 
+  // What the hunters probed (the attempts ledger), against the entry points.
+  function runCoverage(key) {
+    var box = h("div");
+    api("/api/run/coverage" + hq({ key: key })).then(function (c) {
+      var s = c.summary;
+      if (!s.entry_points && !s.classes) return;
+      var card = h("div", { class: "card coverage" }, h("h3", { text: "Coverage" }));
+      var nl = s.unhunted_without_login;
+      card.appendChild(h("p", null, h("b", { text: s.hunted + " of " + s.entry_points }), " entry points were probed by a hunter" +
+        (nl ? "; " : "."), nl ? h("b", { text: nl + (nl === 1 ? " reachable without a login was not." : " reachable without a login were not.") }) : null,
+        h("span", { class: "muted small", text: " " + s.attempts + (s.attempts === 1 ? " probe" : " probes") + " logged; " + (s.classes - s.classes_unhunted) + " of " + s.classes + " classes probed." })));
+      var tb = h("tbody");
+      c.entry_points.forEach(function (e) {
+        tb.appendChild(h("tr", null,
+          h("td", null, h("span", { class: "pill " + (e.hunted ? "ok" : e.auth_required ? "" : "warn"), text: e.hunted ? "probed" : "not probed" })),
+          h("td", null, h("b", { text: e.label }), h("div", { class: "mono small muted", text: e.file + (e.line != null ? ":" + e.line : "") + (e.auth_required ? "" : "  (no login)") })),
+          h("td", { class: "small", text: e.classes.join(", ") + (e.findings.length ? "  [" + e.findings.join(", ") + "]" : "") })));
+      });
+      card.appendChild(h("details", { keep: "cov-" + key }, h("summary", { text: "Entry points (" + c.entry_points.length + ")" }),
+        h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["", "Entry point", "Classes (findings)"].map(function (t) { return h("th", { text: t }); }))), tb))));
+      card.appendChild(h("div", { class: "chips" }, c.classes.map(function (x) {
+        return h("span", { class: "pill " + (x.attempts ? (x.found ? "bad" : "ok") : "warn"), title: x.found + " found, " + x.clean + " clean, " + x.inconclusive + " inconclusive",
+          text: x.class + ": " + (x.attempts ? x.attempts + " probes" : "not probed") });
+      })));
+      box.appendChild(card);
+    }).catch(function () { /* no codebase map */ });
+    return box;
+  }
+
   function runThreats(key) {
     var box = h("div");
     api("/api/run/file" + hq({ key: key, rel: "threat-model.json", max: 4194304 })).then(function (f) {
@@ -1191,19 +1258,43 @@
                 list[list.indexOf(f)] = n; toast((n.id || "Finding") + ": " + n.status + (n.status === "false-positive" ? ". Record into memory to remember it." : "")); rows();
               }).catch(function (e) { toast(e.message, true); dirty(); });
             });
-            var t = f.triage;
+            var t = f.triage, rt = f.retest;
+            var RT = { reproducible: "bad", fixed: "ok", "cannot-confirm": "warn" };
+            var retest = ro || f.status === "false-positive" ? null : h("button", { type: "button", class: "ghost small", title: "Start an agent that checks whether this finding is still there (the sh-retest skill)", onclick: function () {
+              retest.disabled = true;
+              api("/api/run/retest", { method: "POST", body: { h: S.h, key: key, fingerprint: f.fingerprint } })
+                .then(function (p) { location.hash = "#/sessions/" + p.id; })
+                .catch(function (e) { toast(e.message, true); retest.disabled = false; });
+            } }, "Retest");
             tbody.appendChild(h("tr", null,
               h("td", null, h("span", { class: "sev sev-" + (f.severity || "info"), text: f.severity || "?" })),
               h("td", null, h("b", { text: (f.id ? f.id + ": " : "") + (f.title || "(untitled)") }),
                 h("div", { class: "muted small", text: [f.class, f.file ? f.file + (f.line != null ? ":" + f.line : "") : ""].filter(Boolean).join("  ") }),
-                t && t.to ? h("div", { class: "muted small", text: "triaged " + t.from + " -> " + t.to + (t.reason ? ": " + t.reason : "") }) : null),
+                t && t.to ? h("div", { class: "muted small", text: "triaged " + t.from + " -> " + t.to + (t.reason ? ": " + t.reason : "") }) : null,
+                rt ? h("div", { class: "small" }, h("span", { class: "pill " + (RT[rt.verdict] || ""), text: "retest: " + rt.verdict }),
+                  h("span", { class: "muted", text: " " + (rt.why || "") + (rt.commit ? " (at " + String(rt.commit).slice(0, 10) + ")" : "") + (rt.at ? ", " + rt.at.slice(0, 10) : "") })) : null,
+                f.evidence ? h("div", { class: "small muted", text: f.evidence + " recorded exchange(s) cited" }) : null,
+                retest),
               h("td", null, ro ? h("span", { text: f.status }) : st),
               ro ? null : h("td", { class: "grow" }, h("div", { class: "row" }, why, save))));
           });
         if (!tbody.childNodes.length) tbody.appendChild(h("tr", null, h("td", { colspan: "4", class: "muted", text: "None." })));
       }
       filter.addEventListener("change", rows);
-      card.appendChild(h("div", { class: "row" }, h("h3", { class: "grow", text: "Findings (" + list.length + ")" }), h("span", { class: "muted small", text: "Show" }), filter));
+      var evOut = h("div");
+      var cited = list.filter(function (f) { return f.evidence; }).length;
+      card.appendChild(h("div", { class: "row" }, h("h3", { class: "grow", text: "Findings (" + list.length + ")" }),
+        cited ? h("button", { type: "button", class: "ghost small", title: "Check the recorded traffic these findings cite: it exists, is unchanged, and contains each quote", onclick: function () {
+          evOut.textContent = "";
+          api("/api/run/evidence" + hq({ key: key })).then(function (r) {
+            var ok = r.findings.filter(function (x) { return x.verified; }).length;
+            evOut.appendChild(h("div", { class: "note " + (ok === r.findings.length ? "ok" : "warn") },
+              h("b", { text: ok + " of " + r.findings.length + " findings are evidence-verified." }),
+              h("ul", null, r.findings.map(function (x) { return h("li", { class: "small", text: (x.id || "") + " " + (x.title || "") + ": " + (x.verified ? "verified" : x.why) }); }))));
+          }).catch(function (e) { toast(e.message, true); });
+        } }, "Check evidence (" + cited + ")") : null,
+        h("span", { class: "muted small", text: "Show" }), filter));
+      card.appendChild(evOut);
       card.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["", "Finding", "Status", ro ? null : "Change"].filter(function (x) { return x !== null; }).map(function (x) { return h("th", { text: x }); }))), tbody)));
       // Compare with another run of this harness.
       var other = h("select", { "aria-label": "Compare with" }), out = h("div");
@@ -1430,7 +1521,7 @@
 
   function pageRun(m, key) {
     var top = h("div"), body = h("div"), viewer = h("div");
-    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runSurface(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
+    m.appendChild(top); m.appendChild(runActions(key)); m.appendChild(runSurface(key)); m.appendChild(runCoverage(key)); m.appendChild(runThreats(key)); m.appendChild(runFindings(key)); m.appendChild(body);
     var openRel = null, lastMod = 0;
     function showFile(rel) {
       openRel = rel;
@@ -1713,12 +1804,20 @@
       var starts = h("input", { type: "datetime-local", required: true, value: localInput(now) });
       var ends = h("input", { type: "datetime-local", required: true, value: localInput(now + 8 * 3600) });
       var rate = h("input", { type: "number", min: "0.1", max: "100", step: "0.1", value: "2" });
+      // Noise: presets for the pace, or a number of your own.
+      var noise = h("select", { "aria-label": "Noise" }, [["1", "quiet (1 call/s)"], ["2", "careful (2 calls/s)"], ["5", "balanced (5 calls/s)"], ["20", "aggressive (20 calls/s)"], ["", "custom"]].map(function (x) { return h("option", { value: x[0], text: x[1] }); }));
+      noise.value = "2";
+      noise.addEventListener("change", function () { if (noise.value) rate.value = noise.value; });
+      rate.addEventListener("input", function () { noise.value = ["1", "2", "5", "20"].indexOf(rate.value) >= 0 ? rate.value : ""; });
+      var budget = h("input", { type: "number", min: "0.01", step: "0.01", placeholder: "no limit" });
+      var record = h("input", { type: "checkbox", checked: true });
       var auth = h("textarea", { required: true, rows: "3", placeholder: "Who authorized this test, and the reference: a signed statement of work, a ticket, an email." });
       var go = h("button", { type: "submit", class: "primary" }, "Create engagement");
       var form = h("form", { class: "card form", onsubmit: function (e) {
         e.preventDefault(); go.disabled = true;
         api("/api/engagements", { method: "POST", body: { name: name.value, machine: machine.value, scope: lines(scope.value), exclude: lines(exclude.value),
-          starts: fromInput(starts.value), ends: fromInput(ends.value), rate: Number(rate.value) || 2, authorization: auth.value } })
+          starts: fromInput(starts.value), ends: fromInput(ends.value), rate: Number(rate.value) || 2, authorization: auth.value,
+          budget_usd: budget.value ? Number(budget.value) : null, record: record.checked } })
           .then(function (e) { toast("Engagement created"); formBox.textContent = ""; load(e.id); })
           .catch(function (err) { toast(err.message, true); go.disabled = false; });
       } },
@@ -1726,9 +1825,13 @@
         h("div", { class: "fields" }, h("label", null, "Name", name), h("label", null, "Machine", h("small", { text: "Its agents run there only." }), machine)),
         h("label", null, "In scope", h("small", { text: "One per line: a host (app.example.com), its subdomains (*.example.com), an IP or a CIDR range. Anything else is refused." }), scope),
         h("label", null, "Excluded", h("small", { text: "Never tested, even inside the scope." }), exclude),
-        h("div", { class: "fields" }, h("label", null, "Starts", starts), h("label", null, "Ends", ends), h("label", null, "Calls per second per host", rate)),
+        h("div", { class: "fields" }, h("label", null, "Starts", starts), h("label", null, "Ends", ends)),
+        h("div", { class: "fields" }, h("label", null, "Noise", h("small", { text: "How hard each host is hit. A host that answers 429 or 503 is backed off." }), noise),
+          h("label", null, "Calls per second per host", rate),
+          h("label", null, "Budget (US$)", h("small", { text: "What all its agents may spend together: told to wrap up at 90%, stopped at 100%." }), budget)),
+        h("label", { class: "check" }, record, h("span", { text: "Record traffic: its agents' web requests go through indra's recording proxy, which enforces the scope on every connection and keeps each request and response as evidence." })),
         h("label", null, "Authorization", h("small", { text: "Required. Kept with the engagement and in its audit log." }), auth),
-        h("p", { class: "muted small", text: "Agents in it are Claude Code with indra guard as a hook: it refuses tool calls that name a host outside the scope or run outside the window, paces calls per host, and logs every call. It reads the hosts a command names, not what a program connects to by itself: for hard enforcement, also firewall the machine to the scope." }),
+        h("p", { class: "muted small", text: "Agents in it are Claude Code with indra guard as a hook: it refuses tool calls that name a host outside the scope or run outside the window, paces calls per host, and logs every call. With recording on, the proxy also checks every connection the programs make (redirects included). A program that ignores the proxy settings is not seen: for hard enforcement, also firewall the machine to the scope." }),
         h("div", { class: "row" }, go, h("button", { type: "button", onclick: function () { formBox.textContent = ""; } }, "Cancel")));
       formBox.appendChild(form); name.focus();
     }
@@ -1811,16 +1914,83 @@
         box.appendChild(h("p", { class: "muted small", text: "A step counts as detected when a SIEM event from a minute before it to " + Math.round(r.slack / 60) + " minutes after it names one of its hosts." }));
       }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
     }
+    // What its agents reached, against the scope.
+    function coverageView(e, box) {
+      box.textContent = "";
+      box.appendChild(h("p", { class: "muted small", text: "Reading the audit log..." }));
+      api("/api/engagements/" + e.id + "/coverage").then(function (c) {
+        box.textContent = "";
+        var s = c.summary;
+        box.appendChild(h("div", { class: "row" },
+          h("span", { class: "pill " + (s.untested ? "warn" : "ok"), text: s.tested + " of " + s.entries + " scope entries reached" }),
+          h("span", { class: "muted small", text: s.hosts + " hosts, " + s.calls + " calls" + (s.refused ? ", " + s.refused + " refused" : "") }),
+          c.budget_usd ? h("span", { class: "pill " + (c.spent_usd >= c.budget_usd ? "bad" : c.spent_usd >= 0.9 * c.budget_usd ? "warn" : ""), text: "$" + c.spent_usd.toFixed(2) + " of $" + c.budget_usd.toFixed(2) + " spent" }) : null,
+          c.machine === "unreachable" ? h("span", { class: "pill warn", text: e.machine + " is not connected: its agents' calls are not counted" }) : null));
+        var tb = h("tbody");
+        c.scope.forEach(function (x) {
+          tb.appendChild(h("tr", null, h("td", null, h("code", { text: x.entry })),
+            h("td", null, h("span", { class: "pill " + (x.tested ? "ok" : "warn"), text: x.tested ? "reached" : "not reached yet" })),
+            h("td", { class: "small" }, x.hosts.slice(0, 30).map(function (o) { return h("div", { text: o.host + "  (" + o.calls + ", last " + new Date(o.last).toLocaleString() + ")" }); }),
+              x.hosts.length > 30 ? h("div", { class: "muted", text: "and " + (x.hosts.length - 30) + " more" }) : null)));
+        });
+        box.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Scope entry", "Coverage", "Hosts reached (calls, last)"].map(function (t) { return h("th", { text: t }); }))), tb)));
+        if (c.refused.length) box.appendChild(h("p", { class: "small" }, h("b", { text: "Refused: " }), c.refused.map(function (r) { return r.host + " (" + r.calls + ")"; }).join(", ")));
+      }).catch(function (err) { box.textContent = ""; box.appendChild(h("div", { class: "note bad", text: err.message })); });
+    }
+    // What the recording proxy kept.
+    function trafficView(e, box) {
+      box.textContent = "";
+      var hostF = h("input", { type: "text", placeholder: "host", "aria-label": "Host" });
+      var textF = h("input", { type: "text", placeholder: "text in the URL or a body", "aria-label": "Text" });
+      var list = h("div"), detail = h("div");
+      function load() {
+        list.textContent = ""; list.appendChild(h("p", { class: "muted small", text: "Loading..." }));
+        api("/api/engagements/" + e.id + "/traffic" + q({ host: hostF.value.trim() || null, q: textF.value.trim() || null })).then(function (r) {
+          list.textContent = "";
+          if (!r.exchanges.length) { list.appendChild(h("p", { class: "muted", text: r.record ? "Nothing recorded yet." : "This engagement does not record traffic." })); return; }
+          var tb = h("tbody");
+          r.exchanges.forEach(function (x) {
+            tb.appendChild(h("tr", { class: "click", onclick: function () { show(x.id); } },
+              h("td", { class: "small", text: new Date(x.ts).toLocaleString() }),
+              h("td", null, h("span", { class: "pill " + (x.status >= 500 || !x.status ? "bad" : x.status >= 400 ? "warn" : "ok"), text: x.status ? String(x.status) : "error" })),
+              h("td", { class: "mono small", text: x.method + " " + x.url + (x.replay_of ? "  (replay of " + x.replay_of + ")" : "") }),
+              h("td", { class: "small muted", text: x.id })));
+          });
+          list.appendChild(h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["When", "Status", "Request", "Exchange"].map(function (t) { return h("th", { text: t }); }))), tb)));
+        }).catch(function (err) { list.textContent = ""; list.appendChild(h("div", { class: "note bad", text: err.message })); });
+      }
+      function side(title, x) {
+        return h("div", { class: "card" }, h("h4", { text: title + (x.status ? " " + x.status : "") }),
+          h("pre", { class: "view small", text: (x.headers || []).map(function (kv) { return kv[0] + ": " + kv[1]; }).join("\n") }),
+          x.body_len ? h("pre", { class: "view small", text: (x.body_preview || "") + (x.body_preview_truncated || x.body_truncated ? "\n... (cut)" : "") }) : h("p", { class: "muted small", text: "No body." }),
+          x.body_sha256 ? h("p", { class: "muted small mono", text: "sha256 " + x.body_sha256 + ", " + x.body_len + " bytes" }) : null);
+      }
+      function show(xid) {
+        detail.textContent = "";
+        api("/api/engagements/" + e.id + "/traffic/" + encodeURIComponent(xid)).then(function (x) {
+          detail.appendChild(h("h4", { text: x.method + " " + x.url }));
+          detail.appendChild(h("p", { class: "muted small", text: "Exchange " + x.id + (x.agent ? ", agent " + x.agent : "") + (x.duration_ms != null ? ", " + x.duration_ms + " ms" : "") + ". Cite it in a finding's evidence_traffic; secret headers are hidden here." }));
+          if (x.error) detail.appendChild(h("div", { class: "note bad", text: x.error }));
+          detail.appendChild(side("Request", x.request || {}));
+          if (x.response) detail.appendChild(side("Response", x.response));
+        }).catch(function (err) { toast(err.message, true); });
+      }
+      box.appendChild(h("form", { class: "row", onsubmit: function (ev) { ev.preventDefault(); load(); } }, hostF, textF, h("button", { type: "submit" }, "Search")));
+      box.appendChild(list); box.appendChild(detail);
+      load();
+    }
     function card(e, isOpen) {
       var act = h("div"), aud = h("div");
       var c = h("div", { class: "card engagement" },
-        h("div", { class: "row" }, h("h3", { text: e.name }), h("span", { class: "pill " + (ESTATE[e.state] || ""), text: e.state }), h("span", { class: "muted small", text: "on " + e.machine + ", " + e.rate + " calls/s per host" })),
+        h("div", { class: "row" }, h("h3", { text: e.name }), h("span", { class: "pill " + (ESTATE[e.state] || ""), text: e.state }), h("span", { class: "muted small", text: "on " + e.machine + ", " + e.rate + " calls/s per host" + (e.record ? ", traffic recorded" : "") + (e.budget_usd ? ", budget $" + e.budget_usd : "") })),
         h("p", { class: "small", text: new Date(e.starts * 1000).toLocaleString() + "  to  " + new Date(e.ends * 1000).toLocaleString() }),
         h("div", { class: "chips" }, e.scope.map(function (x) { return h("span", { class: "pill ok", text: x }); }), e.exclude.map(function (x) { return h("span", { class: "pill bad", text: "not " + x }); })),
         h("p", { class: "small muted" }, h("b", { text: "Authorized: " }), e.authorization, " (recorded by " + e.created_by + ")"),
         h("div", { class: "row" },
           e.state === "active" && !viewer && !S.ov.read_only ? h("button", { type: "button", class: "primary", onclick: function () { runForm(e, act); } }, "Run an agent in it") : null,
           !viewer ? h("button", { type: "button", onclick: function () { auditView(e, aud); } }, "Audit log") : null,
+          !viewer ? h("button", { type: "button", title: "Which scope entries its agents reached, and which not yet", onclick: function () { coverageView(e, aud); } }, "Coverage") : null,
+          !viewer && e.record ? h("button", { type: "button", title: "Requests and responses the recording proxy kept", onclick: function () { trafficView(e, aud); } }, "Traffic") : null,
           !viewer ? h("button", { type: "button", title: "Purple team: which of its steps your SIEM alerted on", onclick: function () { detectView(e, aud); } }, "Check detections") : null,
           admin && e.state !== "ended" && !S.ov.read_only ? h("button", { type: "button", class: "danger", onclick: function () {
             ask("End " + e.name + " now?", [], "End now", function () {
@@ -3288,13 +3458,21 @@
           if (!window.confirm("Stop this agent?")) return;
           api("/api/procs/" + last.id + "/stop", { method: "POST" }).then(refresh).catch(function (e) { toast(e.message, true); });
         } }, "Stop") : null;
+        // Steer: read after its next tool call, without waiting for the turn.
+        var steer = last.open && last.status === "running" && last.opts && last.opts.steer ? h("button", { type: "button", title: "The agent reads it after its next tool call, without waiting for its turn to end", onclick: function () {
+          var t = box.value.trim(); if (!t) { toast("Type the message first", true); return; }
+          steer.disabled = true;
+          api("/api/procs/" + last.id + "/steer", { method: "POST", body: { text: t } })
+            .then(function () { box.value = ""; toast("Steered: it reads this after its next tool call"); refresh(); })
+            .catch(function (err) { toast(err.message, true); }).then(function () { steer.disabled = false; });
+        } }, "Steer now") : null;
         var form = h("form", { class: "s-input", "data-nodirty": "", onsubmit: function (e) {
           e.preventDefault(); var t = box.value.trim(); if (!t) return; go.disabled = true;
           var call = last.open ? api("/api/procs/" + last.id + "/message", { method: "POST", body: { text: t } })
             : api("/api/procs/" + last.id + "/pivot", { method: "POST", body: { prompt: t, mode: "continue" } });
           call.then(function (r) { box.value = ""; go.disabled = false; if (r && r.id) location.hash = "#/sessions/" + r.id; else refresh(); })
             .catch(function (err) { toast(err.message, true); go.disabled = false; });
-        } }, box, h("div", { class: "row" }, go, stop, h("a", { class: "small", href: "#/proc/" + last.id, text: "Details" })));
+        } }, box, h("div", { class: "row" }, go, steer, stop, h("a", { class: "small", href: "#/proc/" + last.id, text: "Details" })));
         box.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
         mid.appendChild(form);
       }
@@ -3705,7 +3883,11 @@
         if (!cv.msg.value.trim()) return;
         api("/api/procs/" + id + "/message", { method: "POST", body: { text: cv.msg.value } })
           .then(function () { cv.msg.value = ""; toast("Sent"); refresh(); }).catch(function (e) { toast(e.message, true); });
-      } }, "Send message")), cv.note, modelList());
+      } }, "Send message"), h("button", { type: "button", title: "Read after its next tool call, without waiting for its turn to end (Claude Code agents started here)", onclick: function () {
+        if (!cv.msg.value.trim()) return;
+        api("/api/procs/" + id + "/steer", { method: "POST", body: { text: cv.msg.value } })
+          .then(function () { cv.msg.value = ""; toast("Steered: it reads this after its next tool call"); refresh(); }).catch(function (e) { toast(e.message, true); });
+      } }, "Steer now")), cv.note, modelList());
     var ctlFilled = false, askPanels = {};
     function renderControl(p) {
       var ro = S.ov.read_only;
@@ -4857,6 +5039,11 @@
       { k: "max_budget_usd", label: "Spending limit (US$)", type: "number", step: "0.01", placeholder: "no limit", help: "Claude Code stops its agents once their API calls cost this much (--max-budget-usd). API billing only." },
       { k: "mcp", label: "MCP servers", type: "select", options: [["", "as Claude Code is set up"], ["none", "none: a much smaller context"]], help: "Each MCP server's tools fill the agent's context before it does anything. Choose none for agents that do not need them." },
       { k: "allowed_tools", label: "Always allowed tools", type: "list", help: "One rule per line, e.g. Read, Edit, Bash(git diff:*). These never ask." },
+      { k: "approvals", label: "Bash commands indra decides", type: "approvals" },
+      { k: "fallback", label: "When Anthropic fails (429, 5xx, overloaded), try", type: "rows", noun: "fallback", fields: [
+        { k: "url", label: "Where", req: true, placeholder: "ollama, or https://gateway.example.com", help: "ollama: this machine's Ollama (or the server above). A URL: any Anthropic-compatible endpoint." },
+        { k: "model", label: "Model", placeholder: "qwen3-coder", help: "Requests are rewritten to this model. Required for Ollama." },
+        { k: "api_key_env", label: "Its key, from this environment variable", placeholder: "GW_KEY", help: "Set it in Environment as GW_KEY=secret:<name>. The agent's own login never goes to a fallback." }] },
       { k: "disallowed_tools", label: "Never allowed tools", type: "list", help: "One rule per line, e.g. Bash(rm:*), WebFetch." },
       { k: "env", label: "Environment", type: "kv", help: "KEY=value per line, e.g. CLAUDE_CODE_MAX_OUTPUT_TOKENS=8000. For Ollama, use Runs on above instead of setting ANTHROPIC_BASE_URL here. For a token, write KEY=secret:<name> and set it in the Secrets tab: the value never goes in indra.toml." },
       { k: "subagent_model", label: "Model for its subagents", list: "models", placeholder: "same as the agent", help: "Claude Code only (CLAUDE_CODE_SUBAGENT_MODEL): e.g. haiku, so an Opus agent hands its Task subagents to a cheaper model." },
@@ -4973,6 +5160,16 @@
       get = function () { return el.value || undefined; };
     } else if (f.type === "rows") {
       return rowsControl(f, val || []);
+    } else if (f.type === "approvals") {
+      // { allow: [["git", "status"]], deny: [...] }: one command prefix per line.
+      var lines = function (rs) { return (rs || []).map(function (r) { return r.join(" "); }).join("\n"); };
+      var parse = function (t) { return t.value.split("\n").map(function (x) { return x.trim().split(/\s+/).filter(Boolean); }).filter(function (r) { return r.length; }); };
+      var allow = h("textarea", { class: "list", rows: "3", placeholder: "git status\ncargo test" }), deny = h("textarea", { class: "list", rows: "3", placeholder: "git push\nrm -rf" });
+      allow.value = lines((val || {}).allow); deny.value = lines((val || {}).deny);
+      return { el: h("div", { class: "fields" },
+        h("label", null, h("span", { text: "Allow commands" }), h("small", { text: "One command's first words per line. Allowed without asking only when the whole request is that one plain command: no pipe, list, redirection, wrapper, $(...) or glob." }), allow),
+        h("label", null, h("span", { text: "Deny commands" }), h("small", { text: "Refused anywhere they appear: in a list or pipeline, behind sudo, env or sh -c, inside $(...). Deny wins." }), deny)),
+        get: function () { var a = parse(allow), d = parse(deny); return a.length || d.length ? { allow: a, deny: d } : undefined; } };
     } else if (f.type === "kv") {
       el = h("textarea", { class: "list", rows: "3", placeholder: ph || "KEY=value" });
       el.value = Object.keys(val || {}).map(function (k) { return k + "=" + val[k]; }).join("\n");

@@ -211,6 +211,21 @@
       "type": "string",
       "description": "The exact code snippet(s) supporting the finding, with file:line anchors."
     },
+    "evidence_traffic": {
+      "type": "array",
+      "description": "Recorded HTTP exchanges that prove the finding, from an engagement's recording proxy (live tests only). IDs come from `indra traffic list`, never guessed. `indra traffic verify <file>` checks every citation; a finding is evidence-verified only when all hold and one `proof` carries a quote found verbatim in its exchange.",
+      "items": {
+        "type": "object",
+        "required": ["engagement", "exchange"],
+        "properties": {
+          "engagement": { "type": "string", "description": "The engagement id that recorded it." },
+          "exchange": { "type": "string", "description": "The exchange id, `<unix ms>-<n>`." },
+          "role": { "type": "string", "enum": ["baseline", "proof", "verification", "supporting"], "description": "baseline: normal behaviour; proof: the vulnerability; verification: more confirmation; supporting (the default)." },
+          "quote": { "type": "string", "description": "Text that appears verbatim in the exchange's response (or request), showing the impact." },
+          "sha256": { "type": "string", "description": "The SHA-256 of the cited response body, from `indra traffic show`." }
+        }
+      }
+    },
     "pre_existing": {
       "type": "boolean",
       "description": "True if the issue exists in code not changed by the reviewed diff (whole-repo scans set false/omit)."

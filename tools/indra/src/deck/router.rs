@@ -40,6 +40,95 @@ pub struct Route {
     pub local: Vec<String>,
     pub anthropic: String,
     pub all_local: bool,
+    /// Where a request goes, in order, when the Anthropic leg fails
+    /// (unreachable, 429, 5xx, 529 overloaded).
+    pub fallbacks: Vec<Upstream>,
+}
+
+/// A fallback upstream, resolved: its base URL, the model requests are
+/// rewritten to, and the key it gets instead of the agent's (none for
+/// Ollama). The agent's own credentials never go to a fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Upstream {
+    pub base: String,
+    pub model: Option<String>,
+    pub key: Option<String>,
+}
+
+/// A fallback as a profile names it: `{ url = "ollama", model =
+/// "qwen3-coder" }` (this machine's Ollama) or `{ url =
+/// "https://gw.example.com", model = "...", api_key_env = "GW_KEY" }` (an
+/// Anthropic-compatible endpoint, its key from the agent's environment).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fallback {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+impl Fallback {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.url != "ollama" {
+            check_url(&self.url).map_err(|e| format!("fallback: {}", e))?;
+            if self.url.starts_with("http://")
+                && !(self.url.starts_with("http://127.0.0.1")
+                    || self.url.starts_with("http://localhost")
+                    || self.url.starts_with("http://[::1]"))
+                && self.api_key_env.is_some()
+            {
+                return Err("fallback: a key is only sent over https (or to this machine)".into());
+            }
+        } else if self.model.is_none() {
+            return Err(
+                "fallback: name the Ollama model it runs on (model = \"qwen3-coder\")".into(),
+            );
+        }
+        if let Some(m) = &self.model {
+            if m.is_empty()
+                || m.len() > 128
+                || !m
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._:/-[]".contains(c))
+            {
+                return Err(format!("fallback: invalid model {:?}", m));
+            }
+        }
+        if let Some(k) = &self.api_key_env {
+            if k.is_empty()
+                || k.len() > 128
+                || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(format!(
+                    "fallback: invalid environment variable name {:?}",
+                    k
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether a response (or a failure to get one) sends a request on to the
+/// next fallback.
+fn retryable(r: &Result<Response<Body>, String>) -> bool {
+    match r {
+        Err(_) => true,
+        Ok(r) => matches!(r.status().as_u16(), 429 | 500 | 502 | 503 | 504 | 529),
+    }
+}
+
+/// `body` with its `model` set to `m`, when it is a JSON object with one.
+fn with_model(body: &Bytes, m: &str) -> Bytes {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(mut v) if v.get("model").is_some() => {
+            v["model"] = json!(m);
+            Bytes::from(v.to_string())
+        }
+        _ => body.clone(),
+    }
 }
 
 #[derive(Default)]
@@ -47,6 +136,7 @@ struct Counts {
     ollama: AtomicU64,
     anthropic: AtomicU64,
     failed: AtomicU64,
+    fallback: AtomicU64,
 }
 
 struct Shared {
@@ -76,12 +166,17 @@ pub fn check_url(u: &str) -> Result<(), String> {
 /// The base URL an agent should use for `route`: this process's router,
 /// started on first use on a thread of its own.
 pub fn register(route: Route) -> Result<String, String> {
-    check_url(&route.ollama)?;
+    if route.all_local || !route.local.is_empty() || !route.ollama.is_empty() {
+        check_url(&route.ollama)?;
+    }
     if !route.all_local {
         check_url(&route.anthropic)?;
     }
-    if route.local.is_empty() && !route.all_local {
+    if route.local.is_empty() && !route.all_local && route.fallbacks.is_empty() {
         return Err("name the model the subagents run on".into());
+    }
+    for f in &route.fallbacks {
+        check_url(&f.base)?;
     }
     let shared = match ROUTER.get() {
         Some(s) => s.clone(),
@@ -156,6 +251,8 @@ pub fn stats() -> Vec<Value> {
                 "to_ollama": c.ollama.load(Ordering::Relaxed),
                 "to_anthropic": c.anthropic.load(Ordering::Relaxed),
                 "failed": c.failed.load(Ordering::Relaxed),
+                "fallbacks": r.fallbacks.iter().map(|f| f.base.clone()).collect::<Vec<_>>(),
+                "to_fallback": c.fallback.load(Ordering::Relaxed),
             })
         })
         .collect()
@@ -206,16 +303,38 @@ async fn proxy(
         Some(q) => format!("{}?{}", rest, q),
         None => rest,
     };
-    match forward(
+    let mut r = forward(
         base,
         parts.method.as_str(),
         &path,
         &parts.headers,
-        body,
+        body.clone(),
         local,
     )
-    .await
-    {
+    .await;
+    // The Anthropic leg failed: the fallbacks, in order, each with its own
+    // key (never the agent's) and model.
+    if !local && retryable(&r) {
+        for f in &route.fallbacks {
+            let mut headers = parts.headers.clone();
+            headers.remove("authorization");
+            headers.remove("x-api-key");
+            if let Some(k) = f.key.as_deref().and_then(|k| HeaderValue::from_str(k).ok()) {
+                headers.insert("x-api-key", k);
+            }
+            let b = match &f.model {
+                Some(m) => with_model(&body, m),
+                None => body.clone(),
+            };
+            counts.fallback.fetch_add(1, Ordering::Relaxed);
+            // The agent's credentials were taken off above; this key stays.
+            r = forward(&f.base, parts.method.as_str(), &path, &headers, b, false).await;
+            if !retryable(&r) {
+                break;
+            }
+        }
+    }
+    match r {
         Ok(r) => r,
         Err(e) => {
             counts.failed.fetch_add(1, Ordering::Relaxed);
@@ -237,7 +356,7 @@ const HOP: [&str; 9] = [
     "upgrade",
 ];
 
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 /// One request to `base` + `path`, and its response, streamed.
@@ -304,7 +423,7 @@ pub async fn forward(
 
 /// Whether `host` skips the proxy, by `NO_PROXY` (exact, `.suffix`,
 /// `*.suffix` or `*`). CIDR entries are not interpreted.
-fn no_proxy(host: &str) -> bool {
+pub(crate) fn no_proxy(host: &str) -> bool {
     let list = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default();
@@ -348,7 +467,7 @@ async fn connect(host: &str, port: u16, https: bool) -> Result<Box<dyn Io>, Stri
 }
 
 /// An HTTP CONNECT tunnel through `proxy` (http://[user:pass@]host:port).
-async fn tunnel(proxy: &str, host: &str, port: u16) -> Result<TcpStream, String> {
+pub(crate) async fn tunnel(proxy: &str, host: &str, port: u16) -> Result<TcpStream, String> {
     let u: Uri = proxy.parse().map_err(|_| "bad HTTPS_PROXY".to_string())?;
     let auth = u.authority().ok_or("bad HTTPS_PROXY")?;
     let (creds, hostport) = match auth.as_str().rsplit_once('@') {
@@ -393,7 +512,7 @@ async fn tunnel(proxy: &str, host: &str, port: u16) -> Result<TcpStream, String>
     Ok(s)
 }
 
-fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
+pub(crate) fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
     static CFG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
     CFG.get_or_init(|| {
         use rustls_pki_types::pem::PemObject;
@@ -522,6 +641,7 @@ mod tests {
             local: vec!["qwen3-coder".into()],
             anthropic: format!("{}/gateway", anthropic),
             all_local: false,
+            fallbacks: vec![],
         };
         let base = register(route.clone()).unwrap();
         assert!(base.starts_with("http://127.0.0.1:"));
@@ -593,6 +713,89 @@ mod tests {
         assert_eq!(o.len(), 3);
         assert_eq!(o[2]["auth"], "");
         assert_eq!(o[2]["key"], "");
+    }
+
+    #[tokio::test]
+    async fn falls_back_without_the_agents_credentials() {
+        // A primary that is overloaded (529), then a gateway and Ollama.
+        let app = axum::Router::new().fallback(|| async {
+            Response::builder()
+                .status(529)
+                .body(Body::from("{\"type\":\"error\"}"))
+                .unwrap()
+        });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let (gw, g_seen) = upstream("gateway").await;
+        let base = register(Route {
+            anthropic: busy.clone(),
+            fallbacks: vec![
+                Upstream {
+                    base: "http://127.0.0.1:9".into(),
+                    model: None,
+                    key: None,
+                },
+                Upstream {
+                    base: gw.clone(),
+                    model: Some("glm-4.6".into()),
+                    key: Some("gw-key".into()),
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let (st, body) = post(
+            &base,
+            "v1/messages",
+            json!({ "model": "claude-opus-4-1", "stream": true }),
+        )
+        .await;
+        assert_eq!(st, 200);
+        assert!(body.contains("gateway"), "{}", body);
+        let g = g_seen.lock().unwrap().clone();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0]["key"], "gw-key", "the fallback's own key");
+        assert_eq!(g[0]["auth"], "", "never the agent's login");
+        assert!(g[0]["body"].as_str().unwrap().contains("\"glm-4.6\""));
+        assert!(stats().iter().any(|s| s["to_fallback"] == 2));
+        // A request that succeeds on the primary never reaches a fallback.
+        let (ok, a_seen) = upstream("anthropic").await;
+        let base = register(Route {
+            anthropic: ok,
+            fallbacks: vec![Upstream {
+                base: gw.clone(),
+                model: None,
+                key: None,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let (_, body) = post(&base, "v1/messages", json!({ "model": "claude-x" })).await;
+        assert!(body.contains("anthropic"));
+        assert_eq!(a_seen.lock().unwrap().len(), 1);
+        assert_eq!(g_seen.lock().unwrap().len(), 1);
+        // Profiles' fallbacks are checked.
+        assert!(Fallback {
+            url: "ollama".into(),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(Fallback {
+            url: "http://gw.example".into(),
+            api_key_env: Some("K".into()),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(Fallback {
+            url: "https://gw.example".into(),
+            api_key_env: Some("GW_KEY".into()),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
     }
 
     #[tokio::test]

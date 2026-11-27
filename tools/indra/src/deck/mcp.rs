@@ -591,6 +591,10 @@ pub fn handle(opts: &LoadOptions, msg: &Value) -> Option<Value> {
             let name = msg["params"]["name"].as_str().unwrap_or("");
             let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
             let (text, is_error) = match call(opts, name, &args) {
+                // Workflow files can come from any repository: framed as data.
+                Ok(t) if name == "get_workflow" || name == "list_workflows" => {
+                    (crate::deck::untrusted::frame(name, &t), false)
+                }
                 Ok(t) => (t, false),
                 Err(e) => (e, true),
             };
