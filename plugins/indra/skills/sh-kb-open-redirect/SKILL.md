@@ -25,7 +25,9 @@ Login/logout `?next=`/`?return_to=`/`?redirect=`/`?url=` params, post-action red
 ## Detection recipe
 1. `graft grep "redirect\(|sendRedirect|HttpResponseRedirect|Location:|location.(href|assign)" --json`.
 2. Trace the redirect target to user input.
-3. Check for a validity check: is the target constrained to a relative path or an allowlisted host? Naive
+3. Check that the code redirects to the *validated/parsed* value, not the original raw input, and (PHP)
+   that execution stops after `header("Location: ...")` (`exit`/`die`), else the page body still runs.
+4. Check for a validity check: is the target constrained to a relative path or an allowlisted host? Naive
    checks (`startswith("/")`, `contains("mysite.com")`) are often bypassable.
 
 ## Payloads / PoC
@@ -39,6 +41,7 @@ Login/logout `?next=`/`?return_to=`/`?redirect=`/`?url=` params, post-action red
 - Target is forced relative (leading single `/` **and** not `//`/`/\`) after normalization, or resolved
   against the app origin and re-checked.
 - Destination validated against a strict host allowlist (exact host match, not substring/`endsWith`).
+- Framework local-only helper used (ASP.NET Core `LocalRedirect`/`Url.IsLocalUrl`, rejecting non-local).
 - Redirect target is server-chosen (not user input) or an opaque id mapped to a known URL.
 
 ## CWE / OWASP / severity
@@ -54,3 +57,7 @@ phishing credibility. Frequently the first hop in takeover chains.
 Avoid user-controlled redirect targets; if needed, allowlist exact destination hosts or force
 same-origin/relative paths (reject `//`, `/\`, absolute URLs, and non-http schemes) after canonicalization;
 for OAuth, exact-match `redirect_uri` against pre-registered values; show an interstitial for external links.
+Prefer mapping an opaque id/token to a server-side URL (guard against id enumeration). Compare parsed
+components (scheme, canonical host, effective port, constrained path) rather than prefix/suffix/substring
+of the raw string, and reject ambiguous input such as userinfo (`user@host`). For forwards, re-check the
+user's authorization for the target page.
