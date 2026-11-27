@@ -34,6 +34,13 @@ State-changing route handlers (`POST`/`PUT`/`PATCH`/`DELETE`, or `GET` that muta
 - For JSON endpoints that accept `text/plain` or don't check content-type: a form with
   `enctype="text/plain"` crafting a JSON-ish body.
 - GET-based state change: `<img src="https://target/delete?id=5">`.
+- SameSite=Lax gaps: a state-changing GET via top-level navigation; a framework method override
+  (`_method=POST`, `X-HTTP-Method-Override`) that turns a GET into a mutation; cookies that Lax-by-default
+  browsers still send on cross-site top-level POST for ~2 minutes after being set.
+- Naive double-submit: attacker who can set a cookie (sibling subdomain, subdomain takeover, plain HTTP)
+  plants a matching token cookie + form field.
+- Client-side CSRF: attacker-controlled input (URL fragment/query) selects the path or method of a `fetch`
+  the page sends with the victim's cookies.
 - PoC = the victim, while logged in, loads the attacker page and the state change occurs.
 
 ## False-positive filters
@@ -41,7 +48,11 @@ State-changing route handlers (`POST`/`PUT`/`PATCH`/`DELETE`, or `GET` that muta
 - `SameSite=Lax` (default in modern browsers) or `Strict` on the session cookie - mitigates most CSRF;
   note residual risk for top-level GET navigations under Lax.
 - Auth is a header token the browser won't auto-attach cross-site (Bearer), not a cookie.
-- Endpoint requires a custom header (forces CORS preflight) and CORS is not permissive.
+- Endpoint requires a custom header (forces CORS preflight) and CORS is not permissive (exact-origin
+  allowlist; a regex allowing every subdomain, `Origin: null`, or `*` with credentials voids this).
+- Server rejects cross-site non-safe requests via `Sec-Fetch-Site` (fail closed when the header is absent on
+  sensitive routes), or checks the full `Origin`/`Referer` origin (not a substring match).
+- A CAPTCHA is not a CSRF control; do not treat it as mitigating.
 
 ## CWE / OWASP / severity
 CWE-352. OWASP A01:2021. Severity by action impact: account/email/password change or money transfer ->
@@ -54,4 +65,7 @@ attacker OAuth/app -> persistence; often combined with `access-control` to hit p
 ## Mitigation
 Enable framework CSRF protection on all state-changing routes (don't blanket-exempt); require a
 synchronizer or double-submit token; set session cookies `SameSite=Lax`/`Strict` + `Secure`; prefer
-non-ambient auth for APIs; require a custom header for JSON APIs and lock down CORS.
+non-ambient auth for APIs; require a custom header for JSON APIs and lock down CORS. Prefer signed
+double-submit (HMAC bound to the session) over naive double-submit; use `__Host-` cookie prefixes; add
+Fetch Metadata (`Sec-Fetch-Site`) filtering as defense in depth; never mutate state on GET; re-create the
+session at login (also covers login CSRF). Any XSS defeats all of these.
